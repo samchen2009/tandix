@@ -13,6 +13,10 @@ import type { TabAffinityDecision, TabAffinityState } from '../background/tab-af
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
 import { parsePageSelection, type PageSelection } from '../selection.ts'
 import { getUiLocale } from '../i18n.ts'
+import { agentBackend, type AgentBackend } from '../agent-backend.ts'
+import type { TeachState } from '../recording/state-machine.ts'
+import type { RecordingEventInput } from '../recording/schema.ts'
+import type { RecordingExport } from '../background/recording-service.ts'
 
 /** Panel-side subset of the extension settings. */
 export type PanelSettings = Settings
@@ -50,6 +54,7 @@ interface StatusMessage {
   type: 'status'
   state: BridgeState
   caps: BridgeCaps | null
+  backend?: AgentBackend
 }
 
 interface EventMessage {
@@ -89,7 +94,26 @@ interface SessionResumeHintMessage {
   sessionId: string | null
 }
 
-type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | SelectionMessage | SessionResumeHintMessage
+interface RecordingStateMessage {
+  type: 'recording.state'
+  state: TeachState
+}
+
+interface RecordingEventMessage {
+  type: 'recording.event'
+  recordingId: string
+  event: RecordingEventInput
+}
+
+interface RecordingResultMessage {
+  type: 'recording.result'
+  id: string
+  ok: boolean
+  result?: unknown
+  error?: { message?: unknown }
+}
+
+type BackgroundMessage = RpcResultMessage | RespondResultMessage | SettingsResultMessage | StatusMessage | EventMessage | ApprovalRequestMessage | ApprovalResolvedMessage | TabAffinityMessage | TabAffinityRebindResultMessage | SelectionMessage | SessionResumeHintMessage | RecordingStateMessage | RecordingEventMessage | RecordingResultMessage
 
 /** Structured gateway failure retained for product-level error handling. */
 export class PanelRpcError extends Error {
@@ -115,23 +139,29 @@ function panelRpcError(failure: RpcFailurePayload | undefined, fallbackMessage: 
 export interface PanelApi {
   rpc<T = unknown>(method: string, payload?: unknown): Promise<T>
   respond(rpcId: string, result: RespondResult): Promise<unknown>
-  onStatus(callback: (state: BridgeState, caps: BridgeCaps | null) => void): () => void
+  onStatus(callback: (state: BridgeState, caps: BridgeCaps | null, backend: AgentBackend) => void): () => void
   onEvent(callback: (frame: ServerFrame) => void): () => void
   onApprovalRequest(callback: (request: ApprovalRequest) => void): () => void
   onApprovalResolved(callback: (id: string) => void): () => void
   onTabAffinity(callback: (state: TabAffinityState) => void): () => void
   onSelection(callback: (selection: PageSelection | null) => void): () => void
   onSessionResumeHint(callback: (sessionId: string | null) => void): () => void
+  onRecordingState(callback: (state: TeachState) => void): () => void
+  onRecordingEvent(callback: (recordingId: string, event: RecordingEventInput) => void): () => void
   respondToApproval(id: string, decision: ApprovalDecision): Promise<void>
   resolveTabAffinity(revision: number, decision: TabAffinityDecision, sessionId: string | null): Promise<void>
-  rebindTabAffinity(): Promise<void>
+  rebindTabAffinity(sessionId?: string): Promise<void>
   /** Clear all selection state, or only the exact selection supplied. */
   clearSelection(selection?: PageSelection): Promise<void>
   /** Scope this panel's selections to its own browser window. */
   registerWindow(windowId: number): Promise<void>
   setActiveSession(sessionId: string, isNew?: boolean): Promise<void>
-  updateSettings(settings: Partial<PanelSettings>): Promise<void>
+  updateSettings(settings: Partial<PanelSettings>, forceReconnect?: boolean): Promise<void>
   requestStatus(): Promise<void>
+  getRecordingState(): Promise<TeachState>
+  startRecording(): Promise<TeachState>
+  stopRecording(): Promise<TeachState>
+  exportRecording(recordingId: string | undefined, format: 'json' | 'jsonl'): Promise<RecordingExport>
 }
 
 /** Connect to the background service worker and return the panel API. */
@@ -150,13 +180,19 @@ export function connectPanel(): PanelApi {
     resolve: () => void
     reject: (error: Error) => void
   }>()
-  const statusListeners = new Set<(state: BridgeState, caps: BridgeCaps | null) => void>()
+  const pendingRecordings = new Map<string, {
+    resolve: (value: unknown) => void
+    reject: (error: Error) => void
+  }>()
+  const statusListeners = new Set<(state: BridgeState, caps: BridgeCaps | null, backend: AgentBackend) => void>()
   const eventListeners = new Set<(frame: ServerFrame) => void>()
   const approvalListeners = new Set<(request: ApprovalRequest) => void>()
   const approvalResolvedListeners = new Set<(id: string) => void>()
   const tabAffinityListeners = new Set<(state: TabAffinityState) => void>()
   const selectionListeners = new Set<(selection: PageSelection | null) => void>()
   const sessionResumeHintListeners = new Set<(sessionId: string | null) => void>()
+  const recordingStateListeners = new Set<(state: TeachState) => void>()
+  const recordingEventListeners = new Set<(recordingId: string, event: RecordingEventInput) => void>()
 
   let port: chrome.runtime.Port | null = null
   let reconnectPromise: Promise<chrome.runtime.Port> | null = null
@@ -202,7 +238,7 @@ export function connectPanel(): PanelApi {
         break
       }
       case 'status':
-        for (const listener of statusListeners) listener(msg.state, msg.caps)
+        for (const listener of statusListeners) listener(msg.state, msg.caps, agentBackend(msg.backend))
         break
       case 'event':
         for (const listener of eventListeners) listener(msg.frame)
@@ -234,6 +270,22 @@ export function connectPanel(): PanelApi {
       case 'session.resume-hint':
         for (const listener of sessionResumeHintListeners) listener(msg.sessionId)
         break
+      case 'recording.state':
+        for (const listener of recordingStateListeners) listener(msg.state)
+        break
+      case 'recording.event':
+        for (const listener of recordingEventListeners) listener(msg.recordingId, msg.event)
+        break
+      case 'recording.result': {
+        const entry = pendingRecordings.get(msg.id)
+        if (entry === undefined) return
+        pendingRecordings.delete(msg.id)
+        if (msg.ok) entry.resolve(msg.result)
+        else entry.reject(new Error(typeof msg.error?.message === 'string'
+          ? msg.error.message
+          : (getUiLocale() === 'zh' ? '录制操作失败' : 'Recording operation failed')))
+        break
+      }
     }
   }
 
@@ -242,7 +294,7 @@ export function connectPanel(): PanelApi {
     return cause instanceof Error ? cause : new Error(fallback)
   }
 
-  function failAll(error: Error, preserve?: { kind: 'rpc' | 'respond' | 'rebind' | 'settings'; id: string }): void {
+  function failAll(error: Error, preserve?: { kind: 'rpc' | 'respond' | 'rebind' | 'settings' | 'recording'; id: string }): void {
     for (const [id, entry] of pending) {
       if (preserve?.kind === 'rpc' && preserve.id === id) continue
       entry.reject(error)
@@ -263,6 +315,11 @@ export function connectPanel(): PanelApi {
       if (preserve?.kind === 'settings' && preserve.id === id) continue
       entry.reject(error)
       pendingSettings.delete(id)
+    }
+    for (const [id, entry] of pendingRecordings) {
+      if (preserve?.kind === 'recording' && preserve.id === id) continue
+      entry.reject(error)
+      pendingRecordings.delete(id)
     }
   }
 
@@ -298,7 +355,7 @@ export function connectPanel(): PanelApi {
   function invalidate(
     stale: chrome.runtime.Port,
     error: Error,
-    preserve?: { kind: 'rpc' | 'respond' | 'rebind' | 'settings'; id: string },
+    preserve?: { kind: 'rpc' | 'respond' | 'rebind' | 'settings' | 'recording'; id: string },
   ): void {
     if (port !== stale) return
     port = null
@@ -313,7 +370,7 @@ export function connectPanel(): PanelApi {
    */
   function send(
     message: unknown,
-    preserve?: { kind: 'rpc' | 'respond' | 'rebind' | 'settings'; id: string },
+    preserve?: { kind: 'rpc' | 'respond' | 'rebind' | 'settings' | 'recording'; id: string },
   ): Promise<void> {
     const current = port
     if (current !== null) {
@@ -406,19 +463,27 @@ export function connectPanel(): PanelApi {
       sessionResumeHintListeners.add(callback)
       return () => { sessionResumeHintListeners.delete(callback) }
     },
+    onRecordingState(callback) {
+      recordingStateListeners.add(callback)
+      return () => { recordingStateListeners.delete(callback) }
+    },
+    onRecordingEvent(callback) {
+      recordingEventListeners.add(callback)
+      return () => { recordingEventListeners.delete(callback) }
+    },
     respondToApproval(id, decision) {
       return send({ type: 'approval.response', id, decision })
     },
     resolveTabAffinity(revision, decision, sessionId) {
       return send({ type: 'tab-affinity.response', revision, decision, sessionId })
     },
-    rebindTabAffinity() {
+    rebindTabAffinity(sessionId) {
       const id = crypto.randomUUID()
       return new Promise<void>((resolve, reject) => {
         const entry = { resolve, reject }
         pendingRebinds.set(id, entry)
         void send(
-          { type: 'tab-affinity.rebind', id },
+          { type: 'tab-affinity.rebind', id, ...(sessionId === undefined ? {} : { sessionId }) },
           { kind: 'rebind', id },
         ).catch((cause: unknown) => {
           if (pendingRebinds.get(id) !== entry) return
@@ -436,13 +501,13 @@ export function connectPanel(): PanelApi {
     setActiveSession(sessionId, isNew) {
       return send({ type: 'session.active', sessionId, isNew })
     },
-    updateSettings(next) {
+    updateSettings(next, forceReconnect = false) {
       const id = crypto.randomUUID()
       return new Promise<void>((resolve, reject) => {
         const entry = { resolve, reject }
         pendingSettings.set(id, entry)
         void send(
-          { type: 'settings', id, settings: next },
+          { type: 'settings', id, settings: next, forceReconnect },
           { kind: 'settings', id },
         ).catch((cause: unknown) => {
           if (pendingSettings.get(id) !== entry) return
@@ -454,5 +519,30 @@ export function connectPanel(): PanelApi {
     requestStatus() {
       return send({ type: 'request-status' })
     },
+    getRecordingState() {
+      return recordingRequest<TeachState>('recording.get-state')
+    },
+    startRecording() {
+      return recordingRequest<TeachState>('recording.start')
+    },
+    stopRecording() {
+      return recordingRequest<TeachState>('recording.stop')
+    },
+    exportRecording(recordingId, format) {
+      return recordingRequest<RecordingExport>('recording.export', { recordingId, format })
+    },
+  }
+
+  function recordingRequest<T>(type: string, payload: Record<string, unknown> = {}): Promise<T> {
+    const id = crypto.randomUUID()
+    return new Promise<T>((resolve, reject) => {
+      const entry = { resolve: (value: unknown) => resolve(value as T), reject }
+      pendingRecordings.set(id, entry)
+      void send({ type, id, ...payload }, { kind: 'recording', id }).catch((cause: unknown) => {
+        if (pendingRecordings.get(id) !== entry) return
+        pendingRecordings.delete(id)
+        reject(connectionError(cause))
+      })
+    })
   }
 }

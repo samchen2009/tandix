@@ -25,14 +25,12 @@ import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRegistry from '@deepseek-ai/dsh-tools'
-import LlmService, { createUserMessage, type GenerateOptions, type UserMessage } from '@deepseek-ai/dsh-llm'
+import LlmService, { createUserMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
-import { createSessionFormatV3ToV4 } from '@deepseek-ai/dsh-session-format-v3-to-v4'
 import UserQuestionService from '@deepseek-ai/dsh-user-questions'
 import * as BridgeBrowser from '../src/index.ts'
 import { BRIDGE_INJECT_BROWSER_SNAPSHOT_METHOD, BRIDGE_PATH, type BridgeFrame } from '../src/protocol.ts'
-import { BROWSER_CONTEXT_KIND } from '../src/browser-context.ts'
 
 const BRIDGE = '@yuxianglin/dsh-bridge-browser'
 const TOKEN = 'abcdabcdabcdabcdabcdabcdabcdabcd'
@@ -229,7 +227,7 @@ async function connectReady(port: number): Promise<Awaited<ReturnType<typeof con
 }
 
 describe('real Loader composition', () => {
-  it.each(['native', 'migrated'] as const)('supersedes a %s followed page through the durable inbox without waking an idle Agent', async (snapshotKind) => {
+  it('delivers only the latest followed page through the durable inbox without waking an idle Agent', async () => {
     const { ctx, port } = await loadComposition()
     const client = await connectReady(port)
     const sessionId = SessionId('followed-page-lifecycle')
@@ -251,45 +249,12 @@ describe('real Loader composition', () => {
     }
 
     // This snapshot arrives before async creation publishes the Agent. The
-    // bridge's real agent/created listener must flush it into the new inbox.
+    // bridge's real session-start listener must flush it into the new inbox.
     await followPage('before-create', 'Page: provisional tab')
     const agent = await ctx.agentLoop.create(sessionId, { provider: 'test', model: 'test' })
     expect(ctx.agents.get(sessionId)).toBe(agent)
     expect(agent.inbox.nextStep).toHaveLength(1)
     expect(agent.inbox.nextStep[0]?.content).toContainEqual({ type: 'text', text: expect.stringContaining('provisional tab') })
-
-    if (snapshotKind === 'migrated') {
-      // Exercise the published V3-to-V4 conversion of a durable pending
-      // snapshot under the 0.2 browser-context producer kind.
-      const snapshot = agent.inbox.nextStep[0]!
-      const queued = agent.session.snapshotEvents().find(event => event.type === 'agent/inbox/spliced')!
-      const migration = createSessionFormatV3ToV4([])
-      const sourceHeader = { ...agent.session.header, version: 3, delegationDepth: 0 }
-      const stage = migration.createStage({
-        sourceHeader,
-        targetHeader: migration.migrateHeader(sourceHeader),
-        sourceInheritedEventCount: 0,
-        sourceKind: 'decoded',
-      })
-      const restored: UserMessage[] = []
-      const output = {
-        emitEvent(event: Parameters<typeof stage.transformEvent>[0]): void {
-          restored.push(...(event.data as unknown as { inserted: UserMessage[] }).inserted)
-        },
-        emitRun(): never { throw new Error('unexpected compact run') },
-      }
-      stage.transformEvent({
-        ...queued,
-        seq: 0,
-        data: { ...queued.data, inserted: [{ ...snapshot, source: { ...snapshot.source, kind: BROWSER_CONTEXT_KIND } }] },
-      }, output)
-      stage.finish(output)
-      expect(restored).toHaveLength(1)
-      expect(restored[0]!.source.kind).toBe(BROWSER_CONTEXT_KIND)
-      expect(restored[0]!.source).not.toHaveProperty('plugin')
-      agent.inbox.remove(snapshot.id)
-      agent.inbox.append('next-step', restored[0]!)
-    }
 
     const steering = createUserMessage({
       content: [{ type: 'text', text: 'Keep my page selection.' }], source: { kind: 'human' },
@@ -326,8 +291,10 @@ describe('real Loader composition', () => {
 
     const browserPrompt = (await ctx.systemPrompt.assemble()).sections
       .find((section) => section.name === 'tool:bridge-browser')?.text
-    expect(browserPrompt).toContain('page content you have not snapshotted')
-    expect(browserPrompt).toContain('Reuse that injected snapshot')
+    expect(browserPrompt).toContain('Choose tools from the user\'s objective and current evidence')
+    expect(browserPrompt).toContain('read a current injected handoff snapshot or call browser_snapshot')
+    expect(browserPrompt).toContain('tell Tandix precisely what is missing')
+    expect(browserPrompt).toContain('A failed tool call or the end of a turn does not itself complete an active Goal')
     expect(browserPrompt).not.toMatch(/\p{Script=Han}/u)
 
     // Zero-config discovery endpoint answers with the bridge WebSocket URL.

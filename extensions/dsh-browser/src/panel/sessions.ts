@@ -1,4 +1,4 @@
-import type { PendingQuestion, ResolvedQuestion, SessionEventView } from './events.ts'
+import { rowFromEvent, type PendingQuestion, type ResolvedQuestion, type SessionEventView } from './events.ts'
 import { removePendingQuestion, upsertPendingQuestion } from './pending-questions.ts'
 
 /** Minimal session.list row needed by the side-panel picker. */
@@ -9,6 +9,7 @@ export interface SessionPickerEntry {
   blank: boolean
   cwd?: string
   origin?: 'subagent'
+  contentTitle?: string
   projections?: {
     asOfSeq: number
     values: Record<string, unknown>
@@ -18,6 +19,7 @@ export interface SessionPickerEntry {
 /** Only ordinary, started conversations can be resumed through session.prompt. */
 export function resumableSessions(items: readonly SessionPickerEntry[]): SessionPickerEntry[] {
   return items.filter((entry) => !entry.blank && entry.origin !== 'subagent')
+    .sort((left, right) => right.updatedAt - left.updatedAt || left.sessionId.localeCompare(right.sessionId))
 }
 
 /** Match dsh's display-title fallback without loading a session's history. */
@@ -25,14 +27,55 @@ export function sessionDisplayTitle(entry: SessionPickerEntry): string {
   const projectedTitle = projectedSessionTitle(entry)
   if (projectedTitle !== undefined) return projectedTitle
 
+  if (entry.contentTitle !== undefined) return entry.contentTitle
+
   const normalizedCwd = entry.cwd?.replace(/[\\/]+$/u, '')
   const directoryName = normalizedCwd?.split(/[\\/]/u).at(-1)
-  return directoryName === undefined || directoryName === '' ? entry.sessionId : directoryName
+  return `${directoryName || 'Chat'} · ${entry.sessionId.slice(-8)}`
 }
 
 /** Read the durable title column carried by dsh's session.list projection. */
 export function projectedSessionTitle(entry: SessionPickerEntry): string | undefined {
-  return normalizeSessionTitle(entry.projections?.values.title)
+  const title = normalizeSessionTitle(entry.projections?.values.title)
+  const directoryName = entry.cwd?.replace(/[\\/]+$/u, '').split(/[\\/]/u).at(-1)
+  return title === 'Codex' || title === 'Tandix' || title === '网页助手' || title === directoryName || title === entry.sessionId
+    ? undefined : title
+}
+
+/** Use actual user messages, never injected plugin context, for an untitled conversation. */
+export function latestSessionContentTitle(events: readonly SessionEventView[]): string | undefined {
+  let genericFallback: string | undefined
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const row = rowFromEvent(events[index]!)
+    if (row?.kind !== 'user') continue
+    const blocks = events[index]?.data?.message?.content
+    const texts = Array.isArray(blocks)
+      ? blocks.flatMap((block) => typeof block === 'object' && block !== null
+        && 'type' in block && block.type === 'text' && 'text' in block && typeof block.text === 'string'
+        ? [block.text] : []).reverse()
+      : [row.text]
+    for (const text of texts) {
+      const title = conciseUserTitle(text)
+      if (title === undefined) continue
+      if (isGenericUserPrompt(title)) genericFallback ??= title
+      else return title
+    }
+  }
+  return genericFallback
+}
+
+function conciseUserTitle(text: string): string | undefined {
+  if (text.startsWith('Browser context after tab handoff (untrusted):')
+    || text.startsWith('<USER_ATTACHMENT')) return undefined
+  const line = text.split(/\r?\n/u).map((part) => part.replace(/\s+/gu, ' ').trim()).find(Boolean)
+  if (line === undefined) return undefined
+  const points = [...line]
+  return points.length > 56 ? `${points.slice(0, 56).join('').trimEnd()}…` : line
+}
+
+function isGenericUserPrompt(title: string): boolean {
+  return /^(请先概览当前页面|First give me an overview of the current page)/iu.test(title)
+    || /^(好(?:的)?|可以|继续|确认|收到|谢谢|ok|yes|go ahead)[.!。！\s]*$/iu.test(title)
 }
 
 /** Read one durable title update from the ordinary session event stream. */

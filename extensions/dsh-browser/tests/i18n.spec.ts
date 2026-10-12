@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { getUiLocale, localeFromLanguage } from '../src/i18n.ts'
+import { getUiLocale, loadUiLocale, localeFromLanguage, saveUiLocale, UI_LOCALE_STORAGE_KEY } from '../src/i18n.ts'
 import { PANEL_COPY } from '../src/panel/strings.ts'
 
 afterEach(() => {
@@ -15,19 +15,25 @@ describe('browser locale selection', () => {
     expect(localeFromLanguage('ZH-hant-HK')).toBe('zh')
   })
 
-  it('defaults every non-Chinese or missing locale to English', () => {
+  it('defaults unknown or missing locales to Chinese', () => {
     expect(localeFromLanguage('en-US')).toBe('en')
-    expect(localeFromLanguage('ja-JP')).toBe('en')
-    expect(localeFromLanguage('fr')).toBe('en')
-    expect(localeFromLanguage(undefined)).toBe('en')
+    expect(localeFromLanguage('ja-JP')).toBe('zh')
+    expect(localeFromLanguage('fr')).toBe('zh')
+    expect(localeFromLanguage(undefined)).toBe('zh')
   })
 
-  it('uses the browser\'s first preferred language', () => {
-    vi.stubGlobal('navigator', { languages: ['zh-Hant', 'en-US'], language: 'en-US' })
+  it('starts in Chinese and persists an explicit English choice', async () => {
+    const records: Record<string, string> = {}
+    vi.stubGlobal('chrome', { storage: { local: {
+      get: vi.fn(async (key: string) => ({ [key]: records[key] })),
+      set: vi.fn(async (values: Record<string, string>) => { Object.assign(records, values) }),
+    } } })
+    expect(await loadUiLocale()).toBe('zh')
     expect(getUiLocale()).toBe('zh')
-
-    vi.stubGlobal('navigator', { languages: ['de-DE', 'zh-CN'], language: 'de-DE' })
-    expect(getUiLocale()).toBe('en')
+    await saveUiLocale('en')
+    expect(records[UI_LOCALE_STORAGE_KEY]).toBe('en')
+    expect(await loadUiLocale()).toBe('en')
+    await saveUiLocale('zh')
   })
 
   it('provides localized panel and prompt copy in both languages', () => {

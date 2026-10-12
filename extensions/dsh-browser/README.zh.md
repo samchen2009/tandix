@@ -1,6 +1,8 @@
-# dsh 浏览器操作扩展（Chrome 与 Firefox MV3）
+# 网页助手（Tandix）扩展（Chrome 与 Firefox MV3）
 
 [English](README.md) | 中文
+
+**Turn browser traces into reliable agent tasks.** 扩展完整保留 dsh-browser 的对话与控制能力，并新增 Teach、Clarify、Run 工作区。第一阶段将脱敏后的 DOM、导航与标签页事件持久化到 IndexedDB，并支持导出版本化 JSON 或 JSONL。
 
 dsh 的**浏览器操作端**：让模型直接读取并操作你在浏览器里打开的页面——抓取内容、点击元素、填写表单、滚动与导航，全部在真实页面执行、登录态保留。侧边栏面板是与模型对话的入口。
 
@@ -23,6 +25,14 @@ dsh 的**浏览器操作端**：让模型直接读取并操作你在浏览器里
 | 等待 | `browser_wait` | 页面加载与渲染稳定检测 |
 | 图片对话 | `session.prompt` / `session.attachment` | 按宿主能力启用图片选择、纯图片发送和持久历史预览 |
 | 引用你划选的内容 | 侧栏输入框 | 你在页面里选中的文字会变成输入框里的引用，随下一条消息一起发送 |
+
+在聊天输入框下方点「录制操作」后，扩展会把当前页面的点击、输入、选择、提交、导航以及相关 Fetch/XHR 请求整理为可编辑草稿；再点「停止录制」结束。录制不会自动发送消息。原始网络记录仅含请求方法、去掉查询参数的 URL、状态码和耗时，不含请求头或请求体；密码和卡号等敏感字段会以占位符代替。扩展重载后，若原网页未能立即响应录制，请刷新该网页再试。
+
+聊天草稿现使用精简摘要：连续输入只显示最终值，忽略退格与输入法切换按键，只显示主页面有效导航，并把请求压缩为搜索／播放等接口概况。Teach 中的原始事件和导出不受聊天摘要折叠影响；录制完成后可直接修改草稿再发送。
+
+点击记录会包含可识别的控件类型、名称和脱敏链接目标；后续主页面跳转、相关接口响应会附在点击后。扩展获授「下载」权限后，可在录制期间观察浏览器下载，记录文件名、状态与去除查询参数的来源地址。下载 API 不提供发起它的标签页，因此只有链接目标吻合时才认为关联较确定；仅凭时间匹配的下载会标注「待确认」。签名参数和本地下载目录不会进入轨迹或聊天草稿。
+
+设置中的「自动跟随当前标签页」默认开启：切换到新的 HTTP(S) 网页标签页时，助手会直接跟随，不再显示页面交接确认。关闭该开关可恢复每次手动选择。录制期间，新标签页的激活及其导航也会写入轨迹和聊天草稿。
 
 ## 架构
 
@@ -58,13 +68,13 @@ pnpm --filter dsh-browser-extension run test
 1. **构建并安装扩展**：
 
    ```sh
-   curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.sh | bash
+   curl -fsSL https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install.sh | bash
    ```
 
    Windows 请改在 PowerShell 中运行：
 
    ```powershell
-   $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+   $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
    ```
 
    脚本会把托管 workspace 下载到 `~/.dsh/dsh-browser`，构建桥插件，把它的官方 bundle 注册到本机 dsh 的 `web` profile，再构建扩展并把产物复制到稳定目录 `~/.dsh/browser-extension`，然后打开 `chrome://extensions`。开启开发者模式，选择「加载已解压的扩展程序」，加载扩展目录。再次运行该命令会更新托管安装。
@@ -72,7 +82,7 @@ pnpm --filter dsh-browser-extension run test
    clone 得到的 checkout 也使用同一个安装器，而且不会下载或覆盖源码：
 
    ```sh
-   git clone https://github.com/Lum1104/dsh-browser.git
+   git clone https://github.com/samchen2009/tandix.git
    cd dsh-browser
    ./scripts/install.sh
    ```
@@ -90,7 +100,7 @@ pnpm --filter dsh-browser-extension run test
    或使用受支持的精确公开版本：
 
    ```sh
-   npx @deepseek-ai/dsh@0.2.0-rc.2 web
+   npx @deepseek-ai/dsh@0.1.5-rc.2 web
    ```
 
    两种命令都会从本机 `web` profile 加载同一个 bundle。默认端口为 3080；如被占用，可追加 `--port <port>`。
@@ -99,9 +109,15 @@ pnpm --filter dsh-browser-extension run test
 
    加载或重新加载扩展本身是被动的：只有打开侧栏后，扩展才会探测本机端口并创建 WebSocket。用户已建立的健康连接可在侧栏关闭后继续用于后台审批；但连接一旦掉线或被另一浏览器替换，没有打开侧栏时就不会重连。
 
-3. **开始使用**：打开普通的 `http://` 或 `https://` 页面，点击 DeepSeek 鲸鱼图标打开侧边栏。两个构建都会自动探测本机 dsh。Chrome 回环连接无需地址或 Token；Firefox 的 `moz-extension://` UUID 不能证明扩展身份，必须在设置中填入 `~/.dsh/ext-bridge-token`。可以直接对话，或先点「读取页面」。
+3. **开始使用**：打开普通的 `http://` 或 `https://` 页面，点击网页助手图标打开侧边栏。两个构建都会自动探测本机 dsh。Chrome 回环连接无需地址或 Token；Firefox 的 `moz-extension://` UUID 不能证明扩展身份，必须在设置中填入 `~/.dsh/ext-bridge-token`。可以直接对话，或先点「读取页面」。
+
+   macOS Chrome 可选用**按需启动**，免去每次手动运行 `pnpm start`：先在 Chrome 加载网页助手扩展，再在仓库根目录运行 `pnpm native:install`，最后到 `chrome://extensions` 重新加载扩展并接受新增的本机通信权限。安装器只将本机入口开放给当前加载的 网页助手扩展 ID，不设置开机启动。打开侧栏时，伴随程序优先探测本机 Codex CLI 的 ChatGPT 登录状态；已登录则启动 Codex app-server，侧栏直接使用 Codex，不需要在网页助手中配置模型、Base URL 或 OpenAI API Key，也不要求 Codex 桌面窗口保持打开。Codex 不可用或未登录时，伴随程序才复用或启动 `dsh web --no-open`，并在侧栏设置中配置模型提供商。侧栏全部关闭 10 分钟后停止由伴随程序启动的 Agent；原本由你手动启动的 dsh 不会被关闭。若 dsh 连接失败，检查 `~/.dsh/traceforge-native-host/dsh.log`。
 
 页面即使在扩展安装或重载之前已经打开，也会在第一次操作时自动补加载内容脚本，无需手动刷新。`chrome://`、Chrome Web Store 等浏览器内置或受保护页面只提供标签页元数据，以及浏览器级 HTTP(S) 导航、后退、前进和刷新；不能读取或操作其 DOM。
+
+本地命令和文件权限与浏览器授权分开：dsh 的沙箱升权会在侧栏弹出「允许一次 / 拒绝」；Codex 的命令、文件修改和额外权限请求可选「允许一次 / 本会话允许 / 拒绝」。关闭侧栏时可通过系统通知重新打开待处理授权。未响应或断线不会自动放行。更新桥接代码后，除重新加载扩展外，还需重启正在运行的 dsh 或 Codex 伴随进程。
+
+设置页的「沙箱目录」可留空，或填入一个明确的本机目录（例如 `~/Downloads/发票-2026-09-24`）。本机伴随程序会创建不存在的目录；Codex 将其作为 `workspaceWrite` 的额外可写根目录，dsh 将其作为**新会话**的工作区根目录。dsh 的旧会话工作区不会改变。该设置不会绕过 macOS 自身的文件隐私权限，也不适用于远程桥。若有独立启动的 dsh 已占用桥端口，伴随程序不会假称设置已生效：先停止该 dsh，再让伴随程序启动。更新伴随程序代码后需重新运行 `pnpm native:install` 并重载扩展。
 
 如果只开发扩展，Chrome 从 `chrome://extensions` 加载 `extensions/dsh-browser/dist/`；Firefox 运行 `build:firefox` 后，从 `about:debugging#/runtime/this-firefox` 加载 `extensions/dsh-browser/dist-firefox/manifest.json`。代码更新后需重新构建并重新加载。
 

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { BridgeServer } from '../src/server.ts'
-import { BROWSER_TOOL_NAMES, registerBrowserTools } from '../src/tools.ts'
+import { BROWSER_TOOL_NAMES, TANDIX_SKILL_TOOL_NAMES, registerBrowserTools } from '../src/tools.ts'
 
 describe('registerBrowserTools', () => {
   function makeHarness() {
@@ -24,9 +24,19 @@ describe('registerBrowserTools', () => {
   it('registers the full v1 tool set', () => {
     const { ctx, bridge, registered } = makeHarness()
     const disposers = registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
-    expect(registered.map((r) => r.name).sort()).toEqual([...BROWSER_TOOL_NAMES].sort())
-    expect(disposers.size).toBe(BROWSER_TOOL_NAMES.length)
+    expect(registered.map((r) => r.name).sort()).toEqual([...BROWSER_TOOL_NAMES, ...TANDIX_SKILL_TOOL_NAMES].sort())
+    expect(disposers.size).toBe(BROWSER_TOOL_NAMES.length + TANDIX_SKILL_TOOL_NAMES.length)
     for (const dispose of disposers.values()) dispose()
+  })
+
+  it('routes skill saving through the same authenticated bridge without a tab target', async () => {
+    const { ctx, bridge, requestTool, registered } = makeHarness()
+    registerBrowserTools(ctx, bridge, { toolTimeoutMs: 1_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
+    const tool = registered.find((r) => r.name === 'tandix_skill_save')!
+    const args = { name: '鸿蒙周报', description: '每周写报告时使用', instructions: '核对上周数据。' }
+    const exec = { signal: new AbortController().signal, agent: { id: 'session-one' } }
+    await (tool.definition.execute as (args: unknown, e: typeof exec) => Promise<unknown>)(args, exec)
+    expect(requestTool).toHaveBeenCalledWith('tandix_skill_save', args, exec.signal, 1_000, 'session-one')
   })
 
   it('executes browser_click with mapped args', async () => {
@@ -114,6 +124,8 @@ describe('registerBrowserTools', () => {
     expect(requestTool).toHaveBeenLastCalledWith('browser_list_tabs', {}, exec.signal, 1_000)
     await run('browser_follow_tab', { tabId: 17 })
     expect(requestTool).toHaveBeenLastCalledWith('browser_follow_tab', { tabId: 17 }, exec.signal, 1_000)
+    await run('browser_follow_tab', { tabId: 17, active: true })
+    expect(requestTool).toHaveBeenLastCalledWith('browser_follow_tab', { tabId: 17, active: true }, exec.signal, 1_000)
     await run('browser_close_tab', { tabId: 18 })
     expect(requestTool).toHaveBeenLastCalledWith('browser_close_tab', { tabId: 18 }, exec.signal, 1_000)
 
@@ -175,7 +187,7 @@ describe('registerBrowserTools', () => {
     const { ctx, bridge, registered } = makeHarness()
     registerBrowserTools(ctx, bridge, { toolTimeoutMs: 5_000, snapshotMaxChars: 12_000, maxInteractiveItems: 60 })
     const descriptionChars = registered.reduce((sum, { definition }) => sum + String(definition.description).length, 0)
-    expect(descriptionChars).toBeLessThan(1_500)
+    expect(descriptionChars).toBeLessThan(1_800)
   })
 
   it('exposes optional frame routing on frame-local tools only', () => {

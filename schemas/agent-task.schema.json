@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tandix.dev/schemas/agent-task.v1.json",
+  "title": "Tandix agent task",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "skillId", "skillVersion", "inputs", "target", "requestedAt"],
+  "properties": {
+    "schemaVersion": { "const": "tandix.agent-task/v1" },
+    "id": { "type": "string", "minLength": 1 },
+    "skillId": { "type": "string", "minLength": 1 },
+    "skillVersion": { "const": 1 },
+    "inputs": { "type": "object", "additionalProperties": { "type": ["string", "number", "boolean"] } },
+    "target": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind"],
+      "properties": { "kind": { "enum": ["controlled-tab", "agent-runtime"] }, "origin": { "type": "string" } }
+    },
+    "requestedAt": { "type": "number", "minimum": 0 }
+  }
+}

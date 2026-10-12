@@ -23,11 +23,31 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers()
+  vi.unstubAllGlobals()
   vi.restoreAllMocks()
   document.body.replaceChildren()
 })
 
 describe('automatic action deltas', () => {
+  it('dispatches a visual pointer click at viewport coordinates', async () => {
+    document.body.innerHTML = '<canvas></canvas>'
+    const canvas = document.querySelector('canvas')!
+    Object.defineProperty(document, 'elementFromPoint', { configurable: true, value: vi.fn(() => canvas) })
+    vi.stubGlobal('PointerEvent', MouseEvent)
+    const down = vi.fn()
+    const up = vi.fn()
+    canvas.addEventListener('pointerdown', down)
+    canvas.addEventListener('pointerup', up)
+
+    const pending = runAction('browser_pointer', { x: 20, y: 10 }, {
+      ids: new ElementIds(), budget: BUDGET,
+    })
+    await vi.advanceTimersByTimeAsync(100)
+    await expect(pending).resolves.toEqual({ text: 'Clicked viewport coordinate (20, 10).' })
+    expect(down).toHaveBeenCalledOnce()
+    expect(up).toHaveBeenCalledOnce()
+  })
+
   it('returns settled page changes after a click when sharing is enabled', async () => {
     document.body.innerHTML = '<main>Pending</main><button>Complete</button>'
     const button = document.querySelector('button')!

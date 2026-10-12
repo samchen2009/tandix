@@ -1,5 +1,5 @@
 /**
- * dsh 0.2 Host adapter.
+ * dsh 0.1.5 Host adapter.
  *
  * Unary calls go directly through TypertGateway. Long-lived Session and
  * forwarded-event streams use the Gateway wire seam, while `$events/result`
@@ -23,20 +23,10 @@ import {
 } from './extension-sessions.ts'
 import type { RespondResult } from './protocol.ts'
 
-/** Structural subset of dsh 0.2's Host TypertGateway service. */
+/** Structural subset of dsh 0.1.5's Host TypertGateway service. */
 export interface TypertGatewayLike {
   readonly wireStream: {
-    /**
-     * dsh 0.2: `(endpoint, payload, uplink, peer, signal)`.
-     * Legacy stubs/tests: `(endpoint, payload, signal)`.
-     */
-    open(
-      endpoint: string,
-      payload: unknown,
-      uplinkOrSignal: AsyncIterable<unknown> | AbortSignal,
-      peer?: unknown,
-      signal?: AbortSignal,
-    ): Promise<AsyncIterable<unknown>>
+    open(endpoint: string, payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>>
     failure(error: unknown): HostRpcFailure
   }
   invoke(request: {
@@ -47,33 +37,7 @@ export interface TypertGatewayLike {
   }): Promise<unknown>
 }
 
-/**
- * Empty Client→Host uplink for in-process Host wireStream.open calls.
- * dsh 0.2 requires the uplink slot; Gateway-owned endpoints ($events) discard
- * it immediately, and Remote streams still need a valid AsyncIterable.
- */
-const EMPTY_WIRE_UPLINK: AsyncIterable<unknown> = {
-  async *[Symbol.asyncIterator]() { /* no uplink items */ },
-}
-
-/**
- * Open a Host wire stream against either dsh 0.2 or the legacy three-arg form.
- *
- * - arity 3: composition/unit stubs still use `(endpoint, payload, signal)`.
- * - arity 5: real dsh 0.2 TypertGatewayWireStream.
- * - arity 0: Cordis/service wrappers — must use the five-arg call. Treating
- *   these as three-arg maps AbortSignal onto uplink and leaves signal
- *   undefined (hello.ok → stream-failed → WS 1011).
- */
-function openWireStream(gateway: TypertGatewayLike, endpoint: string, payload: unknown, signal: AbortSignal): Promise<AsyncIterable<unknown>> {
-  const open = gateway.wireStream.open
-  if (open.length === 3) {
-    return open(endpoint, payload, signal)
-  }
-  return open(endpoint, payload, EMPTY_WIRE_UPLINK, undefined, signal)
-}
-
-/** Structural subset of dsh 0.2's Host Connection service. */
+/** Structural subset of dsh 0.1.5's Host Connection service. */
 export interface HostConnectionLike {
   createSharedFetchHandler(channel: '/api'): {
     fetch(request: Request): Promise<Response>
@@ -102,7 +66,13 @@ interface PendingQuestion {
   settled: boolean
 }
 
-/** Build the dsh 0.2 Host implementation. */
+interface PendingApproval {
+  readonly sessionId: string
+  readonly timer: ReturnType<typeof setTimeout>
+  settled: boolean
+}
+
+/** Build the dsh 0.1.5 Host implementation. */
 export function createRemoteHostApi(
   gateway: TypertGatewayLike,
   connection: HostConnectionLike,
@@ -126,8 +96,8 @@ class RemoteHostApi implements BrowserHostApi {
 
   async call(call: HostRpcCall): Promise<HostRpcResult> {
     if (call.method === 'session.history') return this.sessionHistory(call)
-    if (call.method === 'session.models') return this.sessionModels(call)
     if (call.method === 'workspace.list') return this.workspaceList(call)
+    if (call.method.startsWith('goal.')) return this.goalCall(call)
 
     const target = invokeTarget(call)
     if ('error' in target) return { ok: false, error: target.error }
@@ -155,6 +125,40 @@ class RemoteHostApi implements BrowserHostApi {
         if (typeof value === 'string') this.extensionSessions.note(value)
       }
       return { ok: true, value: target.adapt?.(value) ?? value }
+    } catch (error: unknown) {
+      return { ok: false, error: this.failure(error) }
+    }
+  }
+
+  private async goalCall(call: HostRpcCall): Promise<HostRpcResult> {
+    if (!isRecord(call.payload) || typeof call.payload.sessionId !== 'string'
+      || call.payload.sessionId.trim() === '') return badRequest('goal call requires sessionId')
+    const agentId = call.payload.sessionId
+    const invoke = (method: string, args: Record<string, unknown>): Promise<unknown> => this.gateway.invoke({
+      namespace: 'goals', method, args: { agentId, ...args }, signal: call.signal,
+    })
+    try {
+      const current = async (): Promise<unknown> => invoke('get', {})
+      if (call.method === 'goal.get') return { ok: true, value: { goal: normalizeDshGoal(await current()) } }
+      if (call.method === 'goal.create') {
+        const { objective, budgetLimit } = call.payload
+        if (typeof objective !== 'string' || objective.trim() === '' || objective.length > 12_000
+          || !Number.isSafeInteger(budgetLimit) || (budgetLimit as number) < 1 || (budgetLimit as number) > 256) {
+          return badRequest('goal.create requires an objective and a round limit between 1 and 256')
+        }
+        await invoke('create', { request: { objective: objective.trim(), maxGoalRounds: budgetLimit } })
+        return { ok: true, value: { goal: normalizeDshGoal(await current()) } }
+      }
+      if (!['goal.pause', 'goal.resume', 'goal.clear'].includes(call.method)) {
+        return badRequest(`Unknown goal method ${call.method}`)
+      }
+      const goal = await current()
+      if (!isRecord(goal) || typeof goal.id !== 'string' || !Number.isSafeInteger(goal.revision)) {
+        return badRequest('No current goal for this session')
+      }
+      const method = call.method.slice('goal.'.length)
+      await invoke(method, { ref: { id: goal.id, revision: goal.revision } })
+      return { ok: true, value: { goal: method === 'clear' ? null : normalizeDshGoal(await current()) } }
     } catch (error: unknown) {
       return { ok: false, error: this.failure(error) }
     }
@@ -226,27 +230,6 @@ class RemoteHostApi implements BrowserHostApi {
     }
   }
 
-  /** Combine the deployment catalog with the Session's durable next selection. */
-  private async sessionModels(call: HostRpcCall): Promise<HostRpcResult> {
-    if (!isRecord(call.payload)) return badRequest('session.models payload must be an object')
-    const sessionId = sessionIdOf(call.payload)
-    try {
-      const catalog = await this.gateway.invoke({
-        namespace: 'session', method: 'modelCatalog', args: {}, signal: call.signal,
-      })
-      // Provisional Sessions request only the catalog and overlay their pending choice.
-      const projections = sessionId === undefined ? undefined : await this.gateway.invoke({
-        namespace: 'session', method: 'projections', args: { request: { sessionId } }, signal: call.signal,
-      })
-      const values = isRecord(projections) ? projections.values : undefined
-      const modelSelection = isRecord(values) ? values.modelSelection : undefined
-      const next = isRecord(modelSelection) ? modelSelectionOf(modelSelection.next) : undefined
-      return { ok: true, value: adaptModelCatalog(catalog, next) }
-    } catch (error: unknown) {
-      return { ok: false, error: this.failure(error) }
-    }
-  }
-
   /**
    * Resolve a Host-legal throughSeq for older history pages.
    * Never invent Number.MAX_SAFE_INTEGER — session/page rejects tips past the log cursor.
@@ -277,7 +260,7 @@ class RemoteHostApi implements BrowserHostApi {
     try {
       const controller = new AbortController()
       const signal = AbortSignal.any([call.signal, controller.signal])
-      const source = await openWireStream(this.gateway, 'workspace/follow', { args: {} }, signal)
+      const source = await this.gateway.wireStream.open('workspace/follow', { args: {} }, signal)
       const iterator = source[Symbol.asyncIterator]()
       try {
         const first = await iterator.next()
@@ -341,6 +324,21 @@ class RemoteHostApi implements BrowserHostApi {
   }
 }
 
+function normalizeDshGoal(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value) || typeof value.objective !== 'string' || typeof value.phase !== 'string') return null
+  const rounds = typeof value.roundsStarted === 'number' ? value.roundsStarted : 0
+  const limit = typeof value.maxGoalRounds === 'number' ? value.maxGoalRounds : null
+  return {
+    objective: value.objective,
+    status: value.phase === 'active' && limit !== null && rounds >= limit
+      ? 'budgetLimited' : value.phase,
+    budgetKind: 'rounds', budgetUsed: rounds, budgetLimit: limit,
+    ...(value.activation === 'armed' || value.activation === 'disarmed' ? { activation: value.activation } : {}),
+    ...(isRecord(value.blockedReason) && typeof value.blockedReason.message === 'string'
+      ? { blockedReason: value.blockedReason.message } : {}),
+  }
+}
+
 type SendRemoteEventResult = (
   clientId: string,
   eventId: string,
@@ -368,6 +366,8 @@ class EventGeneration {
   private readonly queue = new AsyncEventQueue()
   private readonly tasks = new Set<Promise<void>>()
   private readonly pendingQuestions = new Map<string, PendingQuestion>()
+  private readonly pendingApprovals = new Map<string, PendingApproval>()
+  private readonly recentToolCalls = new Map<string, { sessionId: string; name: string; arguments: string }>()
   private clientId: string | undefined
   private followAbort: AbortController | undefined
   private followedSessionId: string | undefined
@@ -406,6 +406,25 @@ class EventGeneration {
   }
 
   async respond(rpcId: string, result: RespondResult, signal: AbortSignal): Promise<unknown> {
+    const approval = this.pendingApprovals.get(rpcId)
+    if (approval !== undefined) {
+      const clientId = this.clientId
+      if (approval.settled || clientId === undefined) return { accepted: false, reason: 'not-pending' }
+      const decision = result.ok ? result.value : undefined
+      if (decision !== 'allowed-once' && decision !== 'rejected') return { accepted: false, reason: 'invalid-decision' }
+      approval.settled = true
+      try {
+        await this.sendResult(clientId, rpcId, { kind: 'result', value: decision }, AbortSignal.any([this.signal, signal]))
+        this.pendingApprovals.delete(rpcId)
+        clearTimeout(approval.timer)
+        this.queue.push({ rpcId: crypto.randomUUID(), method: 'agent-approval/resolved',
+          payload: { sessionId: approval.sessionId, approvalRpcId: rpcId } })
+        return { accepted: true }
+      } catch (error: unknown) {
+        approval.settled = false
+        throw error
+      }
+    }
     const pending = this.pendingQuestions.get(rpcId)
     const clientId = this.clientId
     if (pending === undefined || pending.settled || clientId === undefined) {
@@ -424,6 +443,8 @@ class EventGeneration {
   async dispose(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
+    for (const approval of this.pendingApprovals.values()) clearTimeout(approval.timer)
+    this.pendingApprovals.clear()
     this.followAbort?.abort(new Error('browser bridge event generation closed'))
     this.lifetime.abort(new Error('browser bridge event generation closed'))
     this.queue.end()
@@ -442,7 +463,7 @@ class EventGeneration {
     this.followedSessionId = sessionId
     const signal = AbortSignal.any([this.signal, callSignal, controller.signal])
     try {
-      const source = await openWireStream(this.gateway,
+      const source = await this.gateway.wireStream.open(
         'session/follow',
         {
           args: {
@@ -527,6 +548,15 @@ class EventGeneration {
         }
         const seq = next.value.event.seq
         if (typeof seq === 'number') this.onHistoryCursor(sessionId, seq)
+        const event = next.value.event
+        if (event.type === 'tool/call' && isRecord(event.data)
+          && typeof event.data.callId === 'string' && typeof event.data.name === 'string') {
+          this.recentToolCalls.set(event.data.callId, {
+            sessionId, name: event.data.name,
+            arguments: typeof event.data.arguments === 'string' ? event.data.arguments : '',
+          })
+          if (this.recentToolCalls.size > 100) this.recentToolCalls.delete(this.recentToolCalls.keys().next().value!)
+        }
         this.queue.push({
           rpcId: crypto.randomUUID(),
           method: 'session/event',
@@ -549,7 +579,7 @@ class EventGeneration {
 
   private async pumpRemoteEvents(): Promise<void> {
     try {
-      const source = await openWireStream(this.gateway, '$events', { args: {} }, this.signal)
+      const source = await this.gateway.wireStream.open('$events', { args: {} }, this.signal)
       let ready = false
       for await (const value of source) {
         if (!ready) {
@@ -570,8 +600,23 @@ class EventGeneration {
     if (!isRecord(value) || typeof value.type !== 'string') {
       throw new TypeError('$events emitted an invalid frame')
     }
-    if (value.type === 'emit') return
+    if (value.type === 'emit') {
+      if (value.event === 'goal/activation-changed' && Array.isArray(value.args)
+        && isRecord(value.args[0]) && typeof value.args[0].sessionId === 'string') {
+        this.queue.push({ rpcId: crypto.randomUUID(), method: 'goal/refresh',
+          payload: { sessionId: value.args[0].sessionId } })
+      }
+      return
+    }
     if (value.type === 'cancel' && typeof value.eventId === 'string') {
+      const approval = this.pendingApprovals.get(value.eventId)
+      if (approval !== undefined) {
+        clearTimeout(approval.timer)
+        this.pendingApprovals.delete(value.eventId)
+        this.queue.push({ rpcId: crypto.randomUUID(), method: 'agent-approval/resolved',
+          payload: { sessionId: approval.sessionId, approvalRpcId: value.eventId } })
+        return
+      }
       const pending = this.pendingQuestions.get(value.eventId)
       if (pending === undefined) return
       this.pendingQuestions.delete(value.eventId)
@@ -592,6 +637,33 @@ class EventGeneration {
       || typeof value.agentId !== 'string'
       || !isRecord(value.request)) {
       throw new TypeError('$events emitted an invalid waterfall frame')
+    }
+    if (value.event === 'approval/request' && typeof value.request.toolName === 'string') {
+      const eventId = value.eventId
+      if (!this.extensionSessions.has(value.agentId)) {
+        const clientId = this.clientId
+        if (clientId !== undefined) await this.sendResult(clientId, value.eventId, { kind: 'next' }, this.signal)
+        return
+      }
+      const call = typeof value.request.callId === 'string' ? this.recentToolCalls.get(value.request.callId) : undefined
+      const timer = setTimeout(() => {
+        const pending = this.pendingApprovals.get(eventId)
+        if (pending === undefined) return
+        this.pendingApprovals.delete(eventId)
+        this.queue.push({ rpcId: crypto.randomUUID(), method: 'agent-approval/resolved',
+          payload: { sessionId: pending.sessionId, approvalRpcId: eventId } })
+        if (this.clientId !== undefined) {
+          void this.sendResult(this.clientId, eventId, { kind: 'result', value: 'unavailable' }, this.signal)
+            .catch(() => {})
+        }
+      }, 60_000)
+      this.pendingApprovals.set(value.eventId, { sessionId: value.agentId, timer, settled: false })
+      this.queue.push({ rpcId: value.eventId, method: 'agent-approval/requested',
+        payload: { backend: 'dsh', sessionId: value.agentId, toolName: value.request.toolName,
+          reason: typeof value.request.reason === 'string' ? value.request.reason : '',
+          command: call?.sessionId === value.agentId && call.name === 'bash' ? bashCommand(call.arguments) : undefined },
+      })
+      return
     }
     if (value.event !== 'user-questions/request' || !Array.isArray(value.request.questions)) {
       const clientId = this.clientId
@@ -742,7 +814,7 @@ async function oneShotSessionSnapshot(
 ): Promise<SessionSnapshot> {
   const controller = new AbortController()
   const signal = AbortSignal.any([outerSignal, controller.signal])
-  const source = await openWireStream(gateway,
+  const source = await gateway.wireStream.open(
     'session/follow',
     {
       args: {
@@ -936,48 +1008,20 @@ function respondOutcome(result: RespondResult): RemoteEventOutcome {
   }
 }
 
+function bashCommand(argumentsJson: string): string | undefined {
+  try {
+    const args: unknown = JSON.parse(argumentsJson)
+    if (!isRecord(args)) return undefined
+    return typeof args.command === 'string' ? args.command
+      : typeof args.cmd === 'string' ? args.cmd : undefined
+  } catch { return undefined }
+}
+
 function sessionIdOf(payload: unknown): string | undefined {
   if (!isRecord(payload)) return undefined
   return typeof payload.sessionId === 'string' && payload.sessionId.length > 0
     ? payload.sessionId
     : undefined
-}
-
-/** Map Host ModelCatalog into the extension's session.models directory shape. */
-function adaptModelCatalog(value: unknown, next?: ReturnType<typeof modelSelectionOf>): unknown {
-  if (!isRecord(value)) return value
-  const selection = next ?? modelSelectionOf(value.default)
-  const groups = Array.isArray(value.groups) ? value.groups : []
-  const failures = Array.isArray(value.failures) ? value.failures : []
-  const routableProviders = Array.isArray(value.routableProviders)
-    ? value.routableProviders.filter((entry): entry is string => typeof entry === 'string')
-    : []
-  const current = selection ?? { provider: 'none', model: 'none' }
-  return {
-    current,
-    routable: selection !== undefined && routableProviders.includes(selection.provider),
-    groups,
-    failures,
-  }
-}
-
-function modelSelectionOf(value: unknown): {
-  provider: string
-  model: string
-  reasoningEffort?: string
-} | undefined {
-  if (!isRecord(value)) return undefined
-  const provider = typeof value.provider === 'string' ? value.provider.trim() : ''
-  const model = typeof value.model === 'string' ? value.model.trim() : ''
-  if (provider === '' || model === '') return undefined
-  const reasoningEffort = typeof value.reasoningEffort === 'string' && value.reasoningEffort.trim() !== ''
-    ? value.reasoningEffort.trim()
-    : undefined
-  return {
-    provider,
-    model,
-    ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
-  }
 }
 
 function badRequest(message: string): HostRpcResult {

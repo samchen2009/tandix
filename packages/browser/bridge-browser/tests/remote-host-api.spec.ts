@@ -21,13 +21,11 @@ function harness(options: {
   fetch?: (request: Request) => Promise<Response>
 } = {}) {
   const invoke = vi.fn(options.invoke ?? (async () => ({ accepted: true })))
-  const open = vi.fn(options.open ?? (async (_endpoint, _payload, _uplink, _peer, signal) => ({
+  const open = vi.fn(options.open ?? (async (_endpoint, _payload, signal) => ({
     async *[Symbol.asyncIterator]() { await abortWait(signal) },
   })))
-  const requestBodies: unknown[] = []
   const fetch = vi.fn(options.fetch ?? (async (request: Request) => {
     const body = await request.clone().json() as { rpcId: string }
-    requestBodies.push(body)
     return Response.json({ type: 'server-response', rpcId: body.rpcId, result: { ok: true } })
   }))
   const gateway: TypertGatewayLike = {
@@ -47,59 +45,64 @@ function harness(options: {
   const connection: HostConnectionLike = {
     createSharedFetchHandler: () => ({ fetch }),
   }
-  return { api: createRemoteHostApi(gateway, connection), invoke, open, fetch, requestBodies }
+  return { api: createRemoteHostApi(gateway, connection), invoke, open, fetch }
 }
 
-describe('dsh 0.2 Remote Host adapter', () => {
-  it.each([
-    { next: { provider: 'session-provider', model: 'saved-model', reasoningEffort: 'high' }, routable: true },
-    { next: { provider: 'removed-provider', model: 'saved-model' }, routable: false },
-    { next: null, routable: true },
-  ])('uses the Session projection before the deployment default: $next', async ({ next, routable }) => {
-    const deploymentDefault = { provider: 'default-provider', model: 'default-model' }
-    const { api, invoke } = harness({
-      invoke: async ({ method }) => {
-        if (method === 'modelCatalog') return {
-          default: deploymentDefault, routableProviders: ['default-provider', 'session-provider'], groups: [], failures: [],
-        }
-        if (method === 'projections') return { asOfSeq: 7, values: { modelSelection: { next } } }
-        throw new Error(`Unexpected method: ${method}`)
-      },
-    })
-    await expect(api.call(call('session.models', { sessionId: 'session-1' }))).resolves.toEqual({
-      ok: true, value: { current: next ?? deploymentDefault, routable, groups: [], failures: [] },
-    })
-    expect(invoke).toHaveBeenCalledWith(expect.objectContaining({
-      namespace: 'session', method: 'projections', args: { request: { sessionId: 'session-1' } },
-    }))
-  })
-
-  it('returns projection failures instead of presenting the deployment default as current', async () => {
-    const { api } = harness({ invoke: async ({ method }) => {
-      if (method === 'modelCatalog') return { default: { provider: 'p', model: 'default' } }
-      throw new Error('projection unavailable')
+describe('dsh 0.1.5 Remote Host adapter', () => {
+  it('maps the shared Goal protocol to native goals with round budgets and CAS refs', async () => {
+    let goal: Record<string, unknown> | undefined
+    const { api, invoke } = harness({ invoke: async ({ namespace, method, args }) => {
+      expect(namespace).toBe('goals')
+      expect(args.agentId).toBe('session-one')
+      if (method === 'get') return goal
+      if (method === 'create') {
+        expect(args.request).toEqual({ objective: 'Finish report', maxGoalRounds: 12 })
+        goal = { id: 'goal-one', revision: 1, objective: 'Finish report', phase: 'active',
+          roundsStarted: 0, maxGoalRounds: 12, activation: 'armed' }
+        return { ref: { id: 'goal-one', revision: 1 } }
+      }
+      expect(args.ref).toEqual({ id: 'goal-one', revision: goal?.revision })
+      if (method === 'clear') { goal = undefined; return { id: 'goal-one', revision: 4 } }
+      goal = { ...goal, revision: Number(goal?.revision) + 1,
+        phase: method === 'pause' ? 'paused' : 'active', activation: method === 'pause' ? 'disarmed' : 'armed' }
+      return goal
     } })
-    await expect(api.call(call('session.models', { sessionId: 'session-1' }))).resolves.toMatchObject({
-      ok: false, error: { message: 'projection unavailable' },
-    })
+    await expect(api.call(call('goal.get', { sessionId: 'session-one' }))).resolves.toEqual({ ok: true, value: { goal: null } })
+    await expect(api.call(call('goal.create', { sessionId: 'session-one', objective: 'Finish report', budgetLimit: 12 })))
+      .resolves.toMatchObject({ ok: true, value: { goal: { budgetKind: 'rounds', budgetLimit: 12, status: 'active' } } })
+    await expect(api.call(call('goal.pause', { sessionId: 'session-one' })))
+      .resolves.toMatchObject({ ok: true, value: { goal: { status: 'paused', activation: 'disarmed' } } })
+    await expect(api.call(call('goal.resume', { sessionId: 'session-one' })))
+      .resolves.toMatchObject({ ok: true, value: { goal: { status: 'active', activation: 'armed' } } })
+    await expect(api.call(call('goal.clear', { sessionId: 'session-one' }))).resolves.toEqual({ ok: true, value: { goal: null } })
+    expect(invoke).toHaveBeenCalledWith(expect.objectContaining({ namespace: 'goals', method: 'clear',
+      args: { agentId: 'session-one', ref: { id: 'goal-one', revision: 3 } } }))
   })
 
-  it('passes the signal in the fifth argument for DSH Desktop 2.x streams', async () => {
-    const open = vi.fn(async (_endpoint: string, _payload: unknown, uplink: AsyncIterable<unknown>, peer: unknown, signal: AbortSignal) => {
-      expect(typeof uplink[Symbol.asyncIterator]).toBe('function')
-      expect(peer).toBeUndefined()
-      expect(signal).toBeInstanceOf(AbortSignal)
-      return { async *[Symbol.asyncIterator]() { yield { type: 'ready', clientId: 'test', host: {} }; await abortWait(signal) } }
-    })
-    const { api } = harness({ open })
-    const controller = new AbortController()
-    const iterator = api.events(controller.signal)[Symbol.asyncIterator]()
-    const pending = iterator.next()
-    await vi.waitFor(() => expect(open).toHaveBeenCalled())
-    controller.abort()
-    await pending.catch(() => undefined)
-    expect(open.mock.calls[0]?.[4]).toBeInstanceOf(AbortSignal)
+  it('rejects invalid native round limits before calling the Goal service', async () => {
+    const { api, invoke } = harness()
+    await expect(api.call(call('goal.create', { sessionId: 'session-one', objective: 'A', budgetLimit: 30000 })))
+      .resolves.toMatchObject({ ok: false, error: { code: 'bad-request' } })
+    expect(invoke).not.toHaveBeenCalled()
   })
+
+  it('forwards native goal activation edges so the panel can refresh disarmed state', async () => {
+    const { api } = harness({ open: async (_endpoint, _payload, signal) => ({
+      async *[Symbol.asyncIterator]() {
+        yield { type: 'ready', clientId: 'goal-client' }
+        yield { type: 'emit', event: 'goal/activation-changed', args: [{ sessionId: 'session-one',
+          goal: { id: 'goal-one', revision: 2, activation: 'disarmed' } }] }
+        await abortWait(signal)
+      },
+    }) })
+    const abort = new AbortController()
+    const events = api.events(abort.signal)[Symbol.asyncIterator]()
+    await expect(events.next()).resolves.toMatchObject({ value: { method: 'goal/refresh',
+      payload: { sessionId: 'session-one' } } })
+    abort.abort()
+    await events.return?.()
+  })
+
   it('preserves V3 durable streams and orders reconnect baselines before transient frames without advancing the durable cursor', async () => {
     const baseline = {
       revision: 2,
@@ -122,7 +125,7 @@ describe('dsh 0.2 Remote Host adapter', () => {
     }
     const { api, invoke } = harness({
       invoke: async () => ({ records: [], hasMore: false }),
-      open: async (endpoint, _payload, _uplink, _peer, signal) => ({
+      open: async (endpoint, _payload, signal) => ({
         async *[Symbol.asyncIterator]() {
           if (endpoint === '$events') yield { type: 'ready', clientId: 'client-1' }
           else {
@@ -161,37 +164,12 @@ describe('dsh 0.2 Remote Host adapter', () => {
       invoke: async ({ namespace, method }) => {
         if (`${namespace}/${method}` === 'credentials/describe') return { TOKEN: { configured: true } }
         if (`${namespace}/${method}` === 'llm/discoverModels') return [{ id: 'deepseek-chat' }]
-        if (`${namespace}/${method}` === 'session/modelCatalog') {
-          return {
-            default: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
-            routableProviders: ['deepseek-official'],
-            groups: [{
-              id: 'deepseek-official',
-              name: 'DeepSeek',
-              models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }],
-            }],
-            failures: [],
-          }
-        }
         return { accepted: true }
       },
     })
 
     await api.call(call('session.list', {}))
     await api.call(call('session.prompt', { sessionId: 'session-1', mode: 'queue', content: [] }, 'prompt-id'))
-    await expect(api.call(call('session.models', {}))).resolves.toEqual({
-      ok: true,
-      value: {
-        current: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
-        routable: true,
-        groups: [{
-          id: 'deepseek-official',
-          name: 'DeepSeek',
-          models: [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }],
-        }],
-        failures: [],
-      },
-    })
     await api.call(call('settings.mutate', { ns: 'llm-pi-ai', ops: [] }))
     await expect(api.call(call('credentials.describe', { refs: ['TOKEN'] }))).resolves.toEqual({
       ok: true, value: { credentials: { TOKEN: { configured: true } } },
@@ -209,14 +187,9 @@ describe('dsh 0.2 Remote Host adapter', () => {
       args: { request: { requestId: 'prompt-id', sessionId: 'session-1', mode: 'queue', content: [] } },
     }))
     expect(invoke).toHaveBeenNthCalledWith(3, expect.objectContaining({
-      namespace: 'session',
-      method: 'modelCatalog',
-      args: {},
-    }))
-    expect(invoke).toHaveBeenNthCalledWith(4, expect.objectContaining({
       namespace: 'settings', method: 'mutate', args: { ns: 'llm-pi-ai', ops: [] },
     }))
-    expect(invoke).toHaveBeenNthCalledWith(6, expect.objectContaining({
+    expect(invoke).toHaveBeenNthCalledWith(5, expect.objectContaining({
       namespace: 'llm',
       method: 'discoverModels',
       args: {
@@ -228,7 +201,7 @@ describe('dsh 0.2 Remote Host adapter', () => {
 
   it('uses a session/follow snapshot for history and keeps that iterator for live events', async () => {
     const { api, open } = harness({
-      open: async (endpoint, _payload, _uplink, _peer, signal) => {
+      open: async (endpoint, _payload, signal) => {
         if (endpoint === '$events') {
           return {
             async *[Symbol.asyncIterator]() {
@@ -269,7 +242,7 @@ describe('dsh 0.2 Remote Host adapter', () => {
     const abort = new AbortController()
     const events = api.events(abort.signal)[Symbol.asyncIterator]()
     const live = events.next()
-    await vi.waitFor(() => { expect(open).toHaveBeenCalledWith('$events', { args: {} }, expect.anything(), undefined, expect.any(AbortSignal)) })
+    await vi.waitFor(() => { expect(open).toHaveBeenCalledWith('$events', { args: {} }, expect.any(AbortSignal)) })
 
     await expect(api.call(call('session.history', {
       sessionId: 'session-1',
@@ -321,7 +294,7 @@ describe('dsh 0.2 Remote Host adapter', () => {
           assistantStream: true,
         },
       },
-    }, expect.anything(), undefined, expect.any(AbortSignal))
+    }, expect.any(AbortSignal))
     abort.abort()
     await events.return?.()
   })
@@ -353,7 +326,7 @@ describe('dsh 0.2 Remote Host adapter', () => {
           assistantStream: true,
         },
       },
-    }, expect.anything(), undefined, expect.any(AbortSignal))
+    }, expect.any(AbortSignal))
   })
 
   it('rejects invalid history pagination before calling the Host', async () => {
@@ -419,7 +392,7 @@ describe('dsh 0.2 Remote Host adapter', () => {
     })
     expect(open).toHaveBeenCalledWith('session/follow', {
       args: { request: { address: { kind: 'session', sessionId: 'session-1' }, assistantStream: true } },
-    }, expect.anything(), undefined, expect.any(AbortSignal))
+    }, expect.any(AbortSignal))
     expect(invoke).toHaveBeenCalledOnce()
     const pageArgs = invoke.mock.calls[0]?.[0]?.args as { request: { throughSeq: number } }
     expect(pageArgs.request.throughSeq).toBe(42)
@@ -501,7 +474,7 @@ describe('dsh 0.2 Remote Host adapter', () => {
     const staleGate = new Promise<void>((resolve) => { releaseStale = resolve })
     const freshGate = new Promise<void>((resolve) => { releaseFresh = resolve })
     const { api } = harness({
-      open: async (endpoint, payload, _uplink, _peer, signal) => {
+      open: async (endpoint, payload, signal) => {
         if (endpoint === '$events') {
           return {
             async *[Symbol.asyncIterator]() {
@@ -577,13 +550,13 @@ describe('dsh 0.2 Remote Host adapter', () => {
       ok: true,
       value: { items: [{ workspaceId: 'w1' }], archivedSessionIds: ['s1'] },
     })
-    expect(open).toHaveBeenCalledWith('workspace/follow', { args: {} }, expect.anything(), undefined, expect.any(AbortSignal))
+    expect(open).toHaveBeenCalledWith('workspace/follow', { args: {} }, expect.any(AbortSignal))
   })
 
   it('bridges user questions through $events/result and unwraps the extension answer', async () => {
     let releaseCancel: (() => void) | undefined
     const { api, fetch } = harness({
-      open: async (endpoint, _payload, _uplink, _peer, signal) => {
+      open: async (endpoint, _payload, signal) => {
         if (endpoint === 'session/follow') {
           return {
             async *[Symbol.asyncIterator]() {
@@ -670,8 +643,8 @@ describe('dsh 0.2 Remote Host adapter', () => {
   })
 
   it('declines Desktop user-question waterfalls so the native UI can answer', async () => {
-    const { api, fetch, requestBodies } = harness({
-      open: async (endpoint, _payload, _uplink, _peer, signal) => {
+    const { api, fetch } = harness({
+      open: async (endpoint, _payload, signal) => {
         if (endpoint !== '$events') throw new Error(endpoint)
         return {
           async *[Symbol.asyncIterator]() {
@@ -692,8 +665,8 @@ describe('dsh 0.2 Remote Host adapter', () => {
     const abort = new AbortController()
     const iterator = api.events(abort.signal)[Symbol.asyncIterator]()
     const pending = iterator.next()
-    await vi.waitFor(() => { expect(fetch.mock.calls.length).toBe(1) })
-    expect(requestBodies[0]).toMatchObject({
+    await vi.waitFor(() => { expect(fetch).toHaveBeenCalledOnce() })
+    expect(await (fetch.mock.calls[0]?.[0] as Request).clone().json()).toMatchObject({
       payload: { args: { eventId: 'question-desktop', outcome: { kind: 'next' } } },
     })
     abort.abort()
@@ -702,9 +675,9 @@ describe('dsh 0.2 Remote Host adapter', () => {
 
   it('does not claim session ownership when prompt fails', async () => {
     const error = Object.assign(new Error('rejected'), { code: 'bad-request', details: {} })
-    const { api, fetch, requestBodies } = harness({
+    const { api, fetch } = harness({
       invoke: async () => { throw error },
-      open: async (endpoint, _payload, _uplink, _peer, signal) => {
+      open: async (endpoint, _payload, signal) => {
         if (endpoint === 'session/follow') {
           return {
             async *[Symbol.asyncIterator]() {
@@ -742,8 +715,8 @@ describe('dsh 0.2 Remote Host adapter', () => {
     const abort = new AbortController()
     const iterator = api.events(abort.signal)[Symbol.asyncIterator]()
     const pending = iterator.next()
-    await vi.waitFor(() => { expect(fetch.mock.calls.length).toBe(1) })
-    expect(requestBodies[0]).toMatchObject({
+    await vi.waitFor(() => { expect(fetch).toHaveBeenCalledOnce() })
+    expect(await (fetch.mock.calls[0]?.[0] as Request).clone().json()).toMatchObject({
       payload: { args: { eventId: 'question-fail', outcome: { kind: 'next' } } },
     })
     abort.abort()
@@ -752,9 +725,9 @@ describe('dsh 0.2 Remote Host adapter', () => {
 
   it('delegates unhandled waterfalls and preserves Gateway failure fields', async () => {
     const error = Object.assign(new Error('gone'), { code: 'session-not-found', details: { sessionId: 's1' } })
-    const { api, fetch, requestBodies } = harness({
+    const { api, fetch } = harness({
       invoke: async () => { throw error },
-      open: async (endpoint, _payload, _uplink, _peer, signal) => ({
+      open: async (endpoint, _payload, signal) => ({
         async *[Symbol.asyncIterator]() {
           if (endpoint === '$events') {
             yield { type: 'ready', clientId: 'client-1', host: { home: '/home/test' } }
@@ -773,11 +746,44 @@ describe('dsh 0.2 Remote Host adapter', () => {
     const abort = new AbortController()
     const iterator = api.events(abort.signal)[Symbol.asyncIterator]()
     const pending = iterator.next()
-    await vi.waitFor(() => { expect(fetch.mock.calls.length).toBe(1) })
-    expect(requestBodies[0]).toMatchObject({
+    await vi.waitFor(() => { expect(fetch).toHaveBeenCalledOnce() })
+    expect(await (fetch.mock.calls[0]?.[0] as Request).clone().json()).toMatchObject({
       payload: { args: { eventId: 'approval-1', outcome: { kind: 'next' } } },
     })
     abort.abort()
     await expect(pending).resolves.toEqual({ done: true, value: undefined })
+  })
+
+  it('forwards a dsh approval only for an extension-owned session and returns one-shot consent', async () => {
+    const { api, fetch } = harness({
+      invoke: async () => ({ sessionId: 's1' }),
+      open: async (endpoint, _payload, signal) => ({
+        async *[Symbol.asyncIterator]() {
+          if (endpoint === '$events') {
+            yield { type: 'ready', clientId: 'client-1' }
+            yield { type: 'waterfall', event: 'approval/request', eventId: 'approval-1',
+              agentId: 's1', request: { toolName: 'bash', reason: 'write invoice directory' } }
+            await abortWait(signal)
+          }
+        },
+      }),
+    })
+    await api.call(call('session.create', {}))
+    const abort = new AbortController()
+    const iterator = api.events(abort.signal)[Symbol.asyncIterator]()
+    await expect(iterator.next()).resolves.toMatchObject({ value: {
+      rpcId: 'approval-1', method: 'agent-approval/requested',
+      payload: { backend: 'dsh', sessionId: 's1', toolName: 'bash' },
+    } })
+    await expect(api.respond('approval-1', { ok: true, value: 'allowed-once' }, abort.signal))
+      .resolves.toEqual({ accepted: true })
+    expect(await (fetch.mock.calls[0]?.[0] as Request).clone().json()).toMatchObject({
+      payload: { args: { eventId: 'approval-1', outcome: { kind: 'result', value: 'allowed-once' } } },
+    })
+    await expect(iterator.next()).resolves.toMatchObject({ value: {
+      method: 'agent-approval/resolved', payload: { approvalRpcId: 'approval-1' },
+    } })
+    abort.abort()
+    await iterator.return?.()
   })
 })

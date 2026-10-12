@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://traceforge.dev/schemas/recording.v1.json",
+  "title": "TraceForge Browser Recording",
+  "description": "A privacy-safe, ordered browser demonstration captured by TraceForge.",
+  "type": "object",
+  "required": ["schemaVersion", "id", "product", "status", "title", "startedAt", "updatedAt", "windowId", "tabIds", "startPage", "summary", "events"],
+  "properties": {
+    "schemaVersion": { "const": "traceforge.recording/v1" },
+    "id": { "type": "string", "minLength": 1 },
+    "product": {
+      "type": "object",
+      "required": ["name", "tagline"],
+      "properties": {
+        "name": { "const": "TraceForge" },
+        "tagline": { "const": "Turn browser traces into reliable agent tasks." }
+      },
+      "additionalProperties": false
+    },
+    "status": { "enum": ["recording", "stopped"] },
+    "title": { "type": "string" },
+    "startedAt": { "type": "number" },
+    "updatedAt": { "type": "number" },
+    "endedAt": { "type": "number" },
+    "windowId": { "type": "integer" },
+    "tabIds": { "type": "array", "items": { "type": "integer" }, "uniqueItems": true },
+    "startPage": {
+      "type": "object",
+      "required": ["title", "url"],
+      "properties": { "title": { "type": "string" }, "url": { "type": "string" } },
+      "additionalProperties": false
+    },
+    "summary": { "$ref": "#/$defs/summary" },
+    "events": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/event" }
+    }
+  },
+  "$defs": {
+    "summary": {
+      "type": "object",
+      "required": ["eventCount", "eventTypes", "tabCount", "navigationCount", "sensitiveEventCount", "durationMs"],
+      "properties": {
+        "eventCount": { "type": "integer", "minimum": 0 },
+        "eventTypes": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+        "tabCount": { "type": "integer", "minimum": 0 },
+        "navigationCount": { "type": "integer", "minimum": 0 },
+        "sensitiveEventCount": { "type": "integer", "minimum": 0 },
+        "durationMs": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "event": {
+      "type": "object",
+      "required": ["id", "recordingId", "sequence", "capturedAt", "tab", "frame", "kind"],
+      "properties": {
+        "id": { "type": "string" },
+        "recordingId": { "type": "string" },
+        "sequence": { "type": "integer", "minimum": 1 },
+        "capturedAt": { "type": "number" },
+        "kind": { "enum": ["click", "input", "change", "select", "submit", "keydown", "navigation", "tab"] },
+        "tab": {
+          "type": "object",
+          "required": ["id", "windowId", "title", "url"],
+          "properties": {
+            "id": { "type": "integer" }, "windowId": { "type": "integer" },
+            "title": { "type": "string" }, "url": { "type": "string" }
+          }
+        },
+        "frame": {
+          "type": "object",
+          "required": ["id", "url"],
+          "properties": { "id": { "type": "integer" }, "url": { "type": "string" } }
+        },
+        "target": { "type": "object" },
+        "value": {
+          "oneOf": [
+            { "type": "object", "required": ["kind", "value"], "properties": { "kind": { "const": "literal" }, "value": { "type": "string" } } },
+            { "type": "object", "required": ["kind", "parameter", "placeholder"], "properties": { "kind": { "const": "secret" }, "parameter": { "type": "string" }, "placeholder": { "const": "{{secret}}" } } }
+          ]
+        }
+      }
+    }
+  }
+}

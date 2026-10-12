@@ -127,6 +127,14 @@ describe('panel protocol', () => {
       decision: 'follow',
       sessionId: 'session-1',
     })
+
+    api.resolveTabAffinity(state.revision, 'show-controlled', 'session-1')
+    expect(postMessage).toHaveBeenLastCalledWith({
+      type: 'tab-affinity.response',
+      revision: 4,
+      decision: 'show-controlled',
+      sessionId: 'session-1',
+    })
   })
 
   it('waits for a correlated acknowledgement before completing a tab rebind', async () => {
@@ -322,7 +330,7 @@ describe('panel protocol', () => {
 
     const pending = api.rpc('session.prompt', { sessionId: 'session-1' })
     disconnectFirst?.()
-    await expect(pending).rejects.toThrow('Background connection lost')
+    await expect(pending).rejects.toThrow(/后台连接已断开|Background connection lost/u)
     await vi.advanceTimersByTimeAsync(150)
 
     expect(secondPost).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'rpc' }))
@@ -359,6 +367,7 @@ describe('panel protocol', () => {
       type: 'settings',
       id: '12345678-1234-4234-8234-123456789abc',
       settings: { bridgeUrl: 'ws://127.0.0.1:3080' },
+      forceReconnect: false,
     })
     secondReceive?.({
       type: 'settings.result',
@@ -385,6 +394,7 @@ describe('panel protocol', () => {
       type: 'settings',
       id: '12345678-1234-4234-8234-123456789abd',
       settings: { unrestrictedBrowserAccess: false },
+      forceReconnect: false,
     })
     receive?.({
       type: 'settings.result',

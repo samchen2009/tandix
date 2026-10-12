@@ -13,6 +13,7 @@
 import { accessibleName, collectInteractive, isInViewport, isVisible, mainText, pageText, truncate } from './extract.ts'
 import { ElementIds } from './ids.ts'
 import { isSensitiveField, maskValue } from './privacy.ts'
+import { sanitizeUrlForModel } from '../security/url-privacy.ts'
 
 /** Role label per element kind (model-facing vocabulary). */
 function roleOf(el: Element): string {
@@ -59,7 +60,10 @@ interface FormFieldView {
 /** One page snapshot. */
 export interface SnapshotView {
   version: number
+  /** Sanitized model-facing URL. */
   url: string
+  /** Raw URL retained only inside this content-script lifetime for delta detection. */
+  urlFingerprint: string
   title: string
   ready: 'complete' | 'loading'
   main: string
@@ -94,10 +98,12 @@ export interface SnapshotOptions {
 /** Headline for a link: same-origin relative path, else host + path. */
 function hrefHeadline(href: string): string {
   try {
-    const url = new URL(href, document.baseURI)
-    return url.origin === location.origin ? `${url.pathname}${url.search}` : `${url.host}${url.pathname}`
+    const safe = sanitizeUrlForModel(href, document.baseURI)
+    if (safe === '') return '(hidden URL)'
+    const url = new URL(safe)
+    return url.origin === location.origin ? url.pathname : `${url.host}${url.pathname}`
   } catch {
-    return href
+    return '(hidden URL)'
   }
 }
 
@@ -268,7 +274,7 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
   const changed = new Set<number>()
   const removedIds: number[] = []
   if (options.delta === true && last !== null) {
-    if (last.main !== main.text || last.url !== location.href || last.title !== document.title) {
+    if (last.main !== main.text || last.urlFingerprint !== location.href || last.title !== document.title) {
       changed.add(-1) // -1 = 正文/标题/URL 变化（渲染时说明）
     }
     for (const item of items) {
@@ -287,7 +293,8 @@ export function buildSnapshot(ids: ElementIds, options: SnapshotOptions, last: S
 
   return {
     version: (last?.version ?? 0) + 1,
-    url: location.href,
+    url: sanitizeUrlForModel(location.href),
+    urlFingerprint: location.href,
     title: document.title,
     ready: document.readyState === 'complete' ? 'complete' : 'loading',
     main: main.text,

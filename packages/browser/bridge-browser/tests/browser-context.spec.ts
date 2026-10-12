@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { Agent, AgentRegistry } from '@deepseek-ai/dsh-agent'
 import {
-  BROWSER_CONTEXT_KIND,
+  BROWSER_CONTEXT_PLUGIN,
   BrowserContextInjector,
   createBrowserSnapshotMessage,
 } from '../src/browser-context.ts'
@@ -16,7 +16,8 @@ describe('browser page context', () => {
 
     expect(message.role).toBe('user')
     expect(message.source).toEqual({
-      kind: BROWSER_CONTEXT_KIND,
+      kind: 'plugin',
+      plugin: BROWSER_CONTEXT_PLUGIN,
       form: 'snapshot',
       sections: [{
         name: 'browser-page',

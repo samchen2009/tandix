@@ -190,9 +190,55 @@ export async function runAction(action: string, args: Record<string, unknown>, c
       return getTextAction(args)
     case 'browser_wait':
       return waitAction(args, ctx)
+    case 'browser_pointer':
+      return pointerAction(args, ctx)
     default:
       throw new ActionError('bad-args', `Unknown action: ${action}`)
   }
+}
+
+async function pointerAction(args: Record<string, unknown>, ctx: ActionContext): Promise<ActionResult> {
+  const x = finiteCoordinate(args.x, 'x')
+  const y = finiteCoordinate(args.y, 'y')
+  const endX = args.endX === undefined ? x : finiteCoordinate(args.endX, 'endX')
+  const endY = args.endY === undefined ? y : finiteCoordinate(args.endY, 'endY')
+  const target = document.elementFromPoint(x, y)
+  if (target === null) throw new ActionError('action-failed', `No page element exists at viewport coordinate (${x}, ${y}).`)
+  const pointer = (type: string, clientX: number, clientY: number, buttons: number): void => {
+    target.dispatchEvent(new PointerEvent(type, {
+      bubbles: true, cancelable: true, composed: true,
+      clientX, clientY, pointerId: 1, pointerType: 'mouse', isPrimary: true,
+      button: type === 'pointermove' ? -1 : 0, buttons,
+    }))
+    target.dispatchEvent(new MouseEvent(type.replace('pointer', 'mouse'), {
+      bubbles: true, cancelable: true, composed: true,
+      clientX, clientY, button: type === 'pointermove' ? 0 : 0, buttons,
+    }))
+  }
+  if (target instanceof HTMLElement) target.focus({ preventScroll: true })
+  pointer('pointerdown', x, y, 1)
+  if (endX !== x || endY !== y) {
+    const steps = 8
+    for (let step = 1; step <= steps; step += 1) {
+      pointer('pointermove', x + ((endX - x) * step) / steps, y + ((endY - y) * step) / steps, 1)
+      await new Promise((resolve) => requestAnimationFrame(resolve))
+    }
+  }
+  pointer('pointerup', endX, endY, 0)
+  await waitForPageSettled(ACTION_SETTLE)
+  return withPageDelta(
+    endX === x && endY === y
+      ? `Clicked viewport coordinate (${x}, ${y}).`
+      : `Dragged from (${x}, ${y}) to (${endX}, ${endY}).`,
+    ctx,
+  )
+}
+
+function finiteCoordinate(value: unknown, name: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new ActionError('bad-args', `${name} must be a non-negative finite viewport coordinate.`)
+  }
+  return value
 }
 
 function snapshotAction(args: Record<string, unknown>, ctx: ActionContext): ActionResult {

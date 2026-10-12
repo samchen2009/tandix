@@ -73,10 +73,13 @@ function mockChrome(options: {
   const goBack = vi.fn(async () => undefined)
   const goForward = vi.fn(async () => undefined)
   const reload = vi.fn(async () => undefined)
+  const captureVisibleTab = vi.fn(async () => 'data:image/png;base64,AQID')
   const remove = vi.fn(async () => undefined)
+  const updateWindow = vi.fn(async (_windowId: number, changes: chrome.windows.UpdateInfo) => ({ ...changes }))
   const getAllFrames = vi.fn(async () => currentFrames())
   vi.stubGlobal('chrome', {
-    tabs: { query, get, sendMessage, update, goBack, goForward, reload, remove },
+    tabs: { query, get, sendMessage, update, goBack, goForward, reload, remove, captureVisibleTab },
+    windows: { update: updateWindow },
     scripting: { executeScript },
     webNavigation: { getAllFrames },
     runtime: {
@@ -95,7 +98,7 @@ function mockChrome(options: {
       listener({ type: 'DSH_CONTENT_READY' }, { tab: { id: tabId }, frameId, documentId } as chrome.runtime.MessageSender)
     }
   }
-  return { emitContentReady, executeScript, get, getAllFrames, goBack, goForward, query, reload, remove, sendMessage, update }
+  return { captureVisibleTab, emitContentReady, executeScript, get, getAllFrames, goBack, goForward, query, reload, remove, sendMessage, update, updateWindow }
 }
 
 afterEach(() => {
@@ -114,6 +117,22 @@ describe('isNavigationCandidateTool', () => {
 })
 
 describe('dispatchToolCall', () => {
+  it('captures the visible controlled tab for visual pages', async () => {
+    const chromeMock = mockChrome({ tab: { id: 7, windowId: 1, active: true, url: 'https://example.com/3d' } })
+
+    const answer = await dispatchToolCall({ id: 'shot', name: 'browser_screenshot', args: {} }, 'auto')
+
+    expect(answer).toEqual({
+      ok: true,
+      result: {
+        text: expect.stringContaining('screenshot'),
+        image: { mediaType: 'image/png', data: 'AQID' },
+      },
+    })
+    expect(chromeMock.captureVisibleTab).toHaveBeenCalledWith(1, { format: 'png' })
+    expect(chromeMock.sendMessage).not.toHaveBeenCalled()
+  })
+
   it('uses an already-loaded content script without injecting', async () => {
     const chromeMock = mockChrome({ tab: { id: 7, url: 'https://example.com' } })
 
@@ -261,7 +280,7 @@ describe('dispatchToolCall', () => {
   it('lists, follows, and closes selected tabs without activating them', async () => {
     const tabs = [
       managedTab(11, { active: true, title: 'Inbox', url: 'https://mail.example/inbox' }),
-      managedTab(12, { windowId: 2, title: 'Docs', url: 'https://docs.example/guide' }),
+      managedTab(12, { windowId: 2, title: 'Docs', url: 'https://docs.example/guide?token=private#draft' }),
     ]
     const chromeMock = mockChrome({ tabs })
     const authorize = vi.fn(async () => 'approved' as const)
@@ -275,22 +294,33 @@ describe('dispatchToolCall', () => {
     )
     expect((listed.result as { text: string }).text).toContain('UNTRUSTED_PAGE_CONTENT')
     expect((listed.result as { text: string }).text).toContain('https://docs.example/guide')
+    expect((listed.result as { text: string }).text).not.toContain('token=private')
+    expect((listed.result as { text: string }).text).not.toContain('#draft')
     expect((listed.result as { text: string }).text).toContain('"controlled": true')
 
     await expect(dispatchToolCall(
       { id: 'follow-tab', name: 'browser_follow_tab', args: { tabId: 12 } },
       'auto', undefined, authorize, undefined, undefined, undefined, context,
     )).resolves.toMatchObject({ ok: true })
-    expect(followTab).toHaveBeenCalledWith(expect.objectContaining({ id: 12 }))
+    expect(followTab).toHaveBeenCalledWith(expect.objectContaining({ id: 12 }), { active: false })
     expect(chromeMock.update).not.toHaveBeenCalled()
+
+    await expect(dispatchToolCall(
+      { id: 'follow-tab-visible', name: 'browser_follow_tab', args: { tabId: 12, active: true } },
+      'auto', undefined, authorize, undefined, undefined, undefined, context,
+    )).resolves.toMatchObject({ ok: true, result: { text: expect.stringContaining('active and controlled') } })
+    expect(chromeMock.update).toHaveBeenCalledWith(12, { active: true })
+    expect(chromeMock.updateWindow).toHaveBeenCalledWith(2, { focused: true })
+    expect(followTab).toHaveBeenLastCalledWith(expect.objectContaining({ id: 12 }), { active: true })
+    expect(followTab.mock.invocationCallOrder[1]).toBeLessThan(chromeMock.update.mock.invocationCallOrder[0]!)
 
     await expect(dispatchToolCall(
       { id: 'close-tab', name: 'browser_close_tab', args: { tabId: 12 } },
       'auto', undefined, authorize, undefined, undefined, undefined, context,
     )).resolves.toMatchObject({ ok: true })
-    expect(chromeMock.get).toHaveBeenCalledTimes(4)
+    expect(chromeMock.get).toHaveBeenCalledTimes(6)
     expect(chromeMock.remove).toHaveBeenCalledWith(12)
-    expect(commitAction).toHaveBeenCalledTimes(2)
+    expect(commitAction).toHaveBeenCalledTimes(3)
   })
 
   it('skips sharing blocks and approval prompts only in unrestricted mode', async () => {

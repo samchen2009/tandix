@@ -17,7 +17,16 @@ export interface Row {
   kind: 'user' | 'assistant' | 'tool' | 'info'
   text: string
   images?: ImageAttachmentRef[]
-  status?: 'running' | 'complete'
+  status?: 'running' | 'complete' | 'failed' | 'interrupted'
+  tools?: ToolDetail[]
+}
+
+export interface ToolDetail {
+  name: string
+  callId?: string
+  input: string
+  output?: string
+  status: 'running' | 'complete' | 'failed' | 'interrupted'
 }
 
 /** Minimal view of a SessionEvent (payload in `data`). */
@@ -28,11 +37,13 @@ export interface SessionEventView {
   data?: {
     content?: unknown
     source?: { kind?: string }
-    message?: { content?: unknown; source?: { kind?: string } }
+    message?: { content?: unknown; source?: { kind?: string; callId?: string } }
     turn?: number
     step?: number
     name?: string
     arguments?: string
+    callId?: string
+    error?: unknown
     title?: unknown
   }
 }
@@ -51,6 +62,8 @@ export interface QuestionItem {
   detail?: string
   options?: QuestionOption[]
   multiSelect?: boolean
+  secret?: boolean
+  optional?: boolean
 }
 
 /** Pending interaction belonging to one dsh session. */
@@ -64,6 +77,48 @@ export interface PendingQuestion {
 export interface ResolvedQuestion {
   rpcId: string
   sessionId: string
+}
+
+export interface AgentApproval {
+  rpcId: string
+  sessionId: string
+  backend: 'dsh' | 'codex' | 'workbuddy'
+  kind: 'command' | 'file-change' | 'permissions'
+  toolName: string
+  reason: string
+  command: string
+  cwd: string
+  details: string
+}
+
+export function agentApprovalFromFrame(frame: EventFrameView): AgentApproval | null {
+  if (frame.method !== 'agent-approval/requested' || !isRecord(frame.payload)
+    || typeof frame.rpcId !== 'string' || typeof frame.payload.sessionId !== 'string'
+    || (frame.payload.backend !== 'dsh' && frame.payload.backend !== 'codex' && frame.payload.backend !== 'workbuddy')) return null
+  const payload = frame.payload as Record<string, unknown> & { sessionId: string; backend: 'dsh' | 'codex' | 'workbuddy' }
+  return {
+    rpcId: frame.rpcId, sessionId: payload.sessionId, backend: payload.backend,
+    kind: payload.kind === 'file-change' || payload.kind === 'permissions' ? payload.kind : 'command',
+    toolName: typeof payload.toolName === 'string' ? payload.toolName : 'command',
+    reason: typeof payload.reason === 'string' ? payload.reason.slice(0, 2_000) : '',
+    command: typeof payload.command === 'string' ? payload.command.slice(0, 8_000) : '',
+    cwd: typeof payload.cwd === 'string' ? payload.cwd.slice(0, 1_000) : '',
+    details: payload.permissions !== undefined && payload.permissions !== null
+      ? JSON.stringify(payload.permissions).slice(0, 4_000)
+      : Array.isArray(payload.changes) && payload.changes.length > 0
+        ? summarizeChanges(payload.changes)
+        : typeof payload.grantRoot === 'string' ? payload.grantRoot.slice(0, 1_000) : '',
+  }
+}
+
+function summarizeChanges(changes: unknown[]): string {
+  const text = JSON.stringify(changes)
+  return text.length > 8_000 ? `${text.slice(0, 8_000)}\n… preview truncated; inspect the full diff before allowing.` : text
+}
+
+export function agentApprovalResolvedFromFrame(frame: EventFrameView): string | null {
+  return frame.method === 'agent-approval/resolved' && isRecord(frame.payload)
+    && typeof frame.payload.approvalRpcId === 'string' ? frame.payload.approvalRpcId : null
 }
 
 /** The gateway mux envelope shape carried inside a bridge event frame. */
@@ -99,6 +154,8 @@ function parseQuestionItem(value: unknown): QuestionItem | null {
   if (value.header !== undefined && typeof value.header !== 'string') return null
   if (value.detail !== undefined && typeof value.detail !== 'string') return null
   if (value.multiSelect !== undefined && typeof value.multiSelect !== 'boolean') return null
+  if (value.secret !== undefined && typeof value.secret !== 'boolean') return null
+  if (value.optional !== undefined && typeof value.optional !== 'boolean') return null
   let options: QuestionOption[] | undefined
   if (value.options !== undefined) {
     if (!Array.isArray(value.options)) return null
@@ -119,6 +176,8 @@ function parseQuestionItem(value: unknown): QuestionItem | null {
     ...(value.detail === undefined ? {} : { detail: value.detail }),
     ...(options === undefined ? {} : { options }),
     ...(value.multiSelect === undefined ? {} : { multiSelect: value.multiSelect }),
+    ...(value.secret === undefined ? {} : { secret: value.secret }),
+    ...(value.optional === undefined ? {} : { optional: value.optional }),
   }
 }
 
@@ -175,13 +234,117 @@ export function toolSummary(name: string, argsJson: unknown, locale: UiLocale = 
   let summary = PANEL_COPY[locale].tool.labels[name] ?? name
   try {
     const args = JSON.parse(String(argsJson ?? '{}')) as unknown
-    if (typeof args === 'object' && args !== null && 'index' in args) {
-      summary += ` #${String((args as { index?: unknown }).index)}`
+    if (typeof args === 'object' && args !== null) {
+      if (name === 'bash' && 'description' in args && typeof args.description === 'string') {
+        summary = args.description
+      } else if ('index' in args) {
+        summary += ` #${String((args as { index?: unknown }).index)}`
+      }
     }
   } catch {
     // 模型参数不可解析：只显示工具名。
   }
   return summary
+}
+
+function redactSecrets(value: string): string {
+  return value
+    .replace(/((?:--)?(?:api[-_]?key|token|password|secret|authorization)\s*(?:=|\s+)\s*)[^\s]+/giu, '$1[redacted]')
+    .replace(/(Bearer\s+)[A-Za-z0-9._~-]+/giu, '$1[redacted]')
+}
+
+/** Display tool inputs without revealing typed page values or obvious credentials. */
+export function toolInput(name: string, argsJson: unknown): string {
+  try {
+    const args = JSON.parse(String(argsJson ?? '{}')) as unknown
+    if (typeof args !== 'object' || args === null || Array.isArray(args)) return String(argsJson ?? '{}')
+    if (name === 'bash' && typeof (args as { command?: unknown }).command === 'string') {
+      const bashArgs = args as { command: string; workdir?: unknown; timeoutMs?: unknown; run_in_background?: unknown }
+      const context = [
+        typeof bashArgs.workdir === 'string' ? `workdir: ${bashArgs.workdir}` : undefined,
+        typeof bashArgs.timeoutMs === 'number' ? `timeout: ${bashArgs.timeoutMs} ms` : undefined,
+        bashArgs.run_in_background === true ? 'background: true' : undefined,
+      ].filter((line): line is string => line !== undefined)
+      return redactSecrets(`$ ${bashArgs.command}${context.length === 0 ? '' : `\n${context.join('\n')}`}`)
+    }
+    const safe = Object.fromEntries(Object.entries(args).map(([key, value]) => [key,
+      key === 'text' && name === 'browser_type' && typeof value === 'string'
+        ? `[hidden: ${value.length} characters]`
+        : /token|password|secret|api.?key|authorization|cookie/iu.test(key) ? '[redacted]' : value]))
+    return redactSecrets(JSON.stringify(safe, null, 2))
+  } catch {
+    return name === 'browser_type' ? '[input unavailable]' : redactSecrets(String(argsJson ?? '{}'))
+  }
+}
+
+function resultInfo(event: SessionEventView): { status: ToolDetail['status']; output?: string } {
+  const message = event.data?.message
+  const blocks = Array.isArray(message?.content) ? message.content : []
+  const result = blocks.find((block): block is { type: string; isError?: boolean; content?: unknown } =>
+    typeof block === 'object' && block !== null && (block as { type?: unknown }).type === 'tool-result')
+  const content = result?.content
+  const rawOutput = textFromBlocks(content)
+  const rawError = event.data?.error
+  const errorText = typeof rawError === 'object' && rawError !== null && 'message' in rawError
+    ? String((rawError as { message?: unknown }).message ?? '') : ''
+  const output = redactSecrets((rawOutput || errorText).slice(0, 3000))
+  const interrupted = /abort|cancel|interrupt/iu.test(`${errorText} ${typeof rawError === 'object' && rawError !== null && 'code' in rawError ? String(rawError.code) : ''}`)
+  const failed = result?.isError === true || event.data?.error !== undefined
+    || /\[(?:timed out after|exit code: [1-9])/u.test(rawOutput)
+  return { status: interrupted ? 'interrupted' : failed ? 'failed' : 'complete', ...(output === '' ? {} : { output }) }
+}
+
+export function appendToolCall(rows: Row[], event: SessionEventView, seq: number, locale: UiLocale = getUiLocale()): Row[] {
+  const name = event.data?.name ?? 'tool'
+  const text = toolSummary(name, event.data?.arguments, locale)
+  const detail: ToolDetail = {
+    name,
+    ...(typeof event.data?.callId === 'string' ? { callId: event.data.callId } : {}),
+    input: toolInput(name, event.data?.arguments),
+    status: 'running',
+  }
+  const last = rows[rows.length - 1]
+  if (last?.kind === 'tool') {
+    return [...rows.slice(0, -1), { ...last, seq, text: `${last.text} → ${text}`, status: 'running', tools: [...(last.tools ?? []), detail] }]
+  }
+  return [...rows, { seq, kind: 'tool', text, status: 'running', tools: [detail] }]
+}
+
+export function completeToolCall(rows: Row[], event: SessionEventView, seq: number): Row[] {
+  const callId = event.data?.message?.source?.callId
+  const info = resultInfo(event)
+  let rowIndex = -1
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const tools = rows[index]?.tools
+    if (tools?.some((tool) => callId === undefined ? tool.status === 'running' : tool.callId === callId)) {
+      rowIndex = index
+      break
+    }
+  }
+  if (rowIndex < 0) return completeLastTool(rows, seq)
+  const row = rows[rowIndex]!
+  let toolIndex = -1
+  for (let index = row.tools!.length - 1; index >= 0; index -= 1) {
+    const tool = row.tools![index]!
+    if (callId === undefined ? tool.status === 'running' : tool.callId === callId) {
+      toolIndex = index
+      break
+    }
+  }
+  if (toolIndex < 0) return rows
+  const tools = row.tools!.map((tool, index) => index === toolIndex ? { ...tool, ...info } : tool)
+  const status = tools.some((tool) => tool.status === 'running') ? 'running'
+    : tools.some((tool) => tool.status === 'failed') ? 'failed'
+    : tools.some((tool) => tool.status === 'interrupted') ? 'interrupted' : 'complete'
+  return rows.map((candidate, index) => index === rowIndex ? { ...candidate, seq, status, tools } : candidate)
+}
+
+export function interruptRunningTools(rows: Row[]): Row[] {
+  return rows.map((row) => {
+    if (row.kind !== 'tool' || row.status !== 'running') return row
+    return { ...row, status: 'interrupted', tools: row.tools?.map((tool) =>
+      tool.status === 'running' ? { ...tool, status: 'interrupted' } : tool) }
+  })
 }
 
 /** live 合并：若最后一行是工具行则并入（连续工具调用不刷屏），否则新增一行。 */
@@ -218,28 +381,54 @@ export function mergeHistoryRows(
   locale: UiLocale = getUiLocale(),
 ): Row[] {
   const rows: Row[] = []
-  let pendingTool: { items: string[]; total: number } | null = null
+  let pendingTool: { items: string[]; details: ToolDetail[]; total: number } | null = null
   const flushTool = (): void => {
     if (pendingTool === null) return
     const shown = pendingTool.items.slice(0, 3)
     const label = pendingTool.total > shown.length
       ? PANEL_COPY[locale].tool.overflow(shown, pendingTool.total)
       : shown.join(' → ')
-    rows.push({ seq: nextSeq(), kind: 'tool', text: label, status: 'complete' })
+    const status = pendingTool.details.some((tool) => tool.status === 'running') ? 'running'
+      : pendingTool.details.some((tool) => tool.status === 'failed') ? 'failed'
+      : pendingTool.details.some((tool) => tool.status === 'interrupted') ? 'interrupted' : 'complete'
+    rows.push({ seq: nextSeq(), kind: 'tool', text: label, status, tools: pendingTool.details })
     pendingTool = null
   }
   for (const ev of events) {
     if (ev.type === 'tool/call') {
-      const summary = toolSummary(ev.data?.name ?? 'tool', ev.data?.arguments, locale)
-      if (pendingTool === null) pendingTool = { items: [summary], total: 1 }
+      const name = ev.data?.name ?? 'tool'
+      const summary = toolSummary(name, ev.data?.arguments, locale)
+      const detail: ToolDetail = { name, input: toolInput(name, ev.data?.arguments), status: 'running',
+        ...(typeof ev.data?.callId === 'string' ? { callId: ev.data.callId } : {}) }
+      if (pendingTool === null) pendingTool = { items: [summary], details: [detail], total: 1 }
       else {
         pendingTool.items.push(summary)
+        pendingTool.details.push(detail)
         pendingTool.total += 1
       }
       continue
     }
-    if (ev.type === 'tool/result') continue
+    if (ev.type === 'tool/result') {
+      const callId = ev.data?.message?.source?.callId
+      if (pendingTool !== null) {
+        let index = -1
+        for (let candidate = pendingTool.details.length - 1; candidate >= 0; candidate -= 1) {
+          const detail = pendingTool.details[candidate]!
+          if (callId === undefined ? detail.status === 'running' : detail.callId === callId) {
+            index = candidate
+            break
+          }
+        }
+        if (index >= 0) pendingTool.details[index] = { ...pendingTool.details[index]!, ...resultInfo(ev) }
+      }
+      continue
+    }
+    if (ev.type === 'turn/end' && pendingTool !== null) {
+      pendingTool.details = pendingTool.details.map((detail) =>
+        detail.status === 'running' ? { ...detail, status: 'interrupted' } : detail)
+    }
     flushTool()
+    if (ev.type === 'turn/end') rows.splice(0, rows.length, ...interruptRunningTools(rows))
     const row = rowFromEvent(ev)
     if (row !== null) rows.push({ ...row, seq: nextSeq() })
   }

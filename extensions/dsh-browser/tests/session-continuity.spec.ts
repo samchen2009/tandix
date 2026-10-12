@@ -27,7 +27,7 @@ describe('pageUrlKey', () => {
 })
 
 describe('PageSessionContextTracker', () => {
-  it('restores only the same tab, window, origin, and pathname', async () => {
+  it('restores the same tab across navigation but never another tab or window', async () => {
     const tracker = new PageSessionContextTracker({
       read: async () => ({
         version: 1,
@@ -40,7 +40,7 @@ describe('PageSessionContextTracker', () => {
     await tracker.ready
 
     expect(tracker.candidate(webTab(7, 'https://example.com/orders?q=one#two', 2))).toBe('session-7')
-    expect(tracker.candidate(webTab(7, 'https://example.com/account', 2))).toBeNull()
+    expect(tracker.candidate(webTab(7, 'https://example.com/account', 2))).toBe('session-7')
     expect(tracker.candidate(webTab(8, 'https://example.com/orders', 2))).toBeNull()
     expect(tracker.candidate(webTab(7, 'https://example.com/orders', 3))).toBeNull()
   })
@@ -83,12 +83,12 @@ describe('PageSessionContextTracker', () => {
     expect(tracker.candidate(webTab(2, 'https://example.com/new'))).toBe('session')
   })
 
-  it('removes unsupported-page bindings instead of leaving a stale checkpoint', async () => {
+  it('keeps the tab binding across unsupported pages without allowing page control', async () => {
     const tracker = new PageSessionContextTracker({ read: async () => undefined, write: async () => {} })
     await tracker.ready
     tracker.bind('session', webTab(1, 'https://example.com/page'))
     tracker.bind('session', webTab(1, 'chrome://extensions'))
-    expect(tracker.candidate(webTab(1, 'https://example.com/page'))).toBeNull()
+    expect(tracker.candidate(webTab(1, 'chrome://extensions'))).toBe('session')
   })
 
   it('cleans removed tabs and migrates replacement tab identities', async () => {

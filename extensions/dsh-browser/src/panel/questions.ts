@@ -56,7 +56,10 @@ export function answersForQuestion(question: PendingQuestion, drafts: QuestionDr
   for (const [index, item] of question.questions.entries()) {
     const draft = draftFor(drafts, index)
     const custom = draft.custom.trim()
-    if (draft.selected.length === 0 && custom === '') return null
+    if (draft.selected.length === 0 && custom === '') {
+      if (item.optional === true) continue
+      return null
+    }
     answers.push({
       id: item.id,
       selected: draft.selected,

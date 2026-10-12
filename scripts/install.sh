@@ -5,7 +5,7 @@
 # No further configuration is required: the extension discovers local dsh automatically and loopback connections require no token.
 set -euo pipefail
 
-REPOSITORY="Lum1104/dsh-browser"
+REPOSITORY="samchen2009/tandix"
 REMOTE_REF="main"
 DSH_HOME_DIR="${DSH_HOME:-$HOME/.dsh}"
 MANAGED_ROOT="$DSH_HOME_DIR/dsh-browser"
@@ -318,9 +318,18 @@ require_command pnpm "未找到 pnpm；请先启用 Corepack 或安装 pnpm。" 
 require_command node "未找到 Node.js；请先安装受支持的 Node.js 版本。" "Node.js was not found; install a supported Node.js version first."
 require_command rsync "未找到 rsync；请先安装 rsync。" "rsync was not found; install rsync first."
 
-print_step 1 "构建浏览器桥" "Build the browser bridge"
+if [ "${TANDIX_PREBUILT:-0}" = "1" ]; then
+  print_step 1 "准备浏览器桥" "Prepare the browser bridge"
+else
+  print_step 1 "构建浏览器桥" "Build the browser bridge"
+fi
 (cd "$ROOT" && pnpm install --frozen-lockfile >/dev/null 2>&1)
-(cd "$ROOT" && pnpm --filter @yuxianglin/dsh-bridge-browser run build >/dev/null 2>&1)
+if [ "${TANDIX_PREBUILT:-0}" = "1" ]; then
+  [ -f "$PLUGIN/lib/index.js" ] && [ -f "$PLUGIN/lib/client.js" ] || fail_pair \
+    "预构建安装包缺少浏览器桥产物。" "The prebuilt package is missing browser bridge files."
+else
+  (cd "$ROOT" && pnpm --filter @yuxianglin/dsh-bridge-browser run build >/dev/null 2>&1)
+fi
 
 print_step 2 "注册到本机 web profile" "Register with the local web profile"
 if profile_has_dependency "$WEB_PROFILE_MANIFEST" "$LEGACY_PLUGIN"; then
@@ -328,8 +337,17 @@ if profile_has_dependency "$WEB_PROFILE_MANIFEST" "$LEGACY_PLUGIN"; then
 fi
 (cd "$ROOT" && pnpm exec dsh plugin --profile web add -w "@yuxianglin/dsh-bridge-browser@link:$PLUGIN" >/dev/null)
 
-print_step 3 "构建 Chrome 扩展" "Build the Chrome extension"
-(cd "$ROOT" && pnpm --filter dsh-browser-extension run build >/dev/null 2>&1)
+if [ "${TANDIX_PREBUILT:-0}" = "1" ]; then
+  print_step 3 "检查 Chrome 扩展" "Check the Chrome extension"
+else
+  print_step 3 "构建 Chrome 扩展" "Build the Chrome extension"
+fi
+if [ "${TANDIX_PREBUILT:-0}" = "1" ]; then
+  [ -f "$EXT/dist/manifest.json" ] && [ -f "$EXT/dist/background.js" ] || fail_pair \
+    "预构建安装包缺少 Chrome 扩展产物。" "The prebuilt package is missing Chrome extension files."
+else
+  (cd "$ROOT" && pnpm --filter dsh-browser-extension run build >/dev/null 2>&1)
+fi
 
 print_step 4 "准备扩展并打开 Chrome" "Prepare the extension and open Chrome"
 ensure_chrome || true
@@ -377,7 +395,7 @@ if [ "$IS_UPDATE" -eq 1 ]; then
   printf '\n'
   print_pair "    地址栏输入 chrome://extensions" "    Type chrome://extensions in the address bar"
   printf '\n'
-  print_pair "如果页面上已有“dsh 浏览器助手”卡片：" "If the “dsh Browser Assistant” card is already listed:"
+  print_pair "如果页面上已有“网页助手”卡片：" "If the “Tandix” card is already listed:"
   print_pair "  点击卡片上的“重新加载”按钮，让扩展加载新文件。" "  Click “Reload” on that card so it picks up the updated files."
   printf '\n'
   print_pair "如果没有该卡片（例如从未加载过）：" "If the card is not listed (e.g. it was never loaded):"
@@ -386,7 +404,7 @@ if [ "$IS_UPDATE" -eq 1 ]; then
   print_pair "  选择这个目录：" "  Select this directory:"
   printf '   %s\n' "$DIST_DIR"
   printf '\n'
-  print_pair "出现 “dsh 浏览器助手” 卡片即成功。" "When the “dsh Browser Assistant” card appears, it is loaded."
+  print_pair "出现“网页助手”卡片即成功。" "When the “Tandix” card appears, it is loaded."
 else
   if [ "$CHROME_OPENED" -eq 1 ]; then
     print_pair "Chrome 扩展管理页已打开，请完成以下操作：" "Chrome Extensions is open. Complete these steps:"
@@ -414,10 +432,10 @@ fi
 
 printf '\n'
 print_pair "加载完成后：" "After loading the extension:"
-print_pair "• 点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "Click the DeepSeek whale icon in the toolbar to open the side panel"
+print_pair "• 点击工具栏中的网页助手图标，打开侧边栏" "Click the Tandix icon in the toolbar to open the side panel"
 print_pair "• 扩展会自动发现本机 dsh，无需填写地址或 token" "The extension discovers local dsh automatically; no address or token is required"
 printf '• 启动固定版本：cd %q && pnpm start\n' "$ROOT"
 printf '   Start the pinned version: cd %q && pnpm start\n' "$ROOT"
-print_pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.2.0-rc.2 web" "Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.0-rc.2 web"
+print_pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.1.5-rc.2 web" "Or start the pinned version directly: npx @deepseek-ai/dsh@0.1.5-rc.2 web"
 printf '\n'
-print_pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/Lum1104/dsh-browser" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/Lum1104/dsh-browser"
+print_pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/samchen2009/tandix" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/samchen2009/tandix"

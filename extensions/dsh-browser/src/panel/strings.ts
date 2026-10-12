@@ -21,6 +21,13 @@ export interface PanelCopy {
   tool: {
     running: string
     complete: string
+    localCommand: string
+    otherTool: string
+    details: string
+    input: string
+    output: string
+    failed: string
+    interrupted: string
     inProgress: string
     completed: string
     done: string
@@ -42,6 +49,7 @@ export interface PanelCopy {
     backgroundBody: (active: string) => string
     pinnedBody: (active: string) => string
     askAgain: string
+    showControlled: string
     followCurrent: string
     lostTitle: string
     lostBody: string
@@ -62,11 +70,18 @@ export interface PanelCopy {
     back: string
     eyebrow: string
     title: string
+    language: string
+    languageHelp: string
     bridgeAddress: string
     bridgeHelp: string
     bridgePlaceholder: string
     tokenHelp: string
     tokenPlaceholder: string
+    sandboxDirectory: string
+    sandboxDirectoryHelp: string
+    sandboxDirectoryPlaceholder: string
+    sandboxDirectoryInvalid: string
+    sandboxDirectoryLocalOnly: string
     pageSharing: string
     pageSharingHelp: string
     sharingAuto: string
@@ -78,6 +93,8 @@ export interface PanelCopy {
     approvalNotificationsHelp: string
     autoResumeSession: string
     autoResumeSessionHelp: string
+    autoFollowTabs: string
+    autoFollowTabsHelp: string
     trustedOrigins: string
     trustedOriginsHelp: string
     trustedOriginInput: string
@@ -88,7 +105,7 @@ export interface PanelCopy {
     removeOrigin: (origin: string) => string
     save: string
     cancel: string
-    snapshotHint: (maxChars: number) => string
+    snapshotHint: (maxChars: number, backend: 'codex' | 'dsh' | 'workbuddy') => string
     relaySection: string
     relayHelp: string
     relayName: string
@@ -180,9 +197,9 @@ export interface PanelCopy {
     connectedPlaceholder: string
     disconnectedPlaceholder: string
     composerHelp: string
+    startRecording: string
+    stopRecording: string
     sendMessage: string
-    selectModel: string
-    noModelsConfigured: string
     stopTurn: string
     stoppingTurn: string
     addImages: string
@@ -209,12 +226,11 @@ export interface PanelCopy {
     selectionAttached: string
     selectionTruncated: string
     removeSelection: string
-    scrollToBottom: string
   }
 }
 
 const EN: PanelCopy = {
-  documentTitle: 'dsh Browser Assistant',
+  documentTitle: 'Tandix',
   status: {
     connected: 'Connected',
     connecting: 'Connecting…',
@@ -238,6 +254,13 @@ const EN: PanelCopy = {
   tool: {
     running: 'Working on page',
     complete: 'Page action',
+    localCommand: 'Local command',
+    otherTool: 'Tool call',
+    details: 'View details',
+    input: 'Input',
+    output: 'Result',
+    failed: 'Failed',
+    interrupted: 'Interrupted',
     inProgress: 'In progress',
     completed: 'Completed',
     done: 'Done',
@@ -275,6 +298,7 @@ const EN: PanelCopy = {
     backgroundBody: (active) => `You are viewing “${active}”. Future browser actions still run on the original page.`,
     pinnedBody: (active) => `You are viewing “${active}”. Future browser actions still run on the original page, and switching tabs will not ask again.`,
     askAgain: 'Ask on tab switch',
+    showControlled: 'Show assistant page',
     followCurrent: 'Follow current page',
     lostTitle: 'The controlled tab was closed',
     lostBody: 'Browser actions are paused to avoid operating the wrong page.',
@@ -293,13 +317,20 @@ const EN: PanelCopy = {
   },
   settings: {
     back: 'Back to chat',
-    eyebrow: 'Browser assistant',
+    eyebrow: 'Tandix',
     title: 'Settings',
+    language: 'Language',
+    languageHelp: 'Choose the interface language. New installs start in Simplified Chinese.',
     bridgeAddress: 'Bridge address',
     bridgeHelp: 'Leave blank to detect a local service automatically',
     bridgePlaceholder: 'Auto-detect 3080 / 3081 / 3090 / 14389 / 43189',
     tokenHelp: 'Required by Firefox and remote deployments',
     tokenPlaceholder: 'Required for Firefox / remote deployments',
+    sandboxDirectory: 'Sandbox directory',
+    sandboxDirectoryHelp: 'Local companion only. Codex adds this writable root; dsh uses it as the workspace for new conversations. Leave blank for defaults. This grants ongoing write access to the selected folder and its contents.',
+    sandboxDirectoryPlaceholder: 'Blank: use the current agent’s default directory',
+    sandboxDirectoryInvalid: 'Enter an absolute path or a path beginning with ~/.',
+    sandboxDirectoryLocalOnly: 'Clear the bridge address first; this setting requires the local companion.',
     pageSharing: 'Page content sharing',
     pageSharingHelp: 'Control when the assistant can read page text',
     sharingAuto: 'Share automatically (default)',
@@ -311,6 +342,8 @@ const EN: PanelCopy = {
     approvalNotificationsHelp: 'Notify you when an approval arrives while the side panel is closed',
     autoResumeSession: "Resume this page's conversation",
     autoResumeSessionHelp: 'Reopen the conversation associated with this tab and page path; other pages start a new conversation',
+    autoFollowTabs: 'Automatically follow the current tab',
+    autoFollowTabsHelp: 'Follow HTTP(S) tabs you switch to without asking again; turn off to choose each time',
     trustedOrigins: 'Always-allowed domains',
     trustedOriginsHelp: 'The approval dialog can trust a domain for the current side-panel session only. Domains added here permanently skip action confirmation when every known origin is trusted. Wildcards include the base domain and subdomains, and stay scoped to their scheme and port; `*.example.com` defaults to HTTPS.',
     trustedOriginInput: 'Domain to always trust (e.g. https://example.com or https://*.example.com)',
@@ -321,7 +354,9 @@ const EN: PanelCopy = {
     removeOrigin: (origin) => `Remove ${origin}`,
     save: 'Save & Connect',
     cancel: 'Cancel',
-    snapshotHint: (maxChars) => `Page snapshots are limited to ${maxChars} characters and longer content is truncated. Change snapshotMaxChars in the dsh plugin to adjust this limit.`,
+    snapshotHint: (maxChars, backend) => backend !== 'dsh'
+      ? `${backend === 'workbuddy' ? 'WorkBuddy' : 'Codex'} page snapshots are limited to ${maxChars} characters; longer content is truncated. Read a smaller section or split the page into multiple reads if needed.`
+      : `Page snapshots are limited to ${maxChars} characters and longer content is truncated. Change snapshotMaxChars in the dsh plugin to adjust this limit.`,
     relaySection: 'Models & API relay',
     relayHelp: 'Point the assistant at your own API relay. Each profile becomes one provider route; changes take effect on the next message without a restart.',
     relayName: 'Profile name',
@@ -369,7 +404,7 @@ const EN: PanelCopy = {
     availableManagedBody: 'Copy the managed update command and run it in Terminal.',
     availableCheckoutBody: 'Pull or switch to the revision you want in the original checkout, then rerun its installer.',
     availableUnknownBody: 'This copy predates install-source metadata. Use the same update flow you originally installed with; no command will be copied.',
-    reloadReminder: 'After updating, open chrome://extensions, find “dsh Browser Assistant,” click the rotating-arrow Reload button on its card, then restart dsh.',
+    reloadReminder: 'After updating, open chrome://extensions, find “Tandix,” click the rotating-arrow Reload button on its card, then restart dsh.',
     loadingInstall: 'Identifying install…',
     managedInstall: 'Managed install',
     checkoutInstall: 'Local checkout',
@@ -413,9 +448,9 @@ const EN: PanelCopy = {
     connectedPlaceholder: 'Tell me what you want to do on this page…',
     disconnectedPlaceholder: 'Connect to dsh to get started',
     composerHelp: 'Enter to send · Shift + Enter for a new line',
+    startRecording: 'Record actions',
+    stopRecording: 'Stop recording',
     sendMessage: 'Send message',
-    selectModel: 'Model',
-    noModelsConfigured: 'No models yet — Host has no routable models.',
     stopTurn: 'Stop generating',
     stoppingTurn: 'Stopping…',
     addImages: 'Add images',
@@ -442,12 +477,11 @@ const EN: PanelCopy = {
     selectionAttached: 'Selected text',
     selectionTruncated: '(truncated)',
     removeSelection: 'Remove the selected text',
-    scrollToBottom: 'Scroll to latest',
   },
 }
 
 const ZH: PanelCopy = {
-  documentTitle: 'dsh 浏览器助手',
+  documentTitle: '网页助手',
   status: {
     connected: '已连接',
     connecting: '连接中…',
@@ -471,6 +505,13 @@ const ZH: PanelCopy = {
   tool: {
     running: '正在操作页面',
     complete: '页面操作',
+    localCommand: '本机命令',
+    otherTool: '工具调用',
+    details: '查看详情',
+    input: '执行内容',
+    output: '执行结果',
+    failed: '失败',
+    interrupted: '已中断',
     inProgress: '进行中',
     completed: '已完成',
     done: '完成',
@@ -508,6 +549,7 @@ const ZH: PanelCopy = {
     backgroundBody: (active) => `你正在查看“${active}”，后续浏览器操作仍会在原页面执行。`,
     pinnedBody: (active) => `你正在查看“${active}”，后续浏览器操作仍会在原页面执行；切换标签页时不会再询问。`,
     askAgain: '切换标签页时重新询问',
+    showControlled: '查看助手页面',
     followCurrent: '改为跟随当前页',
     lostTitle: '受控标签页已关闭',
     lostBody: '为避免操作错页，浏览器操作已暂停。',
@@ -526,13 +568,20 @@ const ZH: PanelCopy = {
   },
   settings: {
     back: '返回对话',
-    eyebrow: '浏览器助手',
+    eyebrow: '网页助手',
     title: '设置',
+    language: '界面语言',
+    languageHelp: '默认使用简体中文，也可以切换为英文。',
     bridgeAddress: '桥地址',
     bridgeHelp: '留空时自动检测本机服务',
     bridgePlaceholder: '自动检测 3080 / 3081 / 3090 / 14389 / 43189',
     tokenHelp: 'Firefox 和远程部署需要填写',
     tokenPlaceholder: 'Firefox / 远程部署时填写',
+    sandboxDirectory: '沙箱目录',
+    sandboxDirectoryHelp: '仅适用于本机伴随程序。Codex 会把它加入可写目录；dsh 会将它作为新会话的工作区。留空使用默认值。设置后，Agent 可持续写入该目录及其子目录。',
+    sandboxDirectoryPlaceholder: '留空：使用当前 Agent 的默认目录',
+    sandboxDirectoryInvalid: '请输入绝对路径，或以 ~/ 开头的路径。',
+    sandboxDirectoryLocalOnly: '请先清空桥地址；沙箱目录设置只适用于本机伴随程序。',
     pageSharing: '页面内容共享',
     pageSharingHelp: '控制助手何时可以读取页面文字',
     sharingAuto: '自动共享（默认）',
@@ -544,6 +593,8 @@ const ZH: PanelCopy = {
     approvalNotificationsHelp: '侧栏关闭时收到审批请求，通过系统通知提醒你',
     autoResumeSession: '续接当前页面会话',
     autoResumeSessionHelp: '重新打开当前标签页此页面的会话；其他页面会新建会话',
+    autoFollowTabs: '自动跟随当前标签页',
+    autoFollowTabsHelp: '切换到网页时自动跟随，不再反复询问；关闭后每次手动选择',
     trustedOrigins: '永久免确认域名',
     trustedOriginsHelp: '审批框可只信任本次侧栏会话。这里添加的域名仅在所有已知来源均受信任时免除操作确认。通配符包含主域及其子域，并严格区分协议和端口；`*.example.com` 默认使用 HTTPS。',
     trustedOriginInput: '要永久信任的域名（如 https://example.com 或 https://*.example.com）',
@@ -554,7 +605,9 @@ const ZH: PanelCopy = {
     removeOrigin: (origin) => `移除 ${origin}`,
     save: '保存并连接',
     cancel: '取消',
-    snapshotHint: (maxChars) => `页面快照上限为 ${maxChars} 字符，超出内容会被截断。可在 dsh 插件中调整 snapshotMaxChars。`,
+    snapshotHint: (maxChars, backend) => backend !== 'dsh'
+      ? `${backend === 'workbuddy' ? 'WorkBuddy' : 'Codex'} 页面快照上限为 ${maxChars} 字符，超出内容会被截断。如需查看完整内容，可缩小读取范围或分段读取。`
+      : `页面快照上限为 ${maxChars} 字符，超出内容会被截断。可在 dsh 插件中调整 snapshotMaxChars。`,
     relaySection: '模型与中转服务',
     relayHelp: '把助手接到你自己的 API 中转站。每个档案对应一条提供方路由，保存后下一条消息即生效，无需重启。',
     relayName: '档案名称',
@@ -602,7 +655,7 @@ const ZH: PanelCopy = {
     availableManagedBody: '复制托管更新命令并在终端运行。',
     availableCheckoutBody: '请先在原 checkout 中 pull 或切换到目标 revision，再重新运行其中的安装脚本。',
     availableUnknownBody: '这个副本没有安装来源记录。请沿用最初的更新方式；这里不会复制可能覆盖来源的命令。',
-    reloadReminder: '更新完成后，打开 chrome://extensions，找到“dsh 浏览器助手”，点击卡片上的“重新加载”旋转箭头，然后重启 dsh。',
+    reloadReminder: '更新完成后，打开 chrome://extensions，找到“网页助手”，点击卡片上的“重新加载”旋转箭头，然后重启 dsh。',
     loadingInstall: '正在识别安装来源…',
     managedInstall: '托管安装',
     checkoutInstall: '本地 checkout',
@@ -646,9 +699,9 @@ const ZH: PanelCopy = {
     connectedPlaceholder: '告诉我想在这个页面做什么…',
     disconnectedPlaceholder: '连接 dsh 后即可开始',
     composerHelp: 'Enter 发送 · Shift + Enter 换行',
+    startRecording: '录制操作',
+    stopRecording: '停止录制',
     sendMessage: '发送消息',
-    selectModel: '模型',
-    noModelsConfigured: '暂无模型 — Host 尚未提供可用模型。',
     stopTurn: '停止生成',
     stoppingTurn: '正在停止…',
     addImages: '添加图片',
@@ -675,7 +728,6 @@ const ZH: PanelCopy = {
     selectionAttached: '选中的网页内容',
     selectionTruncated: '（已截断）',
     removeSelection: '移除选中内容',
-    scrollToBottom: '回到最新消息',
   },
 }
 

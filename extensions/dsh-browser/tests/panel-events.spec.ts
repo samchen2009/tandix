@@ -2,13 +2,18 @@
 import { describe, expect, it } from 'vitest'
 import {
   appendLiveRow,
+  agentApprovalFromFrame,
+  agentApprovalResolvedFromFrame,
+  appendToolCall,
   completeLastTool,
+  completeToolCall,
   mergeHistoryRows,
   pendingQuestionFromFrame,
   resolvedQuestionFromFrame,
   rowFromEvent,
   textFromBlocks,
   toolSummary,
+  toolInput,
   type SessionEventView,
 } from '../src/panel/events.ts'
 
@@ -22,6 +27,18 @@ describe('textFromBlocks', () => {
     expect(textFromBlocks([{ type: 'text', text: '你好' }, { type: 'reasoning', text: '思考' }])).toBe('你好')
     expect(textFromBlocks(undefined)).toBe('')
     expect(textFromBlocks([{ type: 'text' }])).toBe('')
+  })
+})
+
+describe('agent approval events', () => {
+  it('keeps the request identity, command and backend for the approval dialog', () => {
+    expect(agentApprovalFromFrame({ rpcId: 'approval-1', method: 'agent-approval/requested', payload: {
+      backend: 'dsh', sessionId: 'session-1', toolName: 'bash',
+      reason: 'write Downloads', command: 'mkdir -p ~/Downloads/invoices',
+    } })).toMatchObject({ rpcId: 'approval-1', backend: 'dsh', sessionId: 'session-1',
+      command: 'mkdir -p ~/Downloads/invoices' })
+    expect(agentApprovalResolvedFromFrame({ rpcId: 'event', method: 'agent-approval/resolved',
+      payload: { approvalRpcId: 'approval-1' } })).toBe('approval-1')
   })
 })
 
@@ -99,6 +116,26 @@ describe('toolSummary', () => {
     expect(toolSummary('browser_list_tabs', '{}', 'en')).toBe('List open tabs')
     expect(toolSummary('browser_follow_tab', '{"tabId":17}', 'en')).toBe('Follow tab')
     expect(toolSummary('browser_close_tab', '{"tabId":18}', 'en')).toBe('Close tab')
+    expect(toolSummary('bash', '{"command":"mkdir -p /tmp/invoices","description":"Create invoice directory"}', 'zh')).toBe('Create invoice directory')
+  })
+})
+
+describe('tool details', () => {
+  it('retains a bash command and matches its result by call ID', () => {
+    let rows = appendToolCall([], ev('tool/call', {
+      callId: 'call-1', name: 'bash', arguments: '{"command":"mkdir -p /tmp/invoices","description":"Create invoice directory"}',
+    }), 1, 'zh')
+    expect(rows[0]?.tools?.[0]?.input).toBe('$ mkdir -p /tmp/invoices')
+    rows = completeToolCall(rows, ev('tool/result', {
+      message: { source: { callId: 'call-1' }, content: [{ type: 'tool-result', isError: false,
+        content: [{ type: 'text', text: '(no output)' }] }] },
+    }), 2)
+    expect(rows[0]).toMatchObject({ status: 'complete', tools: [{ status: 'complete', output: '(no output)' }] })
+  })
+
+  it('hides typed values and obvious token arguments', () => {
+    expect(toolInput('browser_type', '{"index":2,"text":"private value"}')).toContain('[hidden: 13 characters]')
+    expect(toolInput('custom_tool', '{"token":"private","query":"x"}')).not.toContain('private')
   })
 })
 
@@ -148,7 +185,7 @@ describe('mergeHistoryRows', () => {
       ev('tool/call', { name: 'browser_snapshot', arguments: '{}' }),
       ev('tool/result', {}),
     ], () => { seq += 1; return seq }, 'zh')
-    expect(rows).toEqual([{ seq: 1, kind: 'tool', text: '读取页面', status: 'complete' }])
+    expect(rows).toMatchObject([{ seq: 1, kind: 'tool', text: '读取页面', status: 'complete' }])
   })
 
   it('handles empty history', () => {

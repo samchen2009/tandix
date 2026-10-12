@@ -5,7 +5,7 @@ import type { TabFrame } from './frames.ts'
 import type { ApprovalPrompt } from '../security/approval.ts'
 import { getUiLocale, type UiLocale } from '../i18n.ts'
 
-const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text'])
+const PAGE_READS = new Set(['browser_snapshot', 'browser_get_text', 'browser_screenshot'])
 const STATE_CHANGING_ACTIONS = new Set([
   'browser_click',
   'browser_type',
@@ -15,6 +15,7 @@ const STATE_CHANGING_ACTIONS = new Set([
   'browser_back',
   'browser_forward',
   'browser_reload',
+  'browser_pointer',
 ])
 
 /** Return an approval prompt, or undefined when this call needs no prompt. */
@@ -26,7 +27,7 @@ export function approvalPromptForCall(
 ): ApprovalPrompt | undefined {
   if (PAGE_READS.has(call.name)) {
     if (sharePageContent !== 'ask') return undefined
-    const targetFrames = call.name === 'browser_snapshot'
+    const targetFrames = call.name === 'browser_snapshot' || call.name === 'browser_screenshot'
       ? frames
       : frames.filter((frame) => frame.frameId === requestedFrame(call.args))
     return {
@@ -34,6 +35,8 @@ export function approvalPromptForCall(
       action: call.name,
       summary: call.name === 'browser_snapshot'
         ? localized(locale, 'Read the current page and accessible iframes', '读取当前页面及可访问 iframe')
+        : call.name === 'browser_screenshot'
+          ? localized(locale, 'Capture the visible current page', '截取当前可见页面')
         : localized(locale, 'Read text from the specified area of the current page', '读取当前页面的指定文本区域'),
       origins: uniqueOrigins(targetFrames, frames),
       canTrust: false,
@@ -148,6 +151,7 @@ function summarizeAction(call: ToolCall, locale: UiLocale): string {
     case 'browser_back': return localized(locale, 'Go back in browser history (destination domain unknown)', '返回浏览历史上一页（目标域名未知）')
     case 'browser_forward': return localized(locale, 'Go forward in browser history (destination domain unknown)', '前进到浏览历史下一页（目标域名未知）')
     case 'browser_reload': return localized(locale, 'Reload the current page', '重新加载当前页面')
+    case 'browser_pointer': return localized(locale, 'Use the pointer on the visible page', '在可见页面上操作指针')
     default: return call.name
   }
 }

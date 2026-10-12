@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   attachmentResponseDataUrl,
+  clipboardMediaFiles,
   ImageInputError,
   imageRefsFromBlocks,
   parseImageAttachmentLimits,
@@ -35,6 +36,14 @@ describe('image capability projection', () => {
 })
 
 describe('prompt image preparation', () => {
+  it('extracts pasted image and video files without treating clipboard text as media', () => {
+    const png = new File(['png'], 'pasted.png', { type: 'image/png' })
+    const video = new File(['video'], 'clip.mp4', { type: 'video/mp4' })
+    const data = { files: [png, video], items: [] } as unknown as DataTransfer
+
+    expect(clipboardMediaFiles(data)).toEqual([png, video])
+  })
+
   it('encodes a validated browser image for session.prompt', async () => {
     vi.spyOn(crypto, 'randomUUID').mockReturnValue('12345678-1234-4234-8234-123456789abc')
     const file = new File([new Uint8Array([1, 2, 3])], 'page.png', { type: 'image/png' })
@@ -85,6 +94,11 @@ describe('prompt image preparation', () => {
     ])
     expect(promptContent('', [image])).toEqual([
       { type: 'image', mediaType: 'image/png', data: 'AQID', name: 'page.png' },
+    ])
+    expect(promptContent('', [], [{
+      id: 'file-1', mediaType: 'video/mp4', data: 'AQID', bytes: 3, name: 'clip.mp4',
+    }])).toEqual([
+      { type: 'file', mediaType: 'video/mp4', data: 'AQID', name: 'clip.mp4' },
     ])
   })
 })

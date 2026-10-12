@@ -104,4 +104,28 @@ describe('mainText', () => {
     expect(text).toContain('Cedar 收纳盒')
     expect(text).not.toContain('导航垃圾')
   })
+
+  it('ignores a stale full-size login shell underneath the visible SPA', () => {
+    document.body.innerHTML = `
+      <main id="login">Scan to log in · QR code expired</main>
+      <div id="chat"><div id="message">最近怎么样呀</div><div>就那样啊</div></div>
+    `
+    const chatMessage = document.getElementById('message')!
+    const original = document.elementFromPoint
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: () => chatMessage,
+    })
+    try {
+      const text = mainText(document)
+      expect(text).toContain('最近怎么样呀')
+      expect(text).toContain('就那样啊')
+      expect(text).not.toContain('Scan to log in')
+    } finally {
+      Object.defineProperty(document, 'elementFromPoint', {
+        configurable: true,
+        value: original,
+      })
+    }
+  })
 })

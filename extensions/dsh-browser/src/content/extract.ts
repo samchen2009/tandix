@@ -39,10 +39,47 @@ const MAX_ITEM_NAME_CHARS = 80
  */
 export function isVisible(el: Element): boolean {
   if (!(el instanceof HTMLElement)) return false
-  const style = getComputedStyle(el)
-  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false
+  for (let node: HTMLElement | null = el; node !== null; node = node.parentElement) {
+    const style = getComputedStyle(node)
+    if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse'
+      || style.opacity === '0' || style.contentVisibility === 'hidden') return false
+  }
   const rect = el.getBoundingClientRect()
   return rect.width > 0 && rect.height > 0
+}
+
+/**
+ * Whether some visible point of an element belongs to its rendered subtree.
+ *
+ * SPAs commonly leave a full-size login shell mounted underneath the real
+ * application. CSS says both shells occupy space, and `innerText` can still
+ * expose the stale shell, but `elementFromPoint` identifies the layer the user
+ * can actually see. Unsupported test/legacy environments retain the previous
+ * visibility behavior.
+ */
+function isForeground(el: Element): boolean {
+  if (!(el instanceof HTMLElement) || !isVisible(el)) return false
+  if (typeof document.elementFromPoint !== 'function') return true
+  const rect = el.getBoundingClientRect()
+  const left = Math.max(0, rect.left)
+  const right = Math.min(window.innerWidth, rect.right)
+  const top = Math.max(0, rect.top)
+  const bottom = Math.min(window.innerHeight, rect.bottom)
+  if (right <= left || bottom <= top) return false
+  const insetX = Math.min(8, Math.max(1, (right - left) / 4))
+  const insetY = Math.min(8, Math.max(1, (bottom - top) / 4))
+  const points: Array<[number, number]> = [
+    [(left + right) / 2, (top + bottom) / 2],
+    [left + insetX, top + insetY],
+    [right - insetX, top + insetY],
+    [left + insetX, bottom - insetY],
+    [right - insetX, bottom - insetY],
+  ]
+  const foregroundPoints = points.filter(([x, y]) => {
+    const topmost = document.elementFromPoint(x, y)
+    return topmost !== null && (topmost === el || el.contains(topmost))
+  }).length
+  return foregroundPoints >= Math.ceil(points.length * 0.6)
 }
 
 /**
@@ -163,14 +200,24 @@ export function collectInteractive(root: Document | Element): Element[] {
  * @returns the cleaned main text (unbounded; callers apply budgets).
  */
 export function mainText(doc: Document): string {
-  const main = doc.querySelector('main, [role="main"]')
-  if (main !== null) return clean(elementText(main))
+  const mains = [...doc.querySelectorAll('main, [role="main"]')]
+    .filter((candidate) => isForeground(candidate))
+  if (mains.length > 0) {
+    const main = mains.reduce((best, candidate) => {
+      const bestRect = best.getBoundingClientRect()
+      const candidateRect = candidate.getBoundingClientRect()
+      return candidateRect.width * candidateRect.height > bestRect.width * bestRect.height ? candidate : best
+    })
+    const text = clean(elementText(main))
+    if (text !== '') return text
+  }
   const articles = doc.querySelectorAll('article')
-  if (articles.length === 1) return clean(elementText(articles[0]!))
+  if (articles.length === 1 && isForeground(articles[0]!)) return clean(elementText(articles[0]!))
 
   let best: Element | null = null
   let bestScore = 0
   for (const candidate of doc.querySelectorAll('section, div, [role="main"]')) {
+    if (!isForeground(candidate)) continue
     const paragraphs = candidate.querySelectorAll('p').length
     if (paragraphs < 2) continue
     const text = elementText(candidate)
@@ -181,6 +228,17 @@ export function mainText(doc: Document): string {
     }
   }
   if (best !== null) return clean(elementText(best))
+
+  // App-style pages often have no semantic main/paragraphs. Read only the
+  // foreground body roots so a retained login shell behind the active app
+  // cannot override what is visibly on screen.
+  if (typeof doc.elementFromPoint === 'function') {
+    const foregroundRoots = [...doc.body.children].filter((candidate) => isForeground(candidate))
+    if (foregroundRoots.length > 0) {
+      const visibleText = clean(foregroundRoots.map((candidate) => elementText(candidate)).join(' '))
+      if (visibleText !== '') return visibleText
+    }
+  }
   return clean(elementText(doc.body))
 }
 

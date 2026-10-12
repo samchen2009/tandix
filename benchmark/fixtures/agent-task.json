@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "tandix.agent-task/v1",
+  "id": "fixture-run-1",
+  "skillId": "fixture-feedback-lookup",
+  "skillVersion": 1,
+  "inputs": { "phone": "18623" },
+  "target": { "kind": "controlled-tab", "origin": "https://example.com" },
+  "requestedAt": 1
+}

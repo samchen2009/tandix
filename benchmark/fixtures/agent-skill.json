@@ -1,0 +1,13 @@
+{
+  "schemaVersion": "tandix.agent-skill/v1",
+  "version": 1,
+  "id": "fixture-feedback-lookup",
+  "name": "Find feedback",
+  "goal": "Find the specified feedback record",
+  "steps": ["Enter {{phone}} in the phone or email field", "Click Search", "Open the matching detail"],
+  "success": "The matching feedback detail is visible",
+  "parameters": [{ "name": "phone", "label": "Phone", "type": "string", "required": true }],
+  "allowedOrigins": ["https://example.com"],
+  "sourceSessionId": "",
+  "createdAt": 1
+}

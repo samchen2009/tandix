@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   latestSessionTitle,
+  latestSessionContentTitle,
   projectedSessionTitle,
   resumableSessions,
   sessionAcceptsPrompts,
@@ -21,9 +22,10 @@ const ordinary: SessionPickerEntry = {
 }
 
 describe('resumableSessions', () => {
-  it('keeps ordinary started sessions in host recency order', () => {
-    const second = { ...ordinary, sessionId: 'second', updatedAt: 2 }
-    expect(resumableSessions([ordinary, second])).toEqual([ordinary, second])
+  it('sorts ordinary started sessions newest first regardless of host order', () => {
+    const newer = { ...ordinary, sessionId: 'newer', updatedAt: 9 }
+    const older = { ...ordinary, sessionId: 'older', updatedAt: 2 }
+    expect(resumableSessions([older, ordinary, newer])).toEqual([newer, ordinary, older])
   })
 
   it('removes blank and subagent sessions that cannot be resumed normally', () => {
@@ -44,20 +46,20 @@ describe('sessionDisplayTitle', () => {
   })
 
   it('falls back through the directory basename and session ID', () => {
-    expect(sessionDisplayTitle({ ...ordinary, cwd: '/workspace/dsh-browser/' })).toBe('dsh-browser')
-    expect(sessionDisplayTitle({ ...ordinary, cwd: 'C:\\work\\dsh-browser\\' })).toBe('dsh-browser')
-    expect(sessionDisplayTitle({ ...ordinary, cwd: undefined })).toBe('ordinary')
+    expect(sessionDisplayTitle({ ...ordinary, cwd: '/workspace/dsh-browser/' })).toBe('dsh-browser · ordinary')
+    expect(sessionDisplayTitle({ ...ordinary, cwd: 'C:\\work\\dsh-browser\\' })).toBe('dsh-browser · ordinary')
+    expect(sessionDisplayTitle({ ...ordinary, cwd: undefined })).toBe('Chat · ordinary')
   })
 
   it('ignores malformed or blank title projections', () => {
     expect(sessionDisplayTitle({
       ...ordinary,
       projections: { asOfSeq: 4, values: { title: '   ' } },
-    })).toBe('workspace')
+    })).toBe('workspace · ordinary')
     expect(sessionDisplayTitle({
       ...ordinary,
       projections: { asOfSeq: 4, values: { title: { unsafe: true } } },
-    })).toBe('workspace')
+    })).toBe('workspace · ordinary')
   })
 
   it('exposes only a valid durable projection as the current-session title', () => {
@@ -66,6 +68,34 @@ describe('sessionDisplayTitle', () => {
       projections: { asOfSeq: 4, values: { title: '  Browser session  ' } },
     })).toBe('Browser session')
     expect(projectedSessionTitle(ordinary)).toBeUndefined()
+    expect(projectedSessionTitle({ ...ordinary,
+      projections: { asOfSeq: 4, values: { title: 'workspace' } },
+    })).toBeUndefined()
+    expect(sessionDisplayTitle({ ...ordinary, contentTitle: '按周报内容核算 DAU' })).toBe('按周报内容核算 DAU')
+  })
+})
+
+describe('content-derived session titles', () => {
+  it('uses the latest substantive user request instead of plugin context or canned overview', () => {
+    expect(latestSessionContentTitle([
+      { type: 'user/message', data: { message: { source: { kind: 'plugin' }, content: [{ type: 'text', text: 'Browser context' }] } } },
+      { type: 'user/message', data: { message: { source: { kind: 'user' }, content: [{ type: 'text', text: '请先概览当前页面，告诉我最重要的信息，并等待我的下一步指令。' }] } } },
+      { type: 'user/message', data: { message: { source: { kind: 'user' }, content: [
+        { type: 'text', text: 'Browser context after tab handoff (untrusted):\npage data' },
+        { type: 'text', text: '查看这份飞书文档' },
+      ] } } },
+      { type: 'user/message', data: { message: { source: { kind: 'user' }, content: [{ type: 'text', text: '对照 #9-25 和 #10-02，核对商店下载差值' }] } } },
+      { type: 'user/message', data: { message: { source: { kind: 'user' }, content: [{ type: 'text', text: '好的' }] } } },
+    ])).toBe('对照 #9-25 和 #10-02，核对商店下载差值')
+  })
+
+  it('reads the user text following Codex browser context in the same message', () => {
+    expect(latestSessionContentTitle([
+      { type: 'user/message', data: { message: { source: { kind: 'user' }, content: [
+        { type: 'text', text: 'Browser context after tab handoff (untrusted):\npage data' },
+        { type: 'text', text: '编辑飞书周报中的商店数据' },
+      ] } } },
+    ])).toBe('编辑飞书周报中的商店数据')
   })
 })
 

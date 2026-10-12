@@ -3,11 +3,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const LISTENER_KEY = '__dshBrowserContentScriptListener__'
 const WATCHER_KEY = '__dshBrowserSelectionWatcher__'
+const RECORDER_KEY = '__traceForgeDomRecorder__'
 
 afterEach(() => {
   Reflect.deleteProperty(navigator, 'userActivation')
   delete (globalThis as Record<string, unknown>)[LISTENER_KEY]
   delete (globalThis as Record<string, unknown>)[WATCHER_KEY]
+  delete (globalThis as Record<string, unknown>)[RECORDER_KEY]
   vi.unstubAllGlobals()
   vi.resetModules()
 })
@@ -81,5 +83,27 @@ describe('selection watch arming', () => {
         selection: expect.objectContaining({ text: 'quoted text' }),
       })
     }, { timeout: 2_000 })
+  })
+
+  it('silently stops sending when an extension reload invalidates the old context', async () => {
+    Object.defineProperty(navigator, 'userActivation', {
+      configurable: true,
+      value: { isActive: true, hasBeenActive: true },
+    })
+    const sendMessage = vi.fn((message: { type: string }) => {
+      if (message.type === 'DSH_CONTENT_READY') return Promise.resolve({ selectionWatch: true })
+      throw new Error('Extension context invalidated.')
+    })
+    vi.stubGlobal('chrome', {
+      runtime: { onMessage: { addListener: vi.fn(), removeListener: vi.fn() }, sendMessage },
+    })
+    window.getSelection = () => null
+
+    await import('../src/content/index.ts')
+    await vi.waitFor(() => { expect(sendMessage).toHaveBeenCalledTimes(1) })
+    window.getSelection = () => ({ toString: () => 'quoted text' }) as unknown as Selection
+    document.dispatchEvent(new Event('selectionchange'))
+
+    await vi.waitFor(() => { expect(sendMessage).toHaveBeenCalledTimes(2) }, { timeout: 2_000 })
   })
 })

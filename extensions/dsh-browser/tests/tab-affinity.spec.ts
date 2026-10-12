@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest'
 import {
+  isTabAffinityDecision,
   TabAffinityController,
   type AffinityTab,
 } from '../src/background/tab-affinity.ts'
@@ -10,6 +11,20 @@ function tab(tabId: number, title = `Tab ${tabId}`): AffinityTab {
 }
 
 describe('TabAffinityController', () => {
+  it('recognizes show-controlled without treating it as follow-current', () => {
+    expect(isTabAffinityDecision('show-controlled')).toBe(true)
+    const affinity = new TabAffinityController()
+    affinity.observeActive(tab(1))
+    affinity.bindInitial(tab(1))
+    affinity.observeActive(tab(2))
+    affinity.decide('keep', affinity.snapshot().revision)
+    const background = affinity.snapshot()
+
+    expect(background.status).toBe('background')
+    expect(affinity.decide('show-controlled', background.revision)).toBe(false)
+    expect(affinity.snapshot()).toEqual(background)
+  })
+
   it('binds the first tool target and follows metadata updates in place', () => {
     const affinity = new TabAffinityController()
     affinity.observeActive(tab(1))

@@ -19,6 +19,7 @@
 
 import { normalizeSelectionText, type SelectionCapture } from '../selection.ts'
 import { isSensitiveField } from './privacy.ts'
+import { sanitizeUrlForModel } from '../security/url-privacy.ts'
 
 /** Quiet period after the last selection change before a capture is emitted. */
 const SELECTION_SETTLE_MS = 250
@@ -110,7 +111,7 @@ export function readSelectionCapture(): SelectionCapture | null {
   if (raw === '') return null
   const { text, truncated } = normalizeSelectionText(raw)
   if (text === '') return null
-  return { text, truncated, title: document.title, url: location.href }
+  return { text, truncated, title: document.title, url: sanitizeUrlForModel(location.href) }
 }
 
 /**

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Tandix">
+  <rect x="8" y="8" width="240" height="240" rx="52" fill="#fff"/>
+  <g transform="translate(10 10) scale(1.18)" fill="#111">
+    <path d="M83 28c19 2 29 9 31 19l-5 95c-1 19 10 28 31 24l9 16c-36 17-62-1-63-36z"/>
+    <path d="M42 89c38-19 84-19 126-5-40 15-83 21-126 16z"/>
+  </g>
+</svg>

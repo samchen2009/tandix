@@ -1,6 +1,6 @@
 {
   "name": "dsh-browser-extension",
-  "description": "Chrome and Firefox MV3 extension: sidebar chat with a local dsh instance and text-only read/operate of a user-controlled tab through the dsh browser bridge",
+  "description": "Tandix Chrome and Firefox MV3 extension — help on the current webpage with reusable workflow skills",
   "version": "0.1.4",
   "author": "Yuxiang Lin",
   "license": "MIT",
@@ -24,6 +24,7 @@
   "devDependencies": {
     "@yuxianglin/dsh-bridge-browser": "workspace:^",
     "@types/chrome": "^0.0.268",
+    "@types/node": "^22.20.0",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",

@@ -37,7 +37,7 @@ export function pageUrlKey(value: unknown): string | undefined {
   }
 }
 
-/** Browser-lifetime mapping from a live tab and page path to its conversation. */
+/** Browser-lifetime mapping from a live tab to its conversation. */
 export class PageSessionContextTracker {
   private tabs = new Map<number, PageSessionContext>()
   private revision = 0
@@ -51,14 +51,16 @@ export class PageSessionContextTracker {
     this.ready = this.restore()
   }
 
-  /** Bind a session to the tab's current path, replacing either prior owner. */
+  /** Bind a session to one tab, replacing either prior owner. */
   bind(sessionValue: unknown, tab: PageContextTab): boolean {
     const sessionId = normalizeSessionId(sessionValue)
     const tabId = normalizeId(tab.id)
     const windowId = normalizeId(tab.windowId)
     if (sessionId === undefined || tabId === undefined || windowId === undefined) return false
 
-    const urlKey = pageUrlKey(tab.url)
+    // URL is retained as metadata, not as identity: navigation inside the same
+    // tab must not silently start a different agent conversation.
+    const urlKey = pageUrlKey(tab.url) ?? this.tabs.get(tabId)?.urlKey ?? ''
     let changed = false
     for (const [candidateTabId, context] of this.tabs) {
       if (candidateTabId === tabId || context.sessionId === sessionId) {
@@ -66,22 +68,19 @@ export class PageSessionContextTracker {
         changed = true
       }
     }
-    if (urlKey !== undefined) {
-      this.tabs.set(tabId, { sessionId, windowId, urlKey, updatedAt: this.now() })
-      changed = true
-    }
+    this.tabs.set(tabId, { sessionId, windowId, urlKey, updatedAt: this.now() })
+    changed = true
     if (changed) this.persist()
     return changed
   }
 
-  /** Return a session only for the exact live tab, window, origin, and path. */
+  /** Return a session only for the exact live tab and window. */
   candidate(tab: PageContextTab): string | null {
     const tabId = normalizeId(tab.id)
     const windowId = normalizeId(tab.windowId)
-    const urlKey = pageUrlKey(tab.url)
-    if (tabId === undefined || windowId === undefined || urlKey === undefined) return null
+    if (tabId === undefined || windowId === undefined) return null
     const context = this.tabs.get(tabId)
-    return context?.windowId === windowId && context.urlKey === urlKey
+    return context?.windowId === windowId
       ? context.sessionId
       : null
   }
@@ -142,7 +141,7 @@ function parseStoredContexts(value: unknown): Map<number, PageSessionContext> {
     const context = raw as Partial<PageSessionContext>
     const sessionId = normalizeSessionId(context.sessionId)
     const windowId = normalizeId(context.windowId)
-    const urlKey = pageUrlKey(context.urlKey)
+    const urlKey = context.urlKey === '' ? '' : pageUrlKey(context.urlKey)
     const updatedAt = typeof context.updatedAt === 'number' && Number.isFinite(context.updatedAt) && context.updatedAt >= 0
       ? context.updatedAt
       : undefined

@@ -1,0 +1,56 @@
+#!/bin/bash
+# Small Tandix installer. Distribution URLs and hashes are filled at release time.
+set -euo pipefail
+
+if [ "$(uname -s)" != Darwin ]; then
+  printf 'This installer is for macOS. Use the Windows PowerShell installer on Windows.\n' >&2
+  exit 1
+fi
+
+has_compatible_node() {
+  command -v node >/dev/null 2>&1 &&
+    node -e 'const v=process.versions.node.split(".").map(Number);process.exit((v[0]===22&&v[1]>=19)||v[0]>=24?0:1)' >/dev/null 2>&1
+}
+
+machine="$(uname -m)"
+# A translated shell on Apple Silicon can report x86_64.
+if [ "$machine" = x86_64 ] && [ "$(sysctl -in sysctl.proc_translated 2>/dev/null || true)" = 1 ]; then machine=arm64; fi
+case "$machine" in
+  arm64) arch=arm64; full_url='__MAC_ARM64_URL__'; full_sha='__MAC_ARM64_SHA__' ;;
+  x86_64) arch=x64; full_url='__MAC_X64_URL__'; full_sha='__MAC_X64_SHA__' ;;
+  *) printf 'Unsupported macOS architecture: %s\n' "$machine" >&2; exit 1 ;;
+esac
+printf 'Platform detected: macOS %s.\n' "$arch"
+if has_compatible_node; then
+  zip_url="${TANDIX_LITE_ZIP_URL:-__MAC_LITE_URL__}"
+  zip_sha='__MAC_LITE_SHA__'
+  printf 'Compatible Node.js found; downloading the lite Tandix ZIP.\n'
+else
+  zip_url="${TANDIX_FULL_ZIP_URL:-$full_url}"
+  zip_sha="$full_sha"
+  printf 'Compatible Node.js not found; downloading the complete Tandix ZIP for this Mac.\n'
+fi
+
+case "$zip_url" in
+  http://*|https://*) ;;
+  *) printf 'A direct ZIP download URL has not been configured.\n' >&2; exit 1 ;;
+esac
+
+work="$(mktemp -d "${TMPDIR:-/tmp}/tandix-bootstrap.XXXXXX")"
+trap 'rm -rf -- "$work"' EXIT
+archive="$work/tandix.zip"
+curl -fL --retry 2 --connect-timeout 15 "$zip_url" -o "$archive"
+printf '%s  %s\n' "$zip_sha" "$archive" | shasum -a 256 -c -
+unzip -q "$archive" -d "$work"
+root="$work/网页助手_Tandix_Codex"
+launcher="$root/安装网页助手-Mac.command"
+if [ ! -f "$launcher" ]; then
+  printf 'The verified ZIP does not contain the macOS installer.\n' >&2
+  exit 1
+fi
+
+if [ "${TANDIX_BOOTSTRAP_VERIFY_ONLY:-0}" = 1 ]; then
+  printf 'Downloaded, verified and extracted the macOS installer successfully.\n'
+  exit 0
+fi
+bash "$launcher"

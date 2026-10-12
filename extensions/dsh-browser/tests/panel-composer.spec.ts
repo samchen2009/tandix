@@ -18,6 +18,7 @@ describe('rejected prompt draft restoration', () => {
   const submitted = {
     text: 'describe this image',
     images: [{ id: 'submitted-image' }],
+    files: [] as { id: string }[],
   }
 
   it('restores the complete submission when the composer is still empty', () => {
@@ -25,12 +26,12 @@ describe('rejected prompt draft restoration', () => {
   })
 
   it('does not mix rejected images into a newer text-only draft', () => {
-    const newer = { text: 'newer text', images: [] as { id: string }[] }
+    const newer = { text: 'newer text', images: [] as { id: string }[], files: [] as { id: string }[] }
     expect(restoreSubmittedDraft(newer, submitted)).toBe(newer)
   })
 
   it('does not mix rejected text into a newer image-only draft', () => {
-    const newer = { text: '', images: [{ id: 'newer-image' }] }
+    const newer = { text: '', images: [{ id: 'newer-image' }], files: [] as { id: string }[] }
     expect(restoreSubmittedDraft(newer, submitted)).toBe(newer)
   })
 })

@@ -3,7 +3,7 @@
  *
  * The extension captures the page immediately after the user chooses to
  * follow it. A live Agent receives that snapshot at once; a deferred session
- * keeps only its newest snapshot until `agent/created` publishes the
+ * keeps only its newest snapshot until `agent/session-start` publishes the
  * Agent. Live inboxes also keep only the newest unclaimed browser snapshot.
  * Injection deliberately does not wake an idle Agent — the snapshot is
  * claimed together with the user's next message.
@@ -12,19 +12,10 @@
  */
 
 import type { Agent, AgentRegistry } from '@deepseek-ai/dsh-agent'
-import { createUserMessage, type ContextFormed, type UserMessage } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
 
-declare module '@deepseek-ai/dsh-llm' {
-  interface MessageSourceMap {
-    /** Followed-tab browser page snapshot owned by bridge-browser. */
-    'browser-context': {
-      kind: 'browser-context'
-    } & ContextFormed
-  }
-}
-
-/** MessageSource.kind for snapshot supersession and transcript presentation. */
-export const BROWSER_CONTEXT_KIND = 'browser-context' as const
+/** Provenance key used for snapshot supersession and transcript presentation. */
+export const BROWSER_CONTEXT_PLUGIN = '@yuxianglin/dsh-bridge-browser'
 
 /** Bound orphaned provisional sessions while retaining normal recent tabs. */
 const DEFAULT_MAX_PENDING = 32
@@ -33,13 +24,14 @@ const DEFAULT_MAX_PENDING = 32
 export function createBrowserSnapshotMessage(snapshot: string): UserMessage {
   const text = [
     'The user chose to follow the newly active browser tab. The browser page context was refreshed immediately after that choice.',
-    'The following is an already completed browser_snapshot of the current page. Use its stable indices directly for the next request; do not take an immediate duplicate snapshot unless required context is missing.',
+    'The following is an already completed browser_snapshot of the current page. Use its indices while the document remains current; do not take an immediate duplicate snapshot unless context is missing or the page has changed.',
     snapshot,
   ].join('\n\n')
   return createUserMessage({
     content: [{ type: 'text', text }],
     source: {
-      kind: BROWSER_CONTEXT_KIND,
+      kind: 'plugin',
+      plugin: BROWSER_CONTEXT_PLUGIN,
       form: 'snapshot',
       sections: [{ name: 'browser-page', text }],
     },
@@ -49,7 +41,8 @@ export function createBrowserSnapshotMessage(snapshot: string): UserMessage {
 /** Supersede pending tab context through the durable Inbox command surface. */
 function injectLatestSnapshot(agent: Agent, snapshot: string): void {
   for (const message of agent.inbox.nextStep) {
-    if (message.source.kind === BROWSER_CONTEXT_KIND
+    if (message.source.kind === 'plugin'
+      && message.source.plugin === BROWSER_CONTEXT_PLUGIN
       && message.source.form === 'snapshot') {
       agent.inbox.remove(message.id)
     }

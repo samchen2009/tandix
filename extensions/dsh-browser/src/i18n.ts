@@ -1,28 +1,36 @@
-/** Languages supported by the extension UI. */
+/** Languages supported by the extension UI. Chinese is the first-run default. */
 export type UiLocale = 'en' | 'zh'
 
-/**
- * Chinese browser locales use Chinese; every other locale deliberately falls
- * back to English so an untranslated third language never leaks into the UI.
- */
+export const UI_LOCALE_STORAGE_KEY = 'traceforge.uiLocale'
+let currentLocale: UiLocale = 'zh'
+
+/** Normalize an explicit language choice; unknown values fall back to Chinese. */
 export function localeFromLanguage(language: string | null | undefined): UiLocale {
   const normalized = language?.trim().toLowerCase() ?? ''
-  return normalized === 'zh' || normalized.startsWith('zh-') ? 'zh' : 'en'
+  return normalized === 'en' || normalized.startsWith('en-') ? 'en' : 'zh'
 }
 
-/** Read the browser's first preferred language, with the extension UI locale as a fallback. */
+/** Return the current in-process choice without waiting on extension storage. */
 export function getUiLocale(): UiLocale {
-  let language: string | undefined
-  if (typeof navigator !== 'undefined') {
-    const preferred = navigator.languages?.find((candidate) => candidate.trim() !== '') ?? navigator.language
-    language = preferred.trim() === '' ? undefined : preferred
+  return currentLocale
+}
+
+/** Load an explicit choice, if any. Browser language never overrides Chinese by default. */
+export async function loadUiLocale(): Promise<UiLocale> {
+  if (typeof chrome === 'undefined' || typeof chrome.storage?.local?.get !== 'function') return currentLocale
+  try {
+    const stored = (await chrome.storage.local.get(UI_LOCALE_STORAGE_KEY))[UI_LOCALE_STORAGE_KEY]
+    currentLocale = stored === 'en' ? 'en' : 'zh'
+  } catch {
+    currentLocale = 'zh'
   }
-  if (language === undefined && typeof chrome !== 'undefined' && chrome.i18n?.getUILanguage !== undefined) {
-    try {
-      language = chrome.i18n.getUILanguage()
-    } catch {
-      // A partially mocked or stale extension context may expose an unusable API.
-    }
+  return currentLocale
+}
+
+/** Persist the user's language selection for future side panels. */
+export async function saveUiLocale(locale: UiLocale): Promise<void> {
+  currentLocale = locale
+  if (typeof chrome !== 'undefined' && typeof chrome.storage?.local?.set === 'function') {
+    await chrome.storage.local.set({ [UI_LOCALE_STORAGE_KEY]: locale })
   }
-  return localeFromLanguage(language)
 }

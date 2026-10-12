@@ -10,7 +10,7 @@ function chromeEvent<T extends unknown[]>() {
   }
 }
 
-function panelPort() {
+function panelPort(tabId?: number) {
   const onMessage = chromeEvent<[unknown]>()
   const onDisconnect = chromeEvent<[]>()
   const postMessage = vi.fn()
@@ -19,6 +19,7 @@ function panelPort() {
     postMessage,
     onMessage,
     onDisconnect,
+    ...(tabId === undefined ? {} : { sender: { url: `chrome-extension://test/panel/index.html?tandixTab=${tabId}` } }),
   } as unknown as chrome.runtime.Port
   return { onDisconnect, onMessage, port, postMessage }
 }
@@ -43,7 +44,10 @@ function tab(tabId: number): chrome.tabs.Tab {
 
 function mockChrome() {
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
+  const onActivated = chromeEvent<[{ tabId: number; windowId: number }]>()
   const query = vi.fn(async () => [tab(1)])
+  const update = vi.fn(async (tabId: number) => tab(tabId))
+  const updateWindow = vi.fn(async () => ({ id: 1 }))
   vi.stubGlobal('chrome', {
     alarms: {
       create: vi.fn(),
@@ -79,8 +83,10 @@ function mockChrome() {
     tabs: {
       get: vi.fn(async (tabId: number) => tab(tabId)),
       query,
-      sendMessage: vi.fn(async () => {}),
-      onActivated: chromeEvent<[{ tabId: number; windowId: number }]>(),
+      update,
+      sendMessage: vi.fn(async (_tabId: number, message: { type?: string }) =>
+        message.type === 'DSH_ACTION' ? { ok: true, result: { text: 'Page snapshot' } } : undefined),
+      onActivated,
       onUpdated: chromeEvent<[number, chrome.tabs.TabChangeInfo, chrome.tabs.Tab]>(),
       onReplaced: chromeEvent<[number, number]>(),
       onRemoved: chromeEvent<[number]>(),
@@ -90,11 +96,12 @@ function mockChrome() {
     },
     windows: {
       WINDOW_ID_NONE: -1,
+      update: updateWindow,
       onFocusChanged: chromeEvent<[number]>(),
       onRemoved: chromeEvent<[number]>(),
     },
   } as unknown as typeof chrome)
-  return { onConnect, query }
+  return { onActivated, onConnect, query, update, updateWindow }
 }
 
 async function connectPanelForTest() {
@@ -119,6 +126,106 @@ afterEach(() => {
 })
 
 describe('background tab-affinity rebind protocol', () => {
+  it('keeps tab-specific Tandix panels bound to their own pages', async () => {
+    const chromeMock = mockChrome()
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 503 })))
+    await import('../src/background/index.ts')
+    await vi.waitFor(() => { expect(chromeMock.query).toHaveBeenCalled() })
+
+    const first = panelPort(1)
+    const second = panelPort(2)
+    chromeMock.onConnect.emit(first.port)
+    chromeMock.onConnect.emit(second.port)
+    first.onMessage.emit({ type: 'panel.window', windowId: 1 })
+    second.onMessage.emit({ type: 'panel.window', windowId: 1 })
+    first.onMessage.emit({ type: 'session.active', sessionId: 'session-1', isNew: true })
+    second.onMessage.emit({ type: 'session.active', sessionId: 'session-2', isNew: true })
+
+    await vi.waitFor(() => {
+      expect(first.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'tab-affinity',
+        state: expect.objectContaining({
+          status: 'following',
+          controlled: expect.objectContaining({ tabId: 1 }),
+          active: expect.objectContaining({ tabId: 1 }),
+        }),
+      }))
+      expect(second.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'tab-affinity',
+        state: expect.objectContaining({
+          status: 'following',
+          controlled: expect.objectContaining({ tabId: 2 }),
+          active: expect.objectContaining({ tabId: 2 }),
+        }),
+      }))
+    })
+
+    first.postMessage.mockClear()
+    second.postMessage.mockClear()
+    chromeMock.onActivated.emit({ tabId: 2, windowId: 1 })
+
+    await vi.waitFor(() => {
+      const firstStates = first.postMessage.mock.calls
+        .map(([message]) => message as { type?: string; state?: { status?: string; controlled?: { tabId?: number } } })
+        .filter((message) => message.type === 'tab-affinity')
+      const secondStates = second.postMessage.mock.calls
+        .map(([message]) => message as { type?: string; state?: { status?: string; controlled?: { tabId?: number } } })
+        .filter((message) => message.type === 'tab-affinity')
+      expect(firstStates.at(-1)?.state).toMatchObject({ status: 'following', controlled: { tabId: 1 } })
+      expect(secondStates.at(-1)?.state).toMatchObject({ status: 'following', controlled: { tabId: 2 } })
+      expect(firstStates.some((message) => message.state?.status === 'handoff')).toBe(false)
+      expect(secondStates.some((message) => message.state?.status === 'handoff')).toBe(false)
+    })
+  })
+
+  it('shows the controlled tab without rebinding the assistant to the current tab', async () => {
+    const { onActivated, onMessage, postMessage, query, update, updateWindow } = await connectPanelForTest()
+    onMessage.emit({ type: 'tab-affinity.rebind', id: 'initial-bind' })
+    await vi.waitFor(() => {
+      expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'tab-affinity',
+        state: expect.objectContaining({ status: 'following', controlled: expect.objectContaining({ tabId: 1 }) }),
+      }))
+    })
+
+    onActivated.emit({ tabId: 2, windowId: 1 })
+    query.mockResolvedValue([tab(2)])
+    await vi.waitFor(() => {
+      expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'tab-affinity',
+        state: expect.objectContaining({ status: 'handoff', controlled: expect.objectContaining({ tabId: 1 }) }),
+      }))
+    })
+    const handoff = postMessage.mock.calls.map(([message]) => message as { type?: string; state?: { revision: number; status: string } })
+      .filter((message) => message.type === 'tab-affinity' && message.state?.status === 'handoff').at(-1)?.state
+    expect(handoff).toBeDefined()
+    onMessage.emit({ type: 'tab-affinity.response', revision: handoff!.revision, decision: 'keep' })
+
+    await vi.waitFor(() => {
+      expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'tab-affinity',
+        state: expect.objectContaining({ status: 'background', controlled: expect.objectContaining({ tabId: 1 }) }),
+      }))
+    })
+    const background = postMessage.mock.calls.map(([message]) => message as { type?: string; state?: { revision: number; status: string } })
+      .filter((message) => message.type === 'tab-affinity' && message.state?.status === 'background').at(-1)?.state
+    expect(background).toBeDefined()
+    onMessage.emit({ type: 'tab-affinity.response', revision: background!.revision, decision: 'show-controlled' })
+
+    await vi.waitFor(() => {
+      expect(update).toHaveBeenCalledWith(1, { active: true })
+      expect(updateWindow).toHaveBeenCalledWith(1, { focused: true })
+      expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'tab-affinity',
+        state: expect.objectContaining({
+          status: 'following',
+          controlled: expect.objectContaining({ tabId: 1 }),
+          active: expect.objectContaining({ tabId: 1 }),
+        }),
+      }))
+    })
+  })
+
   it('acknowledges only after control has moved to the freshly queried active tab', async () => {
     const { onMessage, postMessage, query } = await connectPanelForTest()
     query.mockResolvedValue([tab(2)])
@@ -217,7 +324,7 @@ describe('background tab-affinity rebind protocol', () => {
       finishQuery = resolve
     }))
     onMessage.emit({ type: 'tab-affinity.rebind', id: 'disconnected-rebind' })
-    await vi.waitFor(() => { expect(query).toHaveBeenCalledTimes(4) })
+    await vi.waitFor(() => { expect(finishQuery).toBeTypeOf('function') })
     onDisconnect.emit()
     finishQuery([tab(2)])
     await Promise.resolve()

@@ -1,11 +1,11 @@
 {
   "extensionName": {
-    "message": "dsh Browser Assistant"
+    "message": "Tandix"
   },
   "extensionDescription": {
-    "message": "A Chrome side-panel extension that lets dsh read and operate your browser directly without vision."
+    "message": "Ask about and act on the current webpage, then turn reviewed workflows into reusable skills."
   },
   "actionTitle": {
-    "message": "Open dsh Browser Assistant"
+    "message": "Open Tandix"
   }
 }

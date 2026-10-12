@@ -41,7 +41,9 @@ import {
 import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { BRIDGE_CONFIG_PATH, BRIDGE_PATH } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { BridgeClient, type BridgeState } from './bridge.ts'
+import { ensureNativeBridge, nativePanelOpened, nativePanelsClosed } from './native-host.ts'
 import { createRpc } from './rpc.ts'
+import { agentBackend, agentPreference, type AgentBackend, type AgentPreference } from '../agent-backend.ts'
 import {
   dispatchOpenTab,
   dispatchToolCall,
@@ -57,7 +59,7 @@ import {
   type ApprovalPrompt,
   type ApprovalRequest,
 } from '../security/approval.ts'
-import { getUiLocale } from '../i18n.ts'
+import { getUiLocale, loadUiLocale, UI_LOCALE_STORAGE_KEY } from '../i18n.ts'
 import { InteractionResponseRouter } from './responses.ts'
 import {
   actionCoveredByTrustedOrigins,
@@ -69,6 +71,7 @@ import {
   isTabAffinityDecision,
   type AffinityTab,
   type TabAffinityDecision,
+  type TabAffinityState,
 } from './tab-affinity.ts'
 import { bindOpenedTabAffinity } from './open-tab-binding.ts'
 import { FocusedWindowTracker } from './focused-window.ts'
@@ -80,11 +83,19 @@ import {
   PAGE_SESSION_CONTEXT_STORAGE_KEY,
   PageSessionContextTracker,
 } from './session-continuity.ts'
+import { RecordingService } from './recording-service.ts'
+import { InMemoryRecentRecordingStore } from '../recording/store.ts'
+import type { TeachState } from '../recording/state-machine.ts'
+import type { RecordingEventInput } from '../recording/schema.ts'
+import { SkillToolService } from './skill-tools.ts'
 
 /** User settings persisted in chrome.storage.local. */
 export interface Settings {
   bridgeUrl: string
   token: string
+  agentBackend: AgentPreference
+  /** Additional local writable directory for Codex, session workspace for dsh. */
+  sandboxDirectory: string
   sharePageContent: 'ask' | 'auto' | 'off'
   /** Allow every browser operation without an approval prompt. */
   unrestrictedBrowserAccess: boolean
@@ -94,17 +105,22 @@ export interface Settings {
   approvalNotifications: boolean
   /** Restore the current tab and page path's conversation when the panel reopens. */
   autoResumeSession: boolean
+  /** Follow the user's active HTTP(S) tab without a handoff prompt. */
+  autoFollowTabs: boolean
 }
 
 const SETTINGS_DEFAULTS: Settings = {
   // 空地址 = 自动探测本机 dsh（零配置）；手动填地址时优先手动。
   bridgeUrl: '',
   token: '',
+  agentBackend: 'auto',
+  sandboxDirectory: '',
   sharePageContent: 'auto',
   unrestrictedBrowserAccess: false,
   trustedActionOrigins: [],
   approvalNotifications: true,
   autoResumeSession: true,
+  autoFollowTabs: import.meta.env.EXT_TARGET === 'firefox',
 }
 
 /**
@@ -167,12 +183,20 @@ let unrestrictedAccessRevision = 0
 let unrestrictedRevocation: Promise<void> | undefined
 let settingsPersistence = Promise.resolve()
 let caps: BridgeCaps | null = null
+let activeBackend: AgentBackend = 'dsh'
 let bridge: BridgeClient | null = null
 let rpc: ReturnType<typeof createRpc> | null = null
 const panelPorts = new Set<chrome.runtime.Port>()
+const recordingService = new RecordingService(new InMemoryRecentRecordingStore(), broadcastRecordingState, broadcastRecordingEvent)
+/** Chrome records one user-active page at a time; events only belong to that tab's panel. */
+let recordingOwnerTabId: number | undefined
 const BRIDGE_KEEPALIVE_ALARM = 'bridge-keepalive'
+/** Panel renderers reconnect after 150ms; navigation must not look like a real close. */
+const PANEL_DISCONNECT_GRACE_MS = 500
+let panelShutdownTimer: ReturnType<typeof setTimeout> | undefined
 /** Invalidates an asynchronous discovery attempt when its panel lease ends. */
 let bridgeStartRevision = 0
+let nativeStartRevision: number | null = null
 const interactionResponses = new InteractionResponseRouter()
 const transientEvents = new TransientEventCache()
 const tabAffinity = new TabAffinityController()
@@ -185,6 +209,10 @@ const pageSessionContexts = new PageSessionContextTracker({
   },
 })
 void chrome.storage.session.remove(LEGACY_RECENT_SESSION_STORAGE_KEY).catch(() => {})
+void loadUiLocale()
+chrome.storage.onChanged?.addListener((changes, areaName) => {
+  if (areaName === 'local' && changes[UI_LOCALE_STORAGE_KEY] !== undefined) void loadUiLocale()
+})
 /** Ephemeral allowlist: cleared when the last side panel closes or this worker restarts. */
 const sessionTrustedActionOrigins = new Set<string>()
 /** Tool calls that are either withdrawable or completing an already-dispatched action. */
@@ -198,6 +226,7 @@ interface ActiveToolCall {
 }
 
 const activeToolCalls = new Map<string, ActiveToolCall>()
+const skillTools = new SkillToolService()
 /** Disconnection drops result ownership, but dispatched operations must still settle before revocation. */
 const unsettledToolCalls = new Set<ActiveToolCall>()
 let lastPersistedAffinity: string | undefined
@@ -265,6 +294,9 @@ async function persistSettings(next: Partial<Settings>): Promise<void> {
   const changesUnrestrictedAccess = typeof next.unrestrictedBrowserAccess === 'boolean'
   const accessRevision = changesUnrestrictedAccess ? ++unrestrictedAccessRevision : unrestrictedAccessRevision
   const updated = normalizeSettings({ ...settings, ...next })
+  if (updated.sandboxDirectory !== '' && updated.bridgeUrl !== '') {
+    throw new Error('Clear the bridge address to use a sandbox directory with the local companion.')
+  }
   const revokesUnrestrictedAccess = settings.unrestrictedBrowserAccess && !updated.unrestrictedBrowserAccess
   settings = updated
   if (!updated.unrestrictedBrowserAccess) unrestrictedAccessActive = false
@@ -308,11 +340,14 @@ function normalizeSettings(candidate: Settings): Settings {
     : candidate.sharePageContent === 'ask' ? 'ask' : 'auto'
   return {
     ...candidate,
+    agentBackend: agentPreference(candidate.agentBackend),
+    sandboxDirectory: typeof candidate.sandboxDirectory === 'string' ? candidate.sandboxDirectory.trim() : '',
     sharePageContent,
     unrestrictedBrowserAccess: candidate.unrestrictedBrowserAccess === true,
     trustedActionOrigins: trusted,
     approvalNotifications: candidate.approvalNotifications !== false,
     autoResumeSession: candidate.autoResumeSession !== false,
+    autoFollowTabs: candidate.autoFollowTabs !== false,
   }
 }
 
@@ -333,21 +368,104 @@ function disarmBridgeKeepalive(): void {
 }
 
 function broadcastStatus(): void {
-  const payload = { type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps }
+  const payload = { type: 'status', state: currentBridgeState(), caps, backend: activeBackend }
   for (const port of panelPorts) {
     try { port.postMessage(payload) } catch { /* port already closed */ }
   }
 }
 
-function broadcastTabAffinity(): void {
-  const payload = { type: 'tab-affinity', state: tabAffinity.snapshot() }
+function currentBridgeState(): BridgeState {
+  return nativeStartRevision === bridgeStartRevision ? 'connecting' : bridge?.state ?? 'stopped'
+}
+
+function broadcastRecordingState(state: TeachState): void {
+  const payload = { type: 'recording.state', state }
   for (const port of panelPorts) {
+    if (import.meta.env.EXT_TARGET !== 'firefox') {
+      const ownedTabId = panelTabs.get(port)
+      if (ownedTabId !== undefined && ownedTabId !== recordingOwnerTabId) continue
+    }
     try { port.postMessage(payload) } catch { /* port already closed */ }
+  }
+}
+
+function broadcastRecordingEvent(recordingId: string, event: RecordingEventInput, windowId: number): void {
+  const payload = { type: 'recording.event', recordingId, event }
+  for (const port of panelPorts) {
+    if (panelWindows.get(port) !== windowId) continue
+    if (import.meta.env.EXT_TARGET !== 'firefox') {
+      const ownedTabId = panelTabs.get(port)
+      if (ownedTabId !== undefined && ownedTabId !== event.tab.id) continue
+    }
+    try { port.postMessage(payload) } catch { /* port already closed */ }
+  }
+}
+
+function recordingStateForPanel(port: chrome.runtime.Port): TeachState {
+  if (import.meta.env.EXT_TARGET === 'firefox') return recordingService.snapshot()
+  const ownedTabId = panelTabs.get(port)
+  return ownedTabId === undefined || ownedTabId === recordingOwnerTabId
+    ? recordingService.snapshot()
+    : { phase: 'idle' }
+}
+
+function tabAffinityForPanel(port: chrome.runtime.Port): TabAffinityState {
+  const shared = tabAffinity.snapshot()
+  if (import.meta.env.EXT_TARGET === 'firefox') return shared
+
+  const ownedTabId = panelTabs.get(port)
+  if (ownedTabId === undefined) return shared
+
+  const sessionId = panelActiveSessions.get(port)
+  const sessionTab = sessionId === undefined ? undefined : tabAffinity.getSessionTab(sessionId)
+  const owned = panelOwnedTabs.get(port)
+    ?? (shared.active?.tabId === ownedTabId ? shared.active : undefined)
+    ?? (shared.controlled?.tabId === ownedTabId ? shared.controlled : undefined)
+    ?? {
+      tabId: ownedTabId,
+      windowId: panelWindows.get(port) ?? 0,
+      title: '',
+      url: '',
+    }
+
+  // Chrome side panels are tab-specific. A switch to another browser tab must
+  // not turn every open Tandix instance into one global handoff prompt. The
+  // panel's active page is its owning tab, while the session map remains the
+  // source of truth for browser tool routing.
+  if (sessionTab === undefined) {
+    return {
+      revision: shared.revision,
+      status: 'unbound',
+      controlled: null,
+      active: { ...owned },
+      pinned: false,
+    }
+  }
+  return {
+    revision: shared.revision,
+    status: sessionTab.tabId === ownedTabId ? 'following' : 'background',
+    controlled: { ...sessionTab },
+    active: { ...owned },
+    pinned: false,
+  }
+}
+
+function sendTabAffinity(port: chrome.runtime.Port): void {
+  try { port.postMessage({ type: 'tab-affinity', state: tabAffinityForPanel(port) }) } catch { /* port already closed */ }
+}
+
+function broadcastTabAffinity(): void {
+  for (const port of panelPorts) {
+    sendTabAffinity(port)
   }
 }
 
 /** Which window each panel port belongs to, so a quote stays in its window. */
 const panelWindows = new WeakMap<chrome.runtime.Port, number>()
+/** Chrome's tab-specific panel URL identifies its owning tab even after a tab switch. */
+const panelTabs = new WeakMap<chrome.runtime.Port, number>()
+/** Live metadata for the tab that owns each Chrome side-panel instance. */
+const panelOwnedTabs = new WeakMap<chrome.runtime.Port, AffinityTab>()
 /** The conversation each live panel is displaying, used for close checkpoints. */
 const panelActiveSessions = new WeakMap<chrome.runtime.Port, string>()
 
@@ -359,9 +477,12 @@ const panelActiveSessions = new WeakMap<chrome.runtime.Port, string>()
  * normal window's composer.
  */
 function broadcastSelection(windowId: number): void {
-  const payload = { type: 'selection', selection: selections.current(windowId) }
+  const selection = selections.current(windowId)
+  const source = selections.source(windowId)
   for (const port of panelPorts) {
     if (panelWindows.get(port) !== windowId) continue
+    const ownedTabId = panelTabs.get(port)
+    const payload = { type: 'selection', selection: ownedTabId === undefined || source?.tabId === ownedTabId ? selection : null }
     try { port.postMessage(payload) } catch { /* port already closed */ }
   }
 }
@@ -376,6 +497,27 @@ function hasPanelInWindow(windowId: number): boolean {
     if (panelWindows.get(port) === windowId) return true
   }
   return false
+}
+
+function hasPanelForTab(tabId: number, windowId: number): boolean {
+  for (const port of panelPorts) {
+    if (panelWindows.get(port) !== windowId) continue
+    if (import.meta.env.EXT_TARGET === 'firefox' || panelTabs.get(port) === tabId) return true
+  }
+  return false
+}
+
+let recordingFocus = Promise.resolve()
+
+/** The passive trace follows only a tab whose own Tandix panel is open. */
+function focusRecordingTab(tabId: number, windowId: number): void {
+  recordingFocus = recordingFocus.catch(() => {}).then(async () => {
+    if (!hasPanelForTab(tabId, windowId)) return
+    if (recordingService.shouldRecordTab(tabId)) return
+    if (recordingService.snapshot().phase === 'recording') await recordingService.stop()
+    recordingOwnerTabId = tabId
+    await recordingService.start(windowId)
+  }).catch(() => { /* protected or non-HTTP pages cannot be recorded */ })
 }
 
 /**
@@ -481,6 +623,31 @@ function broadcastApprovalResolved(id: string): void {
 }
 
 const APPROVAL_NOTIFICATION_PREFIX = 'dsh-browser-approval:'
+const AGENT_APPROVAL_NOTIFICATION_PREFIX = 'tandix-agent-approval:'
+const agentApprovalWindows = new Map<string, number>()
+const agentApprovalPending = new Set<string>()
+
+async function notifyAgentApproval(id: string): Promise<void> {
+  if (!settings.approvalNotifications || panelPorts.size > 0) return
+  agentApprovalPending.add(id)
+  try {
+    const window = await chrome.windows.getLastFocused()
+    if (window.id === undefined || !agentApprovalPending.has(id) || panelPorts.size > 0) return
+    agentApprovalWindows.set(id, window.id)
+    await chrome.notifications.create(`${AGENT_APPROVAL_NOTIFICATION_PREFIX}${id}`, {
+      type: 'basic', iconUrl: chrome.runtime.getURL('assets/icons/icon128.png'),
+      title: getUiLocale() === 'zh' ? '本地操作等待授权' : 'Local action awaiting approval',
+      message: getUiLocale() === 'zh' ? '点击打开网页助手，查看具体操作并选择允许或拒绝。' : 'Open Tandix to review and allow or deny the action.',
+      requireInteraction: true,
+    })
+  } catch { /* Notifications are best effort; the request remains pending. */ }
+}
+
+function clearAgentApprovalNotification(id: string): void {
+  agentApprovalPending.delete(id)
+  agentApprovalWindows.delete(id)
+  void Promise.resolve(chrome.notifications.clear(`${AGENT_APPROVAL_NOTIFICATION_PREFIX}${id}`)).catch(() => {})
+}
 
 function approvalNotificationId(id: string): string {
   return `${APPROVAL_NOTIFICATION_PREFIX}${id}`
@@ -502,11 +669,11 @@ function notifyApproval(request: ApprovalRequest, _windowId: number): void {
   const copy = getUiLocale() === 'zh'
     ? {
         title: '浏览器操作等待确认',
-        message: '点击通知打开 dsh 浏览器助手，并在 60 秒内确认或拒绝。',
+        message: '点击通知打开网页助手，并在 60 秒内确认或拒绝。',
       }
     : {
         title: 'Browser action awaiting approval',
-        message: 'Click to open dsh Browser Assistant, then allow or deny within 60 seconds.',
+        message: 'Click to open Tandix, then allow or deny within 60 seconds.',
       }
   void Promise.resolve(chrome.notifications.create(approvalNotificationId(request.id), {
     type: 'basic',
@@ -596,6 +763,14 @@ function persistTabAffinity(): void {
 function observeActiveSummary(summary: AffinityTab): void {
   const previousStatus = tabAffinity.snapshot().status
   if (!tabAffinity.observeActive(summary)) return
+  const current = tabAffinity.snapshot()
+  if (import.meta.env.EXT_TARGET === 'firefox' && settings.autoFollowTabs && !current.pinned && current.status === 'handoff'
+    && /^https?:\/\//i.test(summary.url)) {
+    const sid = tabAffinity.focusedSession() ?? undefined
+    commitTabAffinityRebind(summary, sid)
+    if (sid !== undefined) void refreshFollowedPage(sid, summary.tabId).catch(() => {})
+    return
+  }
   if (previousStatus !== 'handoff' && tabAffinity.snapshot().status === 'handoff') {
     const focused = tabAffinity.focusedSession()
     if (focused !== null) {
@@ -699,6 +874,9 @@ async function restoreTabAffinity(): Promise<void> {
   // Restore the pin before syncing the active tab: otherwise the sync would
   // surface a handoff prompt for a switch the user already said not to ask about.
   if (record !== null && 'pinned' in record && record.pinned === true) tabAffinity.restorePinned()
+  // A saved manual-follow preference must win over the default during worker
+  // restart, before the first active-tab observation can auto-rebind.
+  await settingsReady
   await syncActiveTab()
   if (record !== null && 'keptActiveTabId' in record) {
     const state = tabAffinity.snapshot()
@@ -733,11 +911,26 @@ async function checkpointSessionPage(sessionValue: unknown): Promise<void> {
 }
 
 /** Resolve the contextual hint only after the panel has identified its window. */
+async function tabForPanel(port: chrome.runtime.Port, windowId: number): Promise<chrome.tabs.Tab | undefined> {
+  const boundTabId = panelTabs.get(port)
+  if (boundTabId === undefined) {
+    const [active] = await chrome.tabs.query({ active: true, windowId })
+    const summary = active === undefined ? null : summarizeTab(active)
+    if (summary !== null) panelOwnedTabs.set(port, summary)
+    return active
+  }
+  const tab = await chrome.tabs.get(boundTabId)
+  if (tab.windowId !== windowId) return undefined
+  const summary = summarizeTab(tab)
+  if (summary !== null) panelOwnedTabs.set(port, summary)
+  return tab
+}
+
 async function postResumeHint(port: chrome.runtime.Port, windowId: number): Promise<void> {
   await pageSessionContexts.ready
   let sessionId: string | null = null
   try {
-    const [tab] = await chrome.tabs.query({ active: true, windowId })
+    const tab = await tabForPanel(port, windowId)
     if (tab !== undefined) sessionId = pageSessionContexts.candidate(tab)
   } catch {
     // Without an exact live page the panel must start a new conversation.
@@ -968,8 +1161,37 @@ async function resolveTabAffinityResponse(response: {
   sessionId: unknown
 }): Promise<void> {
   await affinityReady
-  await syncActiveTab()
   const sid = typeof response.sessionId === 'string' ? response.sessionId : undefined
+
+  if (response.decision === 'show-controlled') {
+    const state = tabAffinity.snapshot()
+    if (response.revision !== state.revision || state.controlled === null) {
+      broadcastTabAffinity()
+      return
+    }
+    const controlled = state.controlled
+    try {
+      const tab = await chrome.tabs.get(controlled.tabId)
+      const summary = summarizeTab(tab)
+      if (summary === null) throw new Error('The controlled tab is no longer available')
+      await pageSessionContexts.ready
+      // Update affinity before activating the tab. Chrome may deliver
+      // onActivated before tabs.update() resolves; pre-committing avoids a
+      // false handoff banner during this intentional switch.
+      commitTabAffinityRebind(summary, sid, 'active')
+      await chrome.tabs.update(summary.tabId, { active: true })
+      await chrome.windows.update(summary.windowId, { focused: true })
+    } catch {
+      // Restore an accurate background relationship if activation failed.
+      await syncActiveTab()
+      commitTabAffinityRebind(controlled, sid, 'background')
+      return
+    }
+    if (sid !== undefined) await refreshFollowedPage(sid, controlled.tabId).catch(() => {})
+    return
+  }
+
+  await syncActiveTab()
   const accepted = tabAffinity.decide(response.decision, response.revision, sid)
   const controlled = accepted && response.decision === 'follow'
     ? tabAffinity.snapshot().controlled
@@ -989,9 +1211,16 @@ async function resolveTabAffinityResponse(response: {
 }
 
 /** Move browser control to the current tab only after a fresh, valid query. */
-async function rebindTabAffinityToActive(signal: AbortSignal, sessionId?: string): Promise<void> {
+async function rebindTabAffinityToPanel(
+  port: chrome.runtime.Port,
+  signal: AbortSignal,
+  sessionId?: string,
+): Promise<void> {
   await abortable(Promise.all([affinityReady, pageSessionContexts.ready]).then(() => undefined), signal)
-  const tab = await syncActiveTab(undefined, signal)
+  const windowId = panelWindows.get(port)
+  const tab = windowId === undefined
+    ? await syncActiveTab(undefined, signal)
+    : await abortable(tabForPanel(port, windowId), signal)
   throwIfRebindAborted(signal)
   const summary = tab === undefined ? null : summarizeTab(tab)
   if (summary === null) {
@@ -1000,7 +1229,26 @@ async function rebindTabAffinityToActive(signal: AbortSignal, sessionId?: string
       : 'The current tab could not be determined; the existing session and tab binding were left unchanged')
   }
 
-  commitTabAffinityRebind(summary, sessionId)
+  const globallyActive = tabAffinity.snapshot().active?.tabId === summary.tabId
+  commitTabAffinityRebind(summary, sessionId, globallyActive ? 'active' : 'background')
+}
+
+/** A green page indicator requires a real read through the normal extension policy. */
+async function verifyBoundPage(signal: AbortSignal, sessionId?: string): Promise<void> {
+  const target = await resolveToolTab(sessionId)
+  if ('ok' in target) throw new Error(target.error?.message ?? 'No controlled browser tab is available')
+  const unrestrictedAccess = unrestrictedAccessEnabled()
+  const answer = await dispatchToolCall(
+    { id: crypto.randomUUID(), name: 'browser_snapshot', args: {}, ...(sessionId === undefined ? {} : { sessionId }) },
+    unrestrictedAccess ? 'auto' : settings.sharePageContent,
+    caps === null ? undefined : { maxItems: caps.maxInteractiveItems, maxChars: caps.snapshotMaxChars },
+    (prompt) => authorizeToolCall(prompt, signal, target.windowId, sessionId, unrestrictedAccess),
+    signal,
+    target,
+    () => target.id !== undefined && tabAffinity.allowsTarget(target.id, sessionId),
+    { unrestrictedAccess },
+  )
+  if (!answer.ok) throw new Error(answer.error?.message ?? 'The current page could not be read')
 }
 
 /** Commit one explicit tab handoff and clear stale element references. */
@@ -1027,11 +1275,11 @@ function commitTabAffinityRebind(
   broadcastTabAffinity()
 }
 
-async function followModelSelectedTab(tab: chrome.tabs.Tab, sessionId?: string): Promise<void> {
+async function followModelSelectedTab(tab: chrome.tabs.Tab, sessionId?: string, active = false): Promise<void> {
   const summary = summarizeTab(tab)
   if (summary === null) throw new Error('the selected tab has no usable identifier')
   await pageSessionContexts.ready
-  commitTabAffinityRebind(summary, sessionId, 'background')
+  commitTabAffinityRebind(summary, sessionId, active ? 'active' : 'background')
 }
 
 /** 把协商的快照预算下发到受控页（尚未绑定时使用活动页）。 */
@@ -1054,7 +1302,7 @@ async function pushBudgetToControlledTab(negotiated: BridgeCaps): Promise<void> 
   }
 }
 
-/** Route one tool.call frame to the user-approved controlled tab. */
+/** Route one tool.call frame to the browser or Tandix-owned skill storage. */
 function routeToolCall(call: ToolCall): void {
   if (bridge === null) return
   activeToolCalls.get(call.id)?.controller.abort()
@@ -1108,13 +1356,15 @@ function routeToolCall(call: ToolCall): void {
       {
         unrestrictedAccess,
         ...(controlledTabId === undefined ? {} : { controlledTabId }),
-        followTab: (tab) => followModelSelectedTab(tab, call.sessionId),
+        followTab: (tab, options) => followModelSelectedTab(tab, call.sessionId, options.active),
         commitAction,
         rollbackActionCommit,
       },
     )
   }
-  void (isTabManagementTool(call.name)
+  void (call.name.startsWith('tandix_skill_')
+    ? skillTools.dispatch(call, controller.signal, commitAction)
+    : isTabManagementTool(call.name)
     ? managementDispatch()
     : call.name === 'browser_open_tab'
     ? resolveOpenTabWindow(call.sessionId).then((target) => 'ok' in target
@@ -1147,7 +1397,7 @@ function routeToolCall(call: ToolCall): void {
       if (activeToolCalls.get(call.id) !== activeCall) return
       // A committed browser_open_tab already rebound affinity; prefer that
       // factual success over a generic cancel that would leave the model wrong.
-      if (controller.signal.aborted && !(call.name === 'browser_open_tab' && answer.ok)) {
+      if (controller.signal.aborted && !((call.name === 'browser_open_tab' || call.name === 'tandix_skill_save') && answer.ok && activeCall.committed)) {
         if (activeToolCalls.get(call.id) === activeCall) {
           bridge?.send({
             t: 'tool.result',
@@ -1229,8 +1479,27 @@ async function startBridge(): Promise<void> {
   const revision = ++bridgeStartRevision
   if (panelPorts.size === 0) return
   let url = settings.bridgeUrl
-  if (url === '') {
-    url = await discoverBridge(() => revision === bridgeStartRevision && panelPorts.size > 0) ?? ''
+  const explicitLocalAgent = settings.agentBackend === 'codex' || settings.agentBackend === 'workbuddy'
+  let autoLocal = url === '' || explicitLocalAgent
+  if (!autoLocal) {
+    try { autoLocal = new URL(url).hostname === '127.0.0.1' } catch { /* Preserve invalid manual URL for the existing error path. */ }
+  }
+  if (autoLocal) {
+    if (explicitLocalAgent) url = ''
+    nativeStartRevision = revision
+    broadcastStatus()
+    try {
+      url = await ensureNativeBridge(settings.agentBackend, settings.sandboxDirectory) ?? ''
+    } finally {
+      if (nativeStartRevision === revision) {
+        nativeStartRevision = null
+        broadcastStatus()
+      }
+    }
+    if (url === '' && settings.sandboxDirectory === '' && !explicitLocalAgent
+      && revision === bridgeStartRevision && panelPorts.size > 0) {
+      url = settings.bridgeUrl || await discoverBridge(() => revision === bridgeStartRevision && panelPorts.size > 0) || ''
+    }
   }
   // Discovery is asynchronous. A panel may have closed or a newer settings
   // update may have started while its fetches were in flight.
@@ -1239,9 +1508,30 @@ async function startBridge(): Promise<void> {
     bridge?.stop()
     bridge = null
     rpc = null
+    if (settings.agentBackend === 'codex' || settings.agentBackend === 'workbuddy') activeBackend = settings.agentBackend
     broadcastStatus()
     return
   }
+  let detectedBackend: AgentBackend = 'dsh'
+  let verifiedBackend = false
+  try {
+    const target = new URL(url)
+    target.protocol = target.protocol === 'wss:' ? 'https:' : 'http:'
+    target.pathname = BRIDGE_CONFIG_PATH
+    const config = await fetch(target, { signal: AbortSignal.timeout(1_500) }).then(response => response.json()) as { backend?: unknown }
+    detectedBackend = agentBackend(config.backend)
+    verifiedBackend = config.backend === settings.agentBackend
+  } catch { /* Explicit local backends require a matching companion. */ }
+  if (revision !== bridgeStartRevision || panelPorts.size === 0) return
+  if (explicitLocalAgent && !verifiedBackend) {
+    bridge?.stop()
+    bridge = null
+    rpc = null
+    activeBackend = settings.agentBackend === 'workbuddy' ? 'workbuddy' : 'codex'
+    broadcastStatus()
+    return
+  }
+  activeBackend = detectedBackend
   // 手动填的地址常只有主机部分（如 ws://127.0.0.1:3080）；桥路径是协议
   // 常量，缺省时自动补全，避免连到根路径失败。
   try {
@@ -1255,6 +1545,7 @@ async function startBridge(): Promise<void> {
     const client = new BridgeClient({
       onStateChange: (state) => {
         if (state !== 'connected') {
+          for (const id of agentApprovalPending) clearAgentApprovalNotification(id)
           cancelAllToolCalls()
           interactionResponses.failAll(responseMessages().disconnected)
           transientEvents.clear()
@@ -1265,8 +1556,20 @@ async function startBridge(): Promise<void> {
       },
       onFrame: (frame) => {
         if (frame.t === 'event') {
+          if (frame.frame.method === 'session/event') {
+            const payload = frame.frame.payload as { sessionId?: unknown; event?: { type?: unknown } } | undefined
+            if (payload?.event?.type === 'turn/end' && typeof payload.sessionId === 'string') {
+              skillTools.revokeSave(payload.sessionId)
+            }
+          }
           transientEvents.ingest(frame)
           broadcastEvent(frame)
+          if (frame.frame.method === 'agent-approval/requested' && panelPorts.size === 0) {
+            void notifyAgentApproval(frame.frame.rpcId)
+          } else if (frame.frame.method === 'agent-approval/resolved'
+            && typeof (frame.frame.payload as { approvalRpcId?: unknown } | null)?.approvalRpcId === 'string') {
+            clearAgentApprovalNotification((frame.frame.payload as { approvalRpcId: string }).approvalRpcId)
+          }
         }
         else if (frame.t === 'tool.call') routeToolCall(frame)
         else if (frame.t === 'tool.cancel') cancelToolCall(frame.id)
@@ -1310,7 +1613,19 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
       selectionWatch: selectionWatchEnabled(sender.tab.windowId),
       selectionWatchEpoch: selectionWatchEpoch,
       selectionWatchRevision: selectionWatchRevision,
+      ...(recordingService?.shouldRecordTab(sender.tab.id) === true
+        ? { recording: { id: recordingService.snapshot().recordingId } }
+        : {}),
     })
+    void recordingService?.ensureNetworkProbe(sender.tab.id, sender.frameId ?? 0)
+    return
+  }
+  if (type === 'TRACEFORGE_RECORDING_EVENT') {
+    void recordingService?.captureDom((message as { event?: unknown }).event, sender)
+    return
+  }
+  if (type === 'TRACEFORGE_NETWORK_RESPONSE_SHAPE') {
+    void recordingService?.captureNetworkResponse((message as { response?: unknown }).response, sender)
     return
   }
   if (type !== 'DSH_SELECTION' || sender.tab === undefined) return
@@ -1321,22 +1636,38 @@ chrome.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =>
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'dsh-panel') return
+  try {
+    const senderUrl = new URL(port.sender?.url ?? '')
+    const panelUrl = new URL(chrome.runtime.getURL(TAB_PANEL_PATH))
+    if (senderUrl.origin === panelUrl.origin && senderUrl.pathname === panelUrl.pathname) {
+      const rawTabId = senderUrl.searchParams.get('tandixTab')
+      if (rawTabId !== null && /^\d+$/.test(rawTabId)) panelTabs.set(port, Number(rawTabId))
+    }
+  } catch { /* Firefox and older global panels have no tab-specific URL. */ }
   const wasIdle = panelPorts.size === 0
+  if (panelShutdownTimer !== undefined) {
+    clearTimeout(panelShutdownTimer)
+    panelShutdownTimer = undefined
+  }
   const tabAffinityRebinds = new Map<string, {
     controller: AbortController
     timer: ReturnType<typeof setTimeout>
   }>()
   panelPorts.add(port)
-  if (wasIdle) armBridgeKeepalive()
+  if (wasIdle) {
+    nativePanelOpened()
+    armBridgeKeepalive()
+  }
   void settingsReady.then(syncSelectionWatch)
   void settingsReady.then(() => {
     if (!panelPorts.has(port)) return
     if (bridge === null || bridge.state === 'stopped') return startBridge()
   })
-  try { port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps }) } catch { /* port closed */ }
+  try { port.postMessage({ type: 'status', state: currentBridgeState(), caps, backend: activeBackend }) } catch { /* port closed */ }
+  try { port.postMessage({ type: 'recording.state', state: recordingStateForPanel(port) }) } catch { /* port closed */ }
   void affinityReady.then(async () => {
     await syncActiveTab()
-    try { port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshot() }) } catch { /* port closed */ }
+    sendTabAffinity(port)
   })
   port.onMessage.addListener((message: unknown) => {
     if (typeof message !== 'object' || message === null) return
@@ -1347,6 +1678,15 @@ chrome.runtime.onConnect.addListener((port) => {
         const rpcSessionId = typeof rpcMsg.payload === 'object' && rpcMsg.payload !== null
           ? (rpcMsg.payload as { sessionId?: string }).sessionId
           : undefined
+        const saveSkillIntent = rpcMsg.method === 'session.prompt'
+          && typeof rpcMsg.payload === 'object' && rpcMsg.payload !== null
+          && (rpcMsg.payload as { tandixSkillSaveIntent?: unknown }).tandixSkillSaveIntent === true
+        // turn/start may begin running tools before its RPC acknowledgement arrives.
+        if (saveSkillIntent && typeof rpcSessionId === 'string') skillTools.authorizeSave(rpcSessionId)
+        const gatewayPayload = saveSkillIntent
+          ? Object.fromEntries(Object.entries(rpcMsg.payload as Record<string, unknown>)
+            .filter(([key]) => key !== 'tandixSkillSaveIntent'))
+          : rpcMsg.payload
         const refresh = rpcSessionId === undefined
           ? Promise.resolve()
           : sessionSnapshotRefreshes.get(rpcSessionId) ?? Promise.resolve()
@@ -1358,12 +1698,13 @@ chrome.runtime.onConnect.addListener((port) => {
           : Promise.resolve(true)
         void prepare.then((ready) => {
           if (!ready) throw new Error('This session is not bound to a live browser tab')
-          return gatewayRpc(rpcMsg.method, rpcMsg.payload)
+          return gatewayRpc(rpcMsg.method, gatewayPayload)
         }).then(
           (result) => {
             try { port.postMessage({ type: 'rpc.result', id: rpcMsg.id, ok: true, result }) } catch { /* port closed */ }
           },
           (error: unknown) => {
+            if (saveSkillIntent && typeof rpcSessionId === 'string') skillTools.revokeSave(rpcSessionId)
             try {
               port.postMessage({
                 type: 'rpc.result',
@@ -1394,16 +1735,22 @@ chrome.runtime.onConnect.addListener((port) => {
         break
       }
       case 'settings': {
-        const settingsMsg = message as { id?: unknown; settings: Partial<Settings> }
+        const settingsMsg = message as { id?: unknown; settings: Partial<Settings>; forceReconnect?: unknown }
         const requestId = typeof settingsMsg.id === 'string' ? settingsMsg.id : undefined
         void settingsReady.then(async () => {
           try {
-            const previousConnection = { bridgeUrl: settings.bridgeUrl, token: settings.token }
+            const previousConnection = { bridgeUrl: settings.bridgeUrl, token: settings.token, agentBackend: settings.agentBackend, sandboxDirectory: settings.sandboxDirectory }
             await persistSettings(settingsMsg.settings)
             const connectionChanged = settings.bridgeUrl !== previousConnection.bridgeUrl
               || settings.token !== previousConnection.token
+              || settings.agentBackend !== previousConnection.agentBackend
+              || settings.sandboxDirectory !== previousConnection.sandboxDirectory
+              || settingsMsg.forceReconnect === true
             if (panelPorts.size > 0) {
               if (connectionChanged) await startBridge()
+              if (settings.sandboxDirectory !== '' && bridge === null) {
+                throw new Error('Could not apply the sandbox directory. Reinstall the native companion, then reconnect.')
+              }
               broadcastStatus()
             } else if (connectionChanged) {
               // The settings write outlived its originating panel. Do not keep a
@@ -1434,6 +1781,89 @@ chrome.runtime.onConnect.addListener((port) => {
         })
         break
       }
+      case 'recording.start': {
+        const request = message as { id?: unknown }
+        if (typeof request.id !== 'string') break
+        const id = request.id
+        const ownedTabId = panelTabs.get(port)
+        if (ownedTabId !== undefined) recordingOwnerTabId = ownedTabId
+        void recordingService.start(panelWindows.get(port)).then(
+          (result) => {
+            try { port.postMessage({ type: 'recording.result', id, ok: true, result }) } catch { /* port closed */ }
+          },
+          (cause: unknown) => {
+            try {
+              port.postMessage({
+                type: 'recording.result',
+                id,
+                ok: false,
+                error: { message: cause instanceof Error ? cause.message : String(cause) },
+              })
+            } catch { /* port closed */ }
+          },
+        )
+        break
+      }
+      case 'recording.stop': {
+        const request = message as { id?: unknown }
+        if (typeof request.id !== 'string') break
+        const id = request.id
+        void recordingService.stop().then(
+          (result) => {
+            try { port.postMessage({ type: 'recording.result', id, ok: true, result }) } catch { /* port closed */ }
+          },
+          (cause: unknown) => {
+            try {
+              port.postMessage({
+                type: 'recording.result',
+                id,
+                ok: false,
+                error: { message: cause instanceof Error ? cause.message : String(cause) },
+              })
+            } catch { /* port closed */ }
+          },
+        )
+        break
+      }
+      case 'recording.get-state': {
+        const request = message as { id?: unknown }
+        if (typeof request.id !== 'string') break
+        try {
+          port.postMessage({
+            type: 'recording.result',
+            id: request.id,
+            ok: true,
+            result: recordingStateForPanel(port),
+          })
+        } catch { /* port closed */ }
+        break
+      }
+      case 'recording.export': {
+        const request = message as { id?: unknown; recordingId?: unknown; format?: unknown }
+        if (typeof request.id !== 'string' || (request.format !== 'json' && request.format !== 'jsonl')) break
+        const id = request.id
+        void (recordingService === null
+          ? Promise.reject(new Error('IndexedDB is unavailable'))
+          : recordingService.export(
+              typeof request.recordingId === 'string' ? request.recordingId : undefined,
+              request.format,
+            )).then(
+          (result) => {
+            try { port.postMessage({ type: 'recording.result', id, ok: true, result }) } catch { /* port closed */ }
+          },
+          (cause: unknown) => {
+            try {
+              port.postMessage({
+                type: 'recording.result',
+                id,
+                ok: false,
+                error: { message: cause instanceof Error ? cause.message : String(cause) },
+              })
+            } catch { /* port closed */ }
+          },
+        )
+        break
+      }
       case 'panel.window': {
         // The panel reports its own window; a side panel has no sender.tab.
         const registration = message as { windowId?: unknown }
@@ -1442,8 +1872,20 @@ chrome.runtime.onConnect.addListener((port) => {
           || registration.windowId < 0) break
         panelWindows.set(port, registration.windowId)
         syncSelectionWatch()
+        // Keep a recent operation trace while the side panel is open. The
+        // user no longer has to arm a separate Teach recording.
+        if (import.meta.env.EXT_TARGET === 'firefox') {
+          if (recordingService.snapshot().phase !== 'recording') void recordingService.start(registration.windowId).catch(() => {})
+        } else {
+          void tabForPanel(port, registration.windowId).then((tab) => {
+            if (tab?.id !== undefined && tab.active) focusRecordingTab(tab.id, tab.windowId)
+          }).catch(() => {})
+        }
         try {
-          port.postMessage({ type: 'selection', selection: selections.current(registration.windowId) })
+          const source = selections.source(registration.windowId)
+          const ownedTabId = panelTabs.get(port)
+          port.postMessage({ type: 'selection', selection: ownedTabId === undefined || source?.tabId === ownedTabId
+            ? selections.current(registration.windowId) : null })
         } catch { /* port closed */ }
         void postResumeHint(port, registration.windowId)
         break
@@ -1458,6 +1900,7 @@ chrome.runtime.onConnect.addListener((port) => {
         const expected = request.selection === undefined ? undefined : parsePageSelection(request.selection)
         if (expected === null) break
         const source = selections.source(windowId)
+        if (panelTabs.get(port) !== undefined && source?.tabId !== panelTabs.get(port)) break
         const cleared = expected === undefined
           ? selections.clear(windowId)
           : selections.clearIfCurrent(windowId, expected)
@@ -1475,7 +1918,8 @@ chrome.runtime.onConnect.addListener((port) => {
           panelActiveSessions.set(port, sid)
           if (session.isNew === true) {
             const bind = Promise.all([affinityReady, pageSessionContexts.ready]).then(async () => {
-              const tab = await syncActiveTab()
+              const windowId = panelWindows.get(port)
+              const tab = windowId === undefined ? await syncActiveTab() : await tabForPanel(port, windowId)
               const summary = tab === undefined ? null : summarizeTab(tab)
               if (summary === null) throw new Error('No active tab is available to bind this session')
               if (tabAffinity.getSessionTab(sid) === undefined) tabAffinity.bindNewSession(sid, summary)
@@ -1512,7 +1956,7 @@ chrome.runtime.onConnect.addListener((port) => {
           decision: response.decision,
           sessionId: response.sessionId,
         }).catch(() => {})
-        if (response.decision === 'follow' && sid !== undefined) {
+        if ((response.decision === 'follow' || response.decision === 'show-controlled') && sid !== undefined) {
           sessionSnapshotRefreshes.set(sid, decision)
           void decision.finally(() => {
             if (sessionSnapshotRefreshes.get(sid) === decision) sessionSnapshotRefreshes.delete(sid)
@@ -1535,7 +1979,8 @@ chrome.runtime.onConnect.addListener((port) => {
             : 'Binding the current tab timed out. Try again.'))
         }, TAB_AFFINITY_REBIND_TIMEOUT_MS)
         tabAffinityRebinds.set(requestId, { controller, timer })
-        void rebindTabAffinityToActive(controller.signal, rebindSessionId).then(
+        void rebindTabAffinityToPanel(port, controller.signal, rebindSessionId)
+          .then(() => verifyBoundPage(controller.signal, rebindSessionId)).then(
           () => {
             try { port.postMessage({ type: 'tab-affinity.rebind.result', id: requestId, ok: true }) } catch { /* port closed */ }
           },
@@ -1546,7 +1991,7 @@ chrome.runtime.onConnect.addListener((port) => {
                 id: requestId,
                 ok: false,
                 error: {
-                  code: error instanceof TabAffinityRebindError ? error.code : 'no-active-tab',
+                  code: error instanceof TabAffinityRebindError ? error.code : 'action-failed',
                   message: error instanceof Error ? error.message : String(error),
                 },
               })
@@ -1562,8 +2007,9 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       case 'request-status':
         try {
-          port.postMessage({ type: 'status', state: bridge?.state ?? ('stopped' as BridgeState), caps })
-          port.postMessage({ type: 'tab-affinity', state: tabAffinity.snapshot() })
+          port.postMessage({ type: 'status', state: currentBridgeState(), caps, backend: activeBackend })
+          sendTabAffinity(port)
+          port.postMessage({ type: 'recording.state', state: recordingStateForPanel(port) })
           const statusWindowId = panelWindows.get(port)
           if (statusWindowId !== undefined) {
             port.postMessage({ type: 'selection', selection: selections.current(statusWindowId) })
@@ -1599,16 +2045,31 @@ chrome.runtime.onConnect.addListener((port) => {
     }
     syncSelectionWatch()
     if (panelPorts.size === 0) {
-      bridgeStartRevision += 1
-      bridge?.suspendReconnect()
-      sessionTrustedActionOrigins.clear()
-      approvals.notifyPending()
-      if (bridge?.state !== 'connected') disarmBridgeKeepalive()
+      panelShutdownTimer = setTimeout(() => {
+        panelShutdownTimer = undefined
+        if (panelPorts.size > 0) return
+        void recordingService.stop().catch(() => {})
+        nativePanelsClosed()
+        bridgeStartRevision += 1
+        bridge?.suspendReconnect()
+        sessionTrustedActionOrigins.clear()
+        approvals.notifyPending()
+        if (bridge?.state !== 'connected') disarmBridgeKeepalive()
+      }, PANEL_DISCONNECT_GRACE_MS)
     }
   })
 })
 
 chrome.notifications.onClicked.addListener((notificationId) => {
+  if (notificationId.startsWith(AGENT_APPROVAL_NOTIFICATION_PREFIX)) {
+    const id = notificationId.slice(AGENT_APPROVAL_NOTIFICATION_PREFIX.length)
+    const windowId = agentApprovalWindows.get(id)
+    if (windowId !== undefined) {
+      clearAgentApprovalNotification(id)
+      openAssistantPanel(windowId)
+    }
+    return
+  }
   if (!notificationId.startsWith(APPROVAL_NOTIFICATION_PREFIX)) return
   const id = notificationId.slice(APPROVAL_NOTIFICATION_PREFIX.length)
   const windowId = approvals.windowId(id)
@@ -1622,6 +2083,8 @@ chrome.notifications.onClicked.addListener((notificationId) => {
 // ---- Tab affinity ----
 
 chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  if (import.meta.env.EXT_TARGET !== 'firefox') void configureTabPanel(tabId)
+  if (hasPanelForTab(tabId, windowId)) focusRecordingTab(tabId, windowId)
   void affinityReady.then(() => {
     const activationRevision = focusedWindow.acceptActivation(windowId)
     if (activationRevision === null) return
@@ -1634,15 +2097,27 @@ chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
   })
 })
 
-chrome.tabs.onUpdated.addListener((tabId, _changeInfo, tab) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (tab.active && changeInfo.url?.startsWith('http') && hasPanelForTab(tabId, tab.windowId)
+    && recordingService.snapshot().phase !== 'recording') {
+    focusRecordingTab(tabId, tab.windowId)
+  }
+  if (hasPanelForTab(tabId, tab.windowId)) void recordingService?.observeTabUpdate(tabId, changeInfo, tab)
   void affinityReady.then(() => {
     if (!tabAffinity.tracks(tabId)) return
     const summary = summarizeTab(tab)
+    if (summary !== null && tabAffinity.snapshot().active?.tabId === tabId
+      && tabAffinity.snapshot().status === 'handoff' && import.meta.env.EXT_TARGET === 'firefox' && settings.autoFollowTabs) {
+      observeActiveSummary(summary)
+      return
+    }
     if (summary !== null && tabAffinity.observeTab(summary)) broadcastTabAffinity()
   })
 })
 
 chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+  configuredPanelTabs.delete(removedTabId)
+  if (import.meta.env.EXT_TARGET !== 'firefox') void configureTabPanel(addedTabId)
   // The old document is gone even though Chrome transfers the tab identity.
   broadcastSelections(selections.clearTab(removedTabId))
   void pageSessionContexts.ready.then(() => {
@@ -1670,6 +2145,8 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  configuredPanelTabs.delete(tabId)
+  void recordingService?.observeTabClosed(tabId)
   broadcastSelections(selections.clearTab(tabId))
   void pageSessionContexts.ready.then(() => {
     pageSessionContexts.removeTab(tabId)
@@ -1690,8 +2167,48 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // fragment update does not, and must not drop a quote still on the screen.
 // Matching the exact frame keeps an iframe's navigation from invalidating a
 // quote taken from its parent page, and vice versa.
-chrome.webNavigation.onCommitted.addListener(({ tabId, frameId }) => {
+chrome.webNavigation.onCommitted.addListener((details) => {
+  const { tabId, frameId } = details
+  void recordingService?.observeNavigation(details)
   broadcastSelections(selections.clearTab(tabId, frameId))
+})
+
+// SPA history and fragment changes keep the same document alive, so retain
+// selections but still include the user-visible navigation in the trace.
+chrome.webNavigation.onHistoryStateUpdated?.addListener((details) => {
+  void recordingService?.observeNavigation(details)
+})
+chrome.webNavigation.onReferenceFragmentUpdated?.addListener((details) => {
+  void recordingService?.observeNavigation(details)
+})
+
+// Capture a redacted interface contract: request field names, safe fixed
+// codes, input mappings and auth mechanism. Credential values are never kept.
+const recordingRequestFilter = { urls: ['http://*/*', 'https://*/*'] }
+chrome.webRequest?.onBeforeRequest.addListener((details) => {
+  recordingService?.observeNetworkStart(details)
+}, recordingRequestFilter, ['requestBody'])
+const observeRecordingHeaders = (details: chrome.webRequest.WebRequestHeadersDetails): void => {
+  recordingService?.observeNetworkHeaders(details)
+}
+try {
+  chrome.webRequest?.onBeforeSendHeaders?.addListener(observeRecordingHeaders, recordingRequestFilter, ['requestHeaders', 'extraHeaders'])
+} catch {
+  chrome.webRequest?.onBeforeSendHeaders?.addListener(observeRecordingHeaders, recordingRequestFilter, ['requestHeaders'])
+}
+chrome.webRequest?.onCompleted.addListener((details) => {
+  void recordingService?.observeNetworkEnd(details)
+}, recordingRequestFilter)
+chrome.webRequest?.onErrorOccurred.addListener((details) => {
+  void recordingService?.observeNetworkEnd(details)
+}, recordingRequestFilter)
+
+// Download monitoring is passive and active only during an explicit recording.
+chrome.downloads?.onCreated.addListener((item) => {
+  void recordingService?.observeDownloadCreated(item)
+})
+chrome.downloads?.onChanged.addListener((delta) => {
+  void recordingService?.observeDownloadChanged(delta)
 })
 
 // Ports are cleaned up by their own disconnect; only the window's quote is
@@ -1735,7 +2252,23 @@ function openAssistantPanel(windowId?: number): void {
     void Promise.resolve(sidebar.open()).catch(() => {})
     return
   }
-  if (windowId !== undefined) void chrome.sidePanel.open({ windowId }).catch(() => {})
+  const active = tabAffinity.snapshot().active
+  if (active !== null && (windowId === undefined || active.windowId === windowId)) {
+    void chrome.sidePanel.open({ tabId: active.tabId }).catch(() => {})
+  }
+}
+
+const TAB_PANEL_PATH = 'panel/index.html'
+const configuredPanelTabs = new Set<number>()
+
+function configureTabPanel(tabId: number): Promise<void> {
+  if (configuredPanelTabs.has(tabId)) return Promise.resolve()
+  if (typeof chrome.sidePanel?.setOptions !== 'function') return Promise.resolve()
+  return chrome.sidePanel.setOptions({
+    tabId,
+    path: `${TAB_PANEL_PATH}?tandixTab=${tabId}`,
+    enabled: true,
+  }).then(() => { configuredPanelTabs.add(tabId) }).catch(() => {})
 }
 
 // Open the side panel when the toolbar icon is clicked.
@@ -1744,7 +2277,19 @@ function openAssistantPanel(windowId?: number): void {
 if (import.meta.env.EXT_TARGET === 'firefox') {
   chrome.action.onClicked.addListener(() => { openAssistantPanel() })
 } else {
-  void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {})
+  // The global panel must be disabled. Each tab gets its own instance, which
+  // Chrome opens only after the user clicks the extension action in that tab.
+  void (async () => {
+    if (typeof chrome.sidePanel?.setOptions === 'function') {
+      await chrome.sidePanel.setOptions({ enabled: false }).catch(() => {})
+    }
+    const tabs = await chrome.tabs.query({}).catch(() => [])
+    await Promise.all(tabs.flatMap((tab) => tab.id === undefined ? [] : [configureTabPanel(tab.id)]))
+    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })
+  })().catch(() => {})
+  chrome.tabs.onCreated?.addListener((tab) => {
+    if (tab.id !== undefined) void configureTabPanel(tab.id)
+  })
 }
 
 // Alarms survive some extension/service-worker restarts. Remove any stale

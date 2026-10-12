@@ -32,9 +32,20 @@ export interface DraftImage {
   name?: string
 }
 
+export interface DraftFile {
+  id: string
+  mediaType: string
+  data: string
+  bytes: number
+  name: string
+}
+
+export const MAX_GENERIC_FILE_BYTES = 25 * 1024 * 1024
+
 export type PromptContentPart =
   | { type: 'text'; text: string }
   | { type: 'image'; mediaType: ImageMediaType; data: string; name?: string }
+  | { type: 'file'; mediaType: string; data: string; name: string }
 
 export type ImageInputErrorCode =
   | 'unsupported-type'
@@ -68,6 +79,34 @@ function isPositiveInteger(value: unknown): value is number {
 
 export function isImageMediaType(value: unknown): value is ImageMediaType {
   return typeof value === 'string' && (IMAGE_MEDIA_TYPES as readonly string[]).includes(value)
+}
+
+/** Keep only actual raster files from a clipboard payload, without consuming pasted text. */
+export function clipboardMediaFiles(data: DataTransfer): File[] {
+  const files = [...data.files]
+  if (files.length > 0) return files.filter((file) => isImageMediaType(file.type) || file.type.startsWith('video/'))
+  return [...data.items]
+    .filter((item) => item.kind === 'file' && (isImageMediaType(item.type) || item.type.startsWith('video/')))
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => file !== null)
+}
+
+/** Encode generic files that Codex can inspect from its sandbox workspace. */
+export async function prepareGenericFiles(files: readonly File[]): Promise<DraftFile[]> {
+  const prepared: DraftFile[] = []
+  for (const file of files) {
+    if (file.size > MAX_GENERIC_FILE_BYTES) {
+      throw new Error(`${file.name || 'attachment'} exceeds the 25 MB attachment limit`)
+    }
+    prepared.push({
+      id: crypto.randomUUID(),
+      mediaType: file.type || 'application/octet-stream',
+      data: bytesToBase64(await readFileBytes(file)),
+      bytes: file.size,
+      name: file.name || 'attachment',
+    })
+  }
+  return prepared
 }
 
 /** Parse the host-owned `imageLimits` projection without trusting mux/history data. */
@@ -231,7 +270,11 @@ export function draftImageDataUrl(image: DraftImage): string {
 }
 
 /** Serialize the side-panel draft to the exact dsh `session.prompt` union. */
-export function promptContent(text: string, images: readonly DraftImage[]): PromptContentPart[] {
+export function promptContent(
+  text: string,
+  images: readonly DraftImage[],
+  files: readonly DraftFile[] = [],
+): PromptContentPart[] {
   const content: PromptContentPart[] = []
   if (text !== '') content.push({ type: 'text', text })
   content.push(...images.map((image) => ({
@@ -239,6 +282,12 @@ export function promptContent(text: string, images: readonly DraftImage[]): Prom
     mediaType: image.mediaType,
     data: image.data,
     ...(image.name === undefined ? {} : { name: image.name }),
+  })))
+  content.push(...files.map((file) => ({
+    type: 'file' as const,
+    mediaType: file.mediaType,
+    data: file.data,
+    name: file.name,
   })))
   return content
 }

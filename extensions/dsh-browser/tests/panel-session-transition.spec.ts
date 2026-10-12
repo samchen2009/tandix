@@ -5,6 +5,8 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import type { BridgeState } from '../src/background/bridge.ts'
 import type { PanelApi } from '../src/panel/api.ts'
+import type { RecordingEventInput } from '../src/recording/schema.ts'
+import type { TeachState } from '../src/recording/state-machine.ts'
 import { BRIDGE_SESSION_PURGE_METHOD, type ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 
 let panelApi: PanelApi
@@ -14,23 +16,34 @@ vi.mock('../src/panel/api.ts', () => ({
 }))
 
 import { App } from '../src/panel/App.tsx'
-import { createRemoteHostApi } from '@yuxianglin/dsh-bridge-browser/src/remote-host-api.ts'
 
 describe('panel session transitions', () => {
   let root: Root
-  let onStatus: ((state: BridgeState, caps: null) => void) | undefined
+  let onStatus: ((state: BridgeState, caps: null, backend: 'codex' | 'workbuddy' | 'dsh') => void) | undefined
   let onResumeHint: ((sessionId: string | null) => void) | undefined
   let onEvent: ((frame: ServerFrame) => void) | undefined
+  let onRecordingState: ((state: TeachState) => void) | undefined
+  let onRecordingEvent: ((recordingId: string, event: RecordingEventInput) => void) | undefined
   let rpc: Mock<(method: string, payload?: unknown) => Promise<unknown>>
 
   beforeEach(() => {
     document.body.innerHTML = '<div id="root"></div>'
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
     HTMLElement.prototype.scrollTo = vi.fn()
+    const localStore: Record<string, unknown> = { dshSettings: { autoResumeSession: false } }
     vi.stubGlobal('chrome', {
+      runtime: { getManifest: vi.fn(() => ({ version: '0.1.4' })), getURL: vi.fn(path => `chrome-extension://test/${path}`) },
       storage: {
         local: {
-          get: vi.fn(async () => ({ dshSettings: { autoResumeSession: false } })),
+          get: vi.fn(async (keys?: string | string[] | Record<string, unknown>) => {
+            if (typeof keys === 'string') return { [keys]: localStore[keys] }
+            if (Array.isArray(keys)) return Object.fromEntries(keys.map((key) => [key, localStore[key]]))
+            return { ...localStore }
+          }),
+          set: vi.fn(async (values: Record<string, unknown>) => { Object.assign(localStore, values) }),
+          remove: vi.fn(async (keys: string | string[]) => {
+            for (const key of typeof keys === 'string' ? [keys] : keys) delete localStore[key]
+          }),
         },
       },
       windows: { getCurrent: vi.fn(async () => ({ id: 1 })) },
@@ -39,6 +52,7 @@ describe('panel session transitions', () => {
     rpc = vi.fn(async (method: string, _payload?: unknown) => {
       if (method === 'session.create') return { sessionId: 'session-current' }
       if (method === 'session.history') return { events: [] }
+      if (method === 'session.prompt') return {}
       if (method === 'session.list') {
         return {
           items: [
@@ -70,7 +84,13 @@ describe('panel session transitions', () => {
         .mockResolvedValueOnce(undefined)
         .mockRejectedValueOnce(new Error('runtime port unavailable')),
       updateSettings: vi.fn(async () => {}),
-      requestStatus: vi.fn(async () => {}),
+    requestStatus: vi.fn(async () => {}),
+    onRecordingState: vi.fn((callback) => { onRecordingState = callback; return () => {} }),
+    onRecordingEvent: vi.fn((callback) => { onRecordingEvent = callback; return () => {} }),
+    getRecordingState: vi.fn(async () => ({ phase: 'idle' as const })),
+    startRecording: vi.fn(async () => ({ phase: 'recording' as const })),
+    stopRecording: vi.fn(async () => ({ phase: 'recorded' as const })),
+    exportRecording: vi.fn(async () => ({ filename: 'trace.json', mimeType: 'application/json' as const, content: '{}' })),
     }
 
     root = createRoot(document.querySelector('#root')!)
@@ -82,102 +102,26 @@ describe('panel session transitions', () => {
     vi.restoreAllMocks()
   })
 
-  async function renderConnected(hint: string | null): Promise<void> {
+  async function renderConnected(hint: string | null, backend: 'codex' | 'workbuddy' | 'dsh' = 'dsh'): Promise<void> {
     await act(async () => { root.render(createElement(App)) })
     await act(async () => {
-      onStatus?.('connected', null)
+      onStatus?.('connected', null, backend)
       onResumeHint?.(hint)
     })
   }
 
-  it('shows the saved Session model and allows switching to the deployment default', async () => {
-    let selected = { provider: 'provider', model: 'saved-model' }
-    const host = createRemoteHostApi({
-      invoke: async ({ method, args }) => {
-        if (method === 'modelCatalog') return {
-          default: { provider: 'provider', model: 'default-model' },
-          routableProviders: ['provider'],
-          groups: [{ id: 'provider', name: 'Provider', models: [
-            { id: 'default-model', name: 'Default model' }, { id: 'saved-model', name: 'Saved model' },
-          ] }],
-          failures: [],
-        }
-        if (method === 'projections') return { asOfSeq: 7, values: { modelSelection: { next: selected } } }
-        if (method === 'selectModel') {
-          const request = args.request as { provider: string; model: string }
-          selected = { provider: request.provider, model: request.model }
-          return { selected }
-        }
-        throw new Error(`Unexpected Host method: ${method}`)
-      },
-      wireStream: {
-        open: async () => { throw new Error('unexpected stream') },
-        failure: (error) => ({ code: 'internal', message: String(error), details: {} }),
-      },
-    }, { createSharedFetchHandler: () => ({ fetch: async () => { throw new Error('unexpected fetch') } }) })
-    const original = rpc.getMockImplementation()!
-    rpc.mockImplementation(async (method, payload) => {
-      if (method !== 'session.models' && method !== 'session.selectModel') return original(method, payload)
-      const result = await host.call({ rpcId: method, method, payload, signal: new AbortController().signal })
-      if (!result.ok) throw new Error(result.error.message)
-      return result.value
-    })
+  it('selects WorkBuddy, preserves its status, and shows only supported settings', async () => {
     await renderConnected(null)
-    const trigger = document.querySelector<HTMLButtonElement>('.composer-model-trigger')!
-    expect(trigger.textContent).toContain('Saved model')
-    await act(async () => { trigger.click() })
-    const option = [...document.querySelectorAll<HTMLButtonElement>('[role="option"]')]
-      .find((button) => button.textContent === 'Default model')!
-    await act(async () => { option.click() })
-    expect(rpc).toHaveBeenCalledWith('session.selectModel', {
-      sessionId: 'session-current', provider: 'provider', model: 'default-model',
-    })
-    expect(selected.model).toBe('default-model')
-    expect(trigger.textContent).toContain('Default model')
-  })
-
-  it('keeps following arriving rows and stops only when the reader scrolls up', async () => {
-    await renderConnected(null)
-    const messages = document.querySelector<HTMLDivElement>('.messages')!
-    let scrollHeight = 1000
-    let scrollTop = 400
-    Object.defineProperties(messages, {
-      scrollHeight: { get: () => scrollHeight },
-      clientHeight: { get: () => 600 },
-      scrollTop: { get: () => scrollTop },
-    })
-    // Model the intermediate scroll event produced by CSS smooth scrolling.
-    messages.scrollTo = vi.fn((options: ScrollToOptions) => {
-      const destination = Math.min(options.top ?? 0, scrollHeight - 600)
-      scrollTop = options.behavior === 'instant' ? destination : scrollTop + 1
-      messages.dispatchEvent(new Event('scroll'))
-    }) as typeof messages.scrollTo
-    const append = async (seq: number): Promise<void> => {
-      await act(async () => {
-        scrollHeight += 200
-        onEvent?.({ t: 'event', frame: { rpcId: `row-${seq}`, method: 'session/event', payload: {
-          sessionId: 'session-current', event: { type: 'assistant/message', seq, surfaceOp: 'append', data: {
-            turn: seq, step: 0, message: { content: [{ type: 'text', text: `Message ${seq}` }] },
-          } },
-        } } })
-      })
-    }
-    await append(1)
-    await append(2)
-    expect(scrollTop).toBe(scrollHeight - 600)
-    expect(document.querySelector('.scroll-to-bottom')).toBeNull()
-
-    await act(async () => {
-      scrollTop -= 200
-      messages.dispatchEvent(new Event('scroll'))
-    })
-    const readingPosition = scrollTop
-    await append(3)
-    expect(scrollTop).toBe(readingPosition)
-    const jump = document.querySelector<HTMLButtonElement>('.scroll-to-bottom')!
-    expect(jump).not.toBeNull()
-    await act(async () => { jump.click() })
-    expect(messages.scrollTo).toHaveBeenLastCalledWith({ top: scrollHeight, behavior: 'smooth' })
+    await act(async () => { (document.querySelector('.connection') as HTMLButtonElement).click() })
+    const choice = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')].find(button => button.textContent === 'WorkBuddy')!
+    expect(choice).toBeDefined()
+    await act(async () => { choice.click() })
+    expect(panelApi.updateSettings).toHaveBeenCalledWith({ agentBackend: 'workbuddy' }, true)
+    await act(async () => { onStatus?.('connected', null, 'workbuddy') })
+    expect(document.querySelector('.connection')?.textContent).toContain('WorkBuddy')
+    expect(document.querySelector('.task-goal')).toBeNull()
+    await act(async () => { (document.querySelector('.settings-trigger') as HTMLButtonElement).click() })
+    expect(document.querySelector('[aria-label="WorkBuddy"]')?.textContent).toContain('ACP')
   })
 
   it('keeps the reconnect stream suffix when history resolves late, then shows only the durable settlement', async () => {
@@ -425,8 +369,8 @@ describe('panel session transitions', () => {
     await renderConnected('session-page')
     await vi.waitFor(() => { expect(panelApi.setActiveSession).toHaveBeenCalledWith('session-page') })
 
-    await act(async () => { onStatus?.('stopped', null) })
-    await act(async () => { onStatus?.('connected', null) })
+    await act(async () => { onStatus?.('stopped', null, 'dsh') })
+    await act(async () => { onStatus?.('connected', null, 'dsh') })
     await new Promise((resolve) => { setTimeout(resolve, 0) })
     expect(panelApi.setActiveSession).toHaveBeenCalledTimes(1)
 
@@ -439,7 +383,7 @@ describe('panel session transitions', () => {
   it('releases the controls and surfaces an activation failure', async () => {
     await act(async () => { root.render(createElement(App)) })
     await act(async () => {
-      onStatus?.('connected', null)
+      onStatus?.('connected', null, 'dsh')
       onResumeHint?.(null)
     })
     await vi.waitFor(() => {
@@ -472,7 +416,7 @@ describe('panel session transitions', () => {
 
     await act(async () => { root.render(createElement(App)) })
     await act(async () => {
-      onStatus?.('connected', null)
+      onStatus?.('connected', null, 'dsh')
       onResumeHint?.(null)
     })
     await vi.waitFor(() => {
@@ -500,5 +444,204 @@ describe('panel session transitions', () => {
       expect(panelApi.setActiveSession).toHaveBeenCalledTimes(2)
     })
     expect(panelApi.rebindTabAffinity).not.toHaveBeenCalled()
+  })
+
+
+  it('saves a reviewed browser-only skill after clarification and explicit UI confirmation', async () => {
+    panelApi.setActiveSession = vi.fn(async () => undefined)
+    await renderConnected(null)
+    await vi.waitFor(() => { expect(panelApi.setActiveSession).toHaveBeenCalledWith('session-current', true) })
+
+    const capturedAt = Date.now()
+    await act(async () => {
+      onRecordingState?.({ phase: 'recording', recordingId: 'recording-1' })
+      onRecordingEvent?.('recording-1', {
+        kind: 'click', capturedAt, button: 0,
+        target: { tag: 'button', selector: '#query', name: '查询', control: 'button' },
+        tab: { id: 1, windowId: 1, title: '业务后台', url: 'https://example.com/' },
+        frame: { id: 0, url: 'https://example.com/' },
+      })
+    })
+    await act(async () => { document.querySelector<HTMLButtonElement>('.skill-extract-button')!.click() })
+
+    const browserSkill = {
+      goal: '查询目标业务数据',
+      steps: ['填写关键词', '点击查询按钮'],
+      success: '页面显示查询结果',
+      parameters: [{ name: 'keyword', label: '关键词', type: 'string', required: false, defaultValue: '投屏' }],
+      allowedOrigins: ['https://example.com'],
+      startUrl: 'https://example.com/feedback',
+    }
+    const emitAssistant = (seq: number, value: unknown): void => {
+      onEvent?.({
+        t: 'event', frame: { rpcId: `skill-${seq}`, method: 'session/event', payload: {
+          sessionId: 'session-current', event: { type: 'assistant/message', seq, data: {
+            message: { content: [{ type: 'text', text: `<tandix-skill-pair-json>${JSON.stringify(value)}</tandix-skill-pair-json>` }] },
+          } },
+        } },
+      })
+    }
+    await act(async () => {
+      emitAssistant(10, {
+        schemaVersion: 'tandix.skill-pair/v1', name: '查询业务数据', browserSkill,
+        desktopSkill: null, questions: ['查询结果出现是否足以判定完成？'],
+      })
+    })
+    await vi.waitFor(() => {
+      expect(document.querySelector('.chat-skill-review')?.textContent).toContain('查询结果出现是否足以判定完成？')
+      expect(document.querySelector('.chat-skill-review')?.textContent).toContain('可保存、运行和下载浏览器版')
+    })
+    expect(document.querySelector('.skills-tab-count')?.textContent).toBe('0')
+    expect(document.querySelector('.chat-skill-review')?.textContent).not.toContain('确认保存')
+
+    const answer = document.querySelector<HTMLInputElement>('.chat-skill-question-answer')!
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
+      setter.call(answer, '是')
+      answer.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => { document.querySelector<HTMLButtonElement>('.skill-clarification-submit')!.click() })
+    expect(JSON.stringify(rpc.mock.calls.at(-1)?.[1])).toContain('tandix-skill-pair-json')
+
+    await act(async () => {
+      emitAssistant(11, {
+        schemaVersion: 'tandix.skill-pair/v1', name: '查询业务数据', browserSkill,
+        desktopSkill: null,
+        questions: [],
+      })
+    })
+    await vi.waitFor(() => {
+      expect(document.querySelector('.chat-skill-review')?.textContent).toContain('可保存、运行和下载浏览器版')
+      expect(document.querySelector('.chat-skill-review')?.textContent).toContain('确认保存')
+    })
+    expect(chrome.storage.local.set).not.toHaveBeenCalledWith(expect.objectContaining({
+      'tandix.chat-skills.v1': expect.anything(),
+    }))
+
+    const confirm = [...document.querySelectorAll<HTMLButtonElement>('.chat-skill-actions-footer button')]
+      .find((button) => button.textContent === '确认保存')!
+    await act(async () => { confirm.click() })
+    await vi.waitFor(() => {
+      expect(chrome.storage.local.set).toHaveBeenCalledWith(expect.objectContaining({
+        'tandix.chat-skills.v1': expect.anything(),
+      }))
+      expect(document.querySelector('.skills-tab-count')?.textContent).toBe('1')
+      expect(document.querySelector('.run-skills-workspace')?.textContent).toContain('查询业务数据')
+      expect(document.querySelector<HTMLButtonElement>('.download-desktop-skill')?.disabled).toBe(false)
+      expect(document.querySelector<HTMLButtonElement>('.download-desktop-skill')?.title).toContain('浏览器版技能包')
+    })
+  })
+
+  it('shows recently updated chats first and backfills titles from their messages', async () => {
+    const original = rpc.getMockImplementation()!
+    rpc.mockImplementation(async (method, payload) => {
+      if (method === 'session.list') return { items: [
+        { sessionId: 'session-current', updatedAt: 2, running: false, blank: false },
+        { sessionId: 'session-saved', updatedAt: 5, running: false, blank: false },
+      ] }
+      if (method === 'session.history' && (payload as { sessionId: string }).sessionId === 'session-saved') {
+        return { events: [{ event: { type: 'user/message', data: { message: {
+          source: { kind: 'user' }, content: [{ type: 'text', text: '核对飞书周报的商店数据' }],
+        } } } }] }
+      }
+      return original(method, payload)
+    })
+    await renderConnected(null)
+    await act(async () => { document.querySelector<HTMLButtonElement>('.session-menu-trigger')!.click() })
+    const labels = [...document.querySelectorAll<HTMLButtonElement>('.session-list li > button:not(.session-delete)')]
+      .map((button) => button.textContent?.trim())
+    expect(labels[0]).toContain('核对飞书周报的商店数据')
+    expect(labels[1]).toContain('Chat · -current')
+  })
+
+  it('retries an explicit save-skill request once, then reports that it was not saved', async () => {
+    panelApi.setActiveSession = vi.fn(async () => {})
+    await renderConnected(null)
+    const composer = document.querySelector<HTMLTextAreaElement>('footer textarea')!
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
+      setter.call(composer, '总结成技能保存下来')
+      composer.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => { document.querySelector<HTMLButtonElement>('footer button[aria-label="发送消息"]')?.click() })
+    expect(rpc).toHaveBeenCalledWith('session.prompt', expect.objectContaining({
+      sessionId: 'session-current', tandixSkillSaveIntent: true,
+    }))
+    await act(async () => {
+      onEvent?.({ t: 'event', frame: { rpcId: 'ending', method: 'session/event', payload: {
+        sessionId: 'session-current', event: { type: 'turn/end', data: { turn: 1 } },
+      } } })
+    })
+    expect(rpc).toHaveBeenCalledWith('session.prompt', expect.objectContaining({
+      sessionId: 'session-current', tandixSkillSaveIntent: true,
+      content: expect.arrayContaining([expect.objectContaining({ text: expect.stringContaining('tandix_skill_save') })]),
+    }))
+    expect(rpc.mock.calls.filter(([method]) => method === 'session.prompt')).toHaveLength(2)
+    await act(async () => {
+      onEvent?.({ t: 'event', frame: { rpcId: 'retry-ending', method: 'session/event', payload: {
+        sessionId: 'session-current', event: { type: 'turn/end', data: { turn: 2 } },
+      } } })
+    })
+    expect(document.querySelector('.error')?.textContent).toContain('重试后仍未收到')
+    expect(rpc.mock.calls.filter(([method]) => method === 'session.prompt')).toHaveLength(2)
+  })
+
+  it('saves a valid structured skill response even when the agent did not call the tool', async () => {
+    panelApi.setActiveSession = vi.fn(async () => {})
+    await renderConnected(null, 'codex')
+    const composer = document.querySelector<HTMLTextAreaElement>('footer textarea')!
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
+      setter.call(composer, '总结成技能保存下来')
+      composer.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => { document.querySelector<HTMLButtonElement>('footer button[aria-label="发送消息"]')?.click() })
+    const draft = { name: '鸿蒙周报', description: '写鸿蒙周报时使用', instructions: '对照两期数据并核对差值。' }
+    await act(async () => {
+      onEvent?.({ t: 'event', frame: { rpcId: 'answer', method: 'session/event', payload: {
+        sessionId: 'session-current', event: { type: 'assistant/message', data: { message: { content: [
+          { type: 'text', text: `<tandix-skill-save-json>${JSON.stringify(draft)}</tandix-skill-save-json>` },
+        ] } } },
+      } } })
+      onEvent?.({ t: 'event', frame: { rpcId: 'ending', method: 'session/event', payload: {
+        sessionId: 'session-current', event: { type: 'turn/end', data: { turn: 1 } },
+      } } })
+    })
+    const stored = await chrome.storage.local.get('tandix.managed-skills.v1')
+    expect((stored['tandix.managed-skills.v1'] as { name: string }[])[0]?.name).toBe('鸿蒙周报')
+    expect(document.querySelector('.run-skills-list[aria-label="技能列表"]')?.textContent).toContain('鸿蒙周报')
+    expect(document.querySelector('.skills-tab-count')?.textContent).toBe('1')
+    expect(document.querySelector('.error')?.textContent ?? '').not.toContain('尚未保存')
+  })
+
+  it('saves a structured skill returned by the one-time recovery turn', async () => {
+    panelApi.setActiveSession = vi.fn(async () => {})
+    await renderConnected(null)
+    const composer = document.querySelector<HTMLTextAreaElement>('footer textarea')!
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
+      setter.call(composer, '总结成技能保存下来')
+      composer.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => { document.querySelector<HTMLButtonElement>('footer button[aria-label="发送消息"]')?.click() })
+    await act(async () => {
+      onEvent?.({ t: 'event', frame: { rpcId: 'ending', method: 'session/event', payload: {
+        sessionId: 'session-current', event: { type: 'turn/end', data: { turn: 1 } },
+      } } })
+    })
+    const draft = { name: '鸿蒙周报', description: '写鸿蒙周报时使用', instructions: '对照两期数据并核对差值。' }
+    await act(async () => {
+      onEvent?.({ t: 'event', frame: { rpcId: 'recovered-answer', method: 'session/event', payload: {
+        sessionId: 'session-current', event: { type: 'assistant/message', data: { message: { content: [
+          { type: 'text', text: `<tandix-skill-save-json>${JSON.stringify(draft)}</tandix-skill-save-json>` },
+        ] } } },
+      } } })
+      onEvent?.({ t: 'event', frame: { rpcId: 'retry-ending', method: 'session/event', payload: {
+        sessionId: 'session-current', event: { type: 'turn/end', data: { turn: 2 } },
+      } } })
+    })
+    const stored = await chrome.storage.local.get('tandix.managed-skills.v1')
+    expect((stored['tandix.managed-skills.v1'] as { name: string }[])[0]?.name).toBe('鸿蒙周报')
+    expect(document.querySelector('.error')?.textContent ?? '').not.toContain('尚未保存')
   })
 })

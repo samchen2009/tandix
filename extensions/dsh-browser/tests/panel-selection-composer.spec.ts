@@ -4,6 +4,7 @@ import { act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import type { BridgeState } from '../src/background/bridge.ts'
+import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { PanelApi } from '../src/panel/api.ts'
 import type { PageSelection } from '../src/selection.ts'
 
@@ -27,13 +28,18 @@ const selection: PageSelection = {
 
 describe('attaching a page selection in the composer', () => {
   let root: Root
-  let onStatus: ((state: BridgeState, caps: null) => void) | undefined
+  let onStatus: ((state: BridgeState, caps: null, backend?: 'dsh' | 'codex') => void) | undefined
   let onResumeHint: ((sessionId: string | null) => void) | undefined
   let onSelection: ((selection: PageSelection | null) => void) | undefined
+  let onEvent: ((frame: ServerFrame) => void) | undefined
   let rpc: Mock<(method: string, payload?: unknown) => Promise<unknown>>
+  let currentGoal: Record<string, unknown> | null
+  let failGoalStart: boolean
 
   beforeEach(() => {
     document.body.innerHTML = '<div id="root"></div>'
+    currentGoal = null
+    failGoalStart = false
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true })
     HTMLElement.prototype.scrollTo = vi.fn()
     vi.stubGlobal('chrome', {
@@ -41,10 +47,27 @@ describe('attaching a page selection in the composer', () => {
       windows: { getCurrent: vi.fn(async () => ({ id: 1 })) },
     })
 
-    rpc = vi.fn(async (method: string) => {
+    rpc = vi.fn(async (method: string, payload?: unknown) => {
       if (method === 'session.create') return { sessionId: 'session-current' }
       if (method === 'session.history') return { events: [] }
-      if (method === 'session.prompt') return {}
+      if (method === 'session.prompt') {
+        const text = (payload as { content?: Array<{ text?: string }> })?.content?.[0]?.text ?? ''
+        if (failGoalStart && text.includes('Begin working on it now')) throw new Error('bridge unavailable')
+        return {}
+      }
+      if (method === 'session.cancel') return { cancelled: true }
+      if (method === 'goal.get') return { goal: currentGoal }
+      if (method === 'goal.create') {
+        const request = payload as { objective: string; budgetLimit: number }
+        currentGoal = { status: 'active', objective: request.objective,
+          budgetKind: request.budgetLimit === 30000 ? 'tokens' : 'rounds',
+          budgetLimit: request.budgetLimit, budgetUsed: 0 }
+        return { goal: currentGoal }
+      }
+      if (method === 'goal.pause') {
+        currentGoal = { ...currentGoal, status: 'paused' }
+        return { goal: currentGoal }
+      }
       throw new Error(`unexpected RPC: ${method}`)
     })
     const unsubscribe = (): void => {}
@@ -52,7 +75,7 @@ describe('attaching a page selection in the composer', () => {
       rpc: async <T = unknown>(method: string, payload?: unknown): Promise<T> => await rpc(method, payload) as T,
       respond: vi.fn(async () => undefined),
       onStatus: vi.fn((callback) => { onStatus = callback; return unsubscribe }),
-      onEvent: vi.fn(() => unsubscribe),
+      onEvent: vi.fn((callback) => { onEvent = callback; return unsubscribe }),
       onApprovalRequest: vi.fn(() => unsubscribe),
       onApprovalResolved: vi.fn(() => unsubscribe),
       onTabAffinity: vi.fn(() => unsubscribe),
@@ -65,7 +88,13 @@ describe('attaching a page selection in the composer', () => {
       registerWindow: vi.fn(async () => {}),
       setActiveSession: vi.fn(async () => {}),
       updateSettings: vi.fn(async () => {}),
-      requestStatus: vi.fn(async () => {}),
+    requestStatus: vi.fn(async () => {}),
+    onRecordingState: vi.fn(() => () => {}),
+    onRecordingEvent: vi.fn(() => () => {}),
+    getRecordingState: vi.fn(async () => ({ phase: 'idle' as const })),
+    startRecording: vi.fn(async () => ({ phase: 'recording' as const })),
+    stopRecording: vi.fn(async () => ({ phase: 'recorded' as const })),
+    exportRecording: vi.fn(async () => ({ filename: 'trace.json', mimeType: 'application/json' as const, content: '{}' })),
     }
     root = createRoot(document.querySelector('#root')!)
   })
@@ -76,14 +105,110 @@ describe('attaching a page selection in the composer', () => {
     vi.restoreAllMocks()
   })
 
-  async function startPanel(): Promise<void> {
+  async function startPanel(backend: 'dsh' | 'codex' = 'dsh'): Promise<void> {
     await act(async () => { root.render(createElement(App)) })
     await act(async () => {
-      onStatus?.('connected', null)
+      onStatus?.('connected', null, backend)
       onResumeHint?.(null)
     })
     await vi.waitFor(() => { expect(rpc).toHaveBeenCalledWith('session.create', {}) })
   }
+
+  it.each(['codex', 'dsh'] as const)('asks %s for a draft, then starts a goal only after review', async (backend) => {
+    await startPanel(backend)
+    await act(async () => { document.querySelector<HTMLButtonElement>('.task-goal-heading button')!.click() })
+    const task = document.querySelector<HTMLTextAreaElement>('.task-goal-form textarea')!
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
+    await act(async () => {
+      setter.call(task, 'Edit the report')
+      task.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => { document.querySelector<HTMLButtonElement>('.task-goal-form > button')!.click() })
+    const prompt = rpc.mock.calls.find(([method]) => method === 'session.prompt')?.[1] as {
+      content: { type: string; text: string }[]
+    }
+    expect(prompt.content[0]?.text).toContain('Edit the report')
+    expect(prompt.content[0]?.text).toContain('planning-only turn')
+    expect(rpc.mock.calls.some(([method]) => method === 'goal.create')).toBe(false)
+
+    const budgetLimit = backend === 'codex' ? 30000 : 12
+    const draft = JSON.stringify({ kind: 'tandix.goal-draft/v2', outcome: 'Edit the report',
+      verification: 'Reread the document', constraints: '', boundaries: 'Only edit this report',
+      iterationPolicy: 'Check after each change', blockedStop: 'Ask if access fails', budgetLimit })
+    await act(async () => { onEvent?.({ t: 'event', frame: { rpcId: '', method: 'session/event', payload: {
+      sessionId: 'session-current', event: { type: 'assistant/message',
+        data: { message: { content: [{ type: 'text', text: draft }] } } },
+    } } } as ServerFrame) })
+    await act(async () => { onEvent?.({ t: 'event', frame: { rpcId: '', method: 'session/event', payload: {
+      sessionId: 'session-current', event: { type: 'turn/end', data: { turn: 1 } },
+    } } } as ServerFrame) })
+    expect(document.querySelectorAll('.task-goal-form textarea')).toHaveLength(7)
+    expect(document.querySelector('.task-goal-review-note')?.textContent).toMatch(/Agent|agent/u)
+    expect(rpc.mock.calls.some(([method]) => method === 'goal.create')).toBe(false)
+
+    await act(async () => { document.querySelector<HTMLButtonElement>('.task-goal-form > button.primary')!.click() })
+    expect(rpc).toHaveBeenCalledWith('goal.create', expect.objectContaining({
+      sessionId: 'session-current', budgetLimit,
+      objective: expect.stringContaining('Completion evidence: Reread the document'),
+    }))
+    const createIndex = rpc.mock.calls.findIndex(([method]) => method === 'goal.create')
+    const firstTurnIndex = rpc.mock.calls.findIndex(([method, payload]) => method === 'session.prompt'
+      && (payload as { content: Array<{ text: string }> }).content[0]?.text.includes('Begin working on it now'))
+    expect(firstTurnIndex).toBeGreaterThan(createIndex)
+    expect((rpc.mock.calls[firstTurnIndex]?.[1] as { content: Array<{ text: string }> }).content[0]?.text)
+      .toContain('Edit the report')
+    expect(document.querySelector('.task-goal')?.textContent).toContain('Edit the report')
+    expect(document.querySelector('.task-goal [role="status"]')?.textContent).toMatch(/正在执行|Working/u)
+    await act(async () => { onEvent?.({ t: 'event', frame: { rpcId: '', method: 'session/event', payload: {
+      sessionId: 'session-current', event: { type: 'turn/end', data: { turn: 2 } },
+    } } } as ServerFrame) })
+    expect(document.querySelector('.task-goal [role="status"]')?.textContent).toMatch(/本轮已结束|Turn ended/u)
+    const continueButton = [...document.querySelectorAll<HTMLButtonElement>('.task-goal-actions button')]
+      .find((button) => /继续|Resume/u.test(button.textContent ?? ''))
+    expect(continueButton).toBeDefined()
+    await act(async () => { continueButton!.click() })
+    expect(rpc.mock.calls.some(([method, payload]) => method === 'session.prompt'
+      && (payload as { content: Array<{ text: string }> }).content[0]?.text.includes('latest evidence'))).toBe(true)
+    await act(async () => { onEvent?.({ t: 'event', frame: { rpcId: '', method: 'session/event', payload: {
+      sessionId: 'session-current', event: { type: 'turn/start', data: { turn: 1 } },
+    } } } as ServerFrame) })
+    await act(async () => { document.querySelector<HTMLButtonElement>('.stop-button')!.click() })
+    const pauseIndex = rpc.mock.calls.findIndex(([method]) => method === 'goal.pause')
+    const cancelIndex = rpc.mock.calls.findIndex(([method]) => method === 'session.cancel')
+    expect(pauseIndex).toBeGreaterThan(-1)
+    expect(cancelIndex).toBeGreaterThan(pauseIndex)
+  })
+
+  it('keeps an activated Goal and offers a deliberate retry when its first prompt fails', async () => {
+    await startPanel('codex')
+    await act(async () => { document.querySelector<HTMLButtonElement>('.task-goal-heading button')!.click() })
+    const task = document.querySelector<HTMLTextAreaElement>('.task-goal-form textarea')!
+    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!
+    await act(async () => {
+      setter.call(task, 'Edit the report')
+      task.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => { document.querySelector<HTMLButtonElement>('.task-goal-form > button')!.click() })
+    const draft = JSON.stringify({ kind: 'tandix.goal-draft/v2', outcome: 'Edit the report',
+      verification: 'Reread the document', constraints: '', boundaries: 'Only edit this report',
+      iterationPolicy: 'Check after each change', blockedStop: 'Ask if access fails', budgetLimit: 30000 })
+    await act(async () => { onEvent?.({ t: 'event', frame: { rpcId: '', method: 'session/event', payload: {
+      sessionId: 'session-current', event: { type: 'assistant/message',
+        data: { message: { content: [{ type: 'text', text: draft }] } } },
+    } } } as ServerFrame) })
+    await act(async () => { onEvent?.({ t: 'event', frame: { rpcId: '', method: 'session/event', payload: {
+      sessionId: 'session-current', event: { type: 'turn/end', data: { turn: 1 } },
+    } } } as ServerFrame) })
+    failGoalStart = true
+    await act(async () => { document.querySelector<HTMLButtonElement>('.task-goal-form > button.primary')!.click() })
+    expect(document.querySelector('.task-goal [role="status"]')?.textContent).toMatch(/首轮未启动|did not start/u)
+    expect(document.querySelector('.task-goal [role="alert"]')?.textContent).toContain('bridge unavailable')
+    expect(rpc.mock.calls.filter(([method]) => method === 'goal.create')).toHaveLength(1)
+    failGoalStart = false
+    await act(async () => { document.querySelector<HTMLButtonElement>('.task-goal-actions button')!.click() })
+    expect(rpc.mock.calls.filter(([method]) => method === 'goal.create')).toHaveLength(1)
+    expect(document.querySelector('.task-goal [role="alert"]')).toBeNull()
+  })
 
   it('shows the captured quote and sends it with the typed message', async () => {
     await startPanel()

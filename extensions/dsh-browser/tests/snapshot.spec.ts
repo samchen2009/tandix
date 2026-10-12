@@ -1,9 +1,14 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ElementIds } from '../src/content/ids.ts'
 import { buildSnapshot, renderSnapshot, type SnapshotBudget } from '../src/content/snapshot.ts'
 
 const BUDGET: SnapshotBudget = { maxItems: 10, maxForms: 5, maxChars: 4_000 }
+
+afterEach(() => {
+  history.replaceState(null, '', '/')
+  document.body.innerHTML = ''
+})
 
 describe('buildSnapshot', () => {
   it('renders title, url, interactive inventory and masked form values', () => {
@@ -29,6 +34,19 @@ describe('buildSnapshot', () => {
     expect(text).toContain('user@example.com')
     expect(text).toContain('value="••••"')
     expect(text).not.toContain('hunter2')
+  })
+
+  it('removes query data and masks identifiers in model-facing URLs', () => {
+    history.replaceState(null, '', '/detail?uniqueId=private#section')
+    document.body.innerHTML = '<a href="/download/38b3a76b-816a-4239-8e9b-2a5d5d9d21bf?token=private">下载</a>'
+
+    const view = buildSnapshot(new ElementIds(), { budget: BUDGET }, null)
+    const text = renderSnapshot(view, false)
+
+    expect(view.url).toBe('http://localhost:3000/detail')
+    expect(text).toContain('/download/:id')
+    expect(text).not.toContain('uniqueId')
+    expect(text).not.toContain('token=private')
   })
 
   it('increments versions and keeps element ids stable', () => {

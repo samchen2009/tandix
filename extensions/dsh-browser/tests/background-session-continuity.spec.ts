@@ -11,11 +11,13 @@ function chromeEvent<T extends unknown[]>() {
   }
 }
 
-function panelPort() {
+function panelPort(tabId?: number) {
   const onMessage = chromeEvent<[unknown]>()
   const onDisconnect = chromeEvent<[]>()
   const postMessage = vi.fn()
-  const port = { name: 'dsh-panel', postMessage, onMessage, onDisconnect } as unknown as chrome.runtime.Port
+  const port = { name: 'dsh-panel', postMessage, onMessage, onDisconnect,
+    ...(tabId === undefined ? {} : { sender: { url: `chrome-extension://test/panel/index.html?tandixTab=${tabId}` } }),
+  } as unknown as chrome.runtime.Port
   return { onDisconnect, onMessage, port, postMessage }
 }
 
@@ -42,6 +44,7 @@ function mockChrome(initialTabs: chrome.tabs.Tab[], storedContext?: unknown) {
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
   const onRemoved = chromeEvent<[number]>()
   const onReplaced = chromeEvent<[number, number]>()
+  const setPanelOptions = vi.fn(async () => {})
   const sessionData: Record<string, unknown> = storedContext === undefined
     ? {}
     : { [PAGE_SESSION_CONTEXT_STORAGE_KEY]: storedContext }
@@ -63,7 +66,7 @@ function mockChrome(initialTabs: chrome.tabs.Tab[], storedContext?: unknown) {
       onConnect,
       onMessage: chromeEvent<[unknown, chrome.runtime.MessageSender, (response: unknown) => void]>(),
     },
-    sidePanel: { open: vi.fn(async () => {}), setPanelBehavior: vi.fn(async () => {}) },
+    sidePanel: { open: vi.fn(async () => {}), setOptions: setPanelOptions, setPanelBehavior: vi.fn(async () => {}) },
     storage: {
       local: { get: vi.fn(async () => ({})), set: vi.fn(async () => {}) },
       session: {
@@ -79,7 +82,8 @@ function mockChrome(initialTabs: chrome.tabs.Tab[], storedContext?: unknown) {
         return entry
       }),
       query,
-      sendMessage: vi.fn(async () => {}),
+      sendMessage: vi.fn(async (_tabId: number, message: { type?: string }) =>
+        message.type === 'DSH_ACTION' ? { ok: true, result: { text: 'Page snapshot' } } : undefined),
       onActivated: chromeEvent<[{ tabId: number; windowId: number }]>(),
       onUpdated: chromeEvent<[number, chrome.tabs.TabChangeInfo, chrome.tabs.Tab]>(),
       onReplaced,
@@ -92,7 +96,7 @@ function mockChrome(initialTabs: chrome.tabs.Tab[], storedContext?: unknown) {
       onRemoved: chromeEvent<[number]>(),
     },
   } as unknown as typeof chrome)
-  return { onConnect, onRemoved, onReplaced, query, sessionData, sessionSet, tabs }
+  return { onConnect, onRemoved, onReplaced, query, sessionData, sessionSet, setPanelOptions, tabs }
 }
 
 function resumeHints(postMessage: ReturnType<typeof vi.fn>): Array<string | null> {
@@ -114,7 +118,21 @@ afterEach(() => {
 })
 
 describe('background contextual session continuity', () => {
-  it('returns a hint only for the active tab with the same origin and pathname', async () => {
+  it('disables the global Chrome panel and configures a panel instance per tab', async () => {
+    const chromeMock = mockChrome([tab(1, 'https://example.com/one'), tab(2, 'https://example.com/two')])
+    await loadBackground(chromeMock)
+    await vi.waitFor(() => {
+      expect(chromeMock.setPanelOptions).toHaveBeenCalledWith({ enabled: false })
+      expect(chromeMock.setPanelOptions).toHaveBeenCalledWith({
+        tabId: 1, path: 'panel/index.html?tandixTab=1', enabled: true,
+      })
+      expect(chromeMock.setPanelOptions).toHaveBeenCalledWith({
+        tabId: 2, path: 'panel/index.html?tandixTab=2', enabled: true,
+      })
+    })
+  })
+
+  it('returns a hint for the same tab across navigation, never a different tab', async () => {
     const stored = {
       version: 1,
       tabs: {
@@ -133,7 +151,7 @@ describe('background contextual session continuity', () => {
     const differentPath = panelPort()
     chromeMock.onConnect.emit(differentPath.port)
     differentPath.onMessage.emit({ type: 'panel.window', windowId: 1 })
-    await vi.waitFor(() => { expect(resumeHints(differentPath.postMessage)).toContain(null) })
+    await vi.waitFor(() => { expect(resumeHints(differentPath.postMessage)).toContain('session-page') })
 
     chromeMock.tabs.delete(1)
     chromeMock.tabs.set(2, tab(2, 'https://example.com/orders'))
@@ -143,7 +161,38 @@ describe('background contextual session continuity', () => {
     await vi.waitFor(() => { expect(resumeHints(differentTab.postMessage)).toContain(null) })
   })
 
-  it('checkpoints panel-open navigation on close but ignores later user navigation', async () => {
+  it('keeps one independent session per tab even when both panels share a window', async () => {
+    const first = tab(1, 'https://example.com/one')
+    const second = { ...tab(2, 'https://example.com/two'), active: false }
+    const chromeMock = mockChrome([first, second])
+    await loadBackground(chromeMock)
+
+    const panelOne = panelPort(1)
+    chromeMock.onConnect.emit(panelOne.port)
+    panelOne.onMessage.emit({ type: 'panel.window', windowId: 1 })
+    panelOne.onMessage.emit({ type: 'session.active', sessionId: 'session-one', isNew: true })
+    await vi.waitFor(() => {
+      expect(chromeMock.sessionData[PAGE_SESSION_CONTEXT_STORAGE_KEY]).toMatchObject({
+        tabs: { 1: { sessionId: 'session-one' } },
+      })
+    })
+
+    chromeMock.tabs.set(1, { ...first, active: false })
+    chromeMock.tabs.set(2, { ...second, active: true })
+    const panelTwo = panelPort(2)
+    chromeMock.onConnect.emit(panelTwo.port)
+    panelTwo.onMessage.emit({ type: 'panel.window', windowId: 1 })
+    await vi.waitFor(() => { expect(resumeHints(panelTwo.postMessage)).toContain(null) })
+    panelTwo.onMessage.emit({ type: 'session.active', sessionId: 'session-two', isNew: true })
+    await vi.waitFor(() => {
+      expect(chromeMock.sessionData[PAGE_SESSION_CONTEXT_STORAGE_KEY]).toMatchObject({
+        tabs: { 1: { sessionId: 'session-one' }, 2: { sessionId: 'session-two' } },
+      })
+    })
+    expect(resumeHints(panelOne.postMessage)).not.toContain('session-two')
+  })
+
+  it('keeps a tab session after the panel closes and the tab navigates', async () => {
     const chromeMock = mockChrome([tab(1, 'https://example.com/start')])
     await loadBackground(chromeMock)
     const panel = panelPort()
@@ -168,7 +217,7 @@ describe('background contextual session continuity', () => {
     const reopened = panelPort()
     chromeMock.onConnect.emit(reopened.port)
     reopened.onMessage.emit({ type: 'panel.window', windowId: 1 })
-    await vi.waitFor(() => { expect(resumeHints(reopened.postMessage)).toContain(null) })
+    await vi.waitFor(() => { expect(resumeHints(reopened.postMessage)).toContain('session-live') })
     expect(chromeMock.sessionData[PAGE_SESSION_CONTEXT_STORAGE_KEY]).toMatchObject({
       tabs: { 1: { urlKey: 'https://example.com/during-panel' } },
     })

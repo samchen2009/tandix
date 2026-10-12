@@ -69,6 +69,10 @@ export const BROWSER_TOOL_NAMES = [
   'browser_wait',
 ] as const
 
+export const TANDIX_SKILL_TOOL_NAMES = [
+  'tandix_skill_save', 'tandix_skill_list', 'tandix_skill_read',
+] as const
+
 /**
  * Register the browser tools on `ctx.tools`. Disposers are returned for the
  * caller's effect to own; each tool's cooperative timeout budget is declared
@@ -247,6 +251,9 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     description,
     parameters: {
       tabId: { type: 'number', required: true, description: 'Stable tabId returned by browser_list_tabs.' },
+      ...(name === 'browser_follow_tab' ? {
+        active: { type: 'boolean', description: 'Bring the followed tab and its window to the foreground. Defaults to false.' },
+      } : {}),
     },
     timeoutMs: options.toolTimeoutMs,
     output: TEXT_OUTPUT,
@@ -298,6 +305,32 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     },
   })
 
+  const skillSave = (): ToolDefinition => defineTool({
+    name: 'tandix_skill_save',
+    description: 'Save an instruction skill directly to the Tandix Skills tab after the user explicitly asks to save/create a skill. No browser tab is needed. Report saved only after this tool confirms it.',
+    parameters: {
+      name: { type: 'string', required: true, description: 'Distinctive skill name.' },
+      description: { type: 'string', required: true, description: 'When the agent should use this skill.' },
+      instructions: { type: 'string', required: true, description: 'Reusable skill instructions; do not include secrets.' },
+    },
+    timeoutMs: options.toolTimeoutMs,
+    output: TEXT_OUTPUT,
+    execute: (args, exec) => call(exec, 'tandix_skill_save', args as Record<string, unknown>),
+  })
+  const skillList = (): ToolDefinition => defineTool({
+    name: 'tandix_skill_list',
+    description: 'List Tandix-managed skills without a browser tab.',
+    parameters: {}, timeoutMs: options.toolTimeoutMs, output: TEXT_OUTPUT,
+    execute: (_args, exec) => call(exec, 'tandix_skill_list', {}),
+  })
+  const skillRead = (): ToolDefinition => defineTool({
+    name: 'tandix_skill_read',
+    description: 'Read reusable instructions for a Tandix-managed skill by name without a browser tab.',
+    parameters: { name: { type: 'string', required: true, description: 'Name returned by tandix_skill_list.' } },
+    timeoutMs: options.toolTimeoutMs, output: TEXT_OUTPUT,
+    execute: (args, exec) => call(exec, 'tandix_skill_read', args as Record<string, unknown>),
+  })
+
   return [
     snapshot(),
     click(),
@@ -307,12 +340,15 @@ function defineTools(call: Call, options: BrowserToolsOptions): ToolDefinition[]
     navigate(),
     openTab(),
     listTabs(),
-    tabById('browser_follow_tab', 'Control an open tab by browser_list_tabs tabId without activating it.'),
+    tabById('browser_follow_tab', 'Control an open tab by browser_list_tabs tabId. Set active:true when the user should see the operated page.'),
     tabById('browser_close_tab', 'Close an open tab by browser_list_tabs tabId when the task requires it.'),
     simple('browser_back', 'Go back to the previous page.'),
     simple('browser_forward', 'Go forward to the next page.'),
     simple('browser_reload', 'Reload the current page.'),
     getText(),
     wait(),
+    skillSave(),
+    skillList(),
+    skillRead(),
   ]
 }

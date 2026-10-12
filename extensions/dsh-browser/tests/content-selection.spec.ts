@@ -26,6 +26,7 @@ function setUserGesture(active: boolean): void {
 afterEach(() => {
   document.body.innerHTML = ''
   document.title = ''
+  history.replaceState(null, '', '/')
   Reflect.deleteProperty(navigator, 'userActivation')
   vi.unstubAllGlobals()
   vi.useRealTimers()
@@ -42,6 +43,13 @@ describe('reading a page selection', () => {
       title: 'Example page',
       url: location.href,
     })
+  })
+
+  it('removes private query and fragment data from the page identity', () => {
+    history.replaceState(null, '', '/detail?uniqueId=private#section')
+    selectText('quoted text')
+
+    expect(readSelectionCapture()?.url).toBe('http://localhost:3000/detail')
   })
 
   it('reports nothing when no text is highlighted', () => {

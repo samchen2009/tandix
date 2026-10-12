@@ -3,8 +3,9 @@
  *
  * The controller deliberately separates Chrome event handling from the
  * affinity rules so transitions can be tested without a browser runtime.
- * A manual tab switch never silently changes the tool target: it creates a
- * handoff decision, and tool dispatch remains blocked until the user chooses.
+ * A manual tab switch creates a handoff state. The background service may
+ * immediately resolve it under the user's auto-follow preference; otherwise
+ * tool dispatch remains blocked until the user chooses.
  * `keep-always` is the one way out of that per-switch prompt: it pins the
  * controlled tab so later switches resolve straight to `background` instead of
  * asking again, and `ask-again` reverses it without disturbing the binding.
@@ -23,12 +24,12 @@ export interface AffinityTab {
 }
 
 export type TabAffinityStatus = 'unbound' | 'following' | 'handoff' | 'background' | 'lost'
-export type TabAffinityDecision = 'keep' | 'follow' | 'keep-always' | 'ask-again'
+export type TabAffinityDecision = 'keep' | 'follow' | 'keep-always' | 'ask-again' | 'show-controlled'
 
 /** Narrow an untrusted panel message field to a decision. */
 export function isTabAffinityDecision(value: unknown): value is TabAffinityDecision {
   return value === 'keep' || value === 'follow'
-    || value === 'keep-always' || value === 'ask-again'
+    || value === 'keep-always' || value === 'ask-again' || value === 'show-controlled'
 }
 
 /** Serializable state sent from the service worker to every side panel. */
@@ -353,6 +354,10 @@ export class TabAffinityController {
   /** Apply a panel choice only if it still describes the visible revision. */
   decide(decision: TabAffinityDecision, revision: number, sessionId?: string): boolean {
     if (revision !== this.revision) return false
+    // Showing the controlled tab is a browser-window action handled by the
+    // background service. It must never fall through to the `follow` branch,
+    // which would instead move control to the user's current tab.
+    if (decision === 'show-controlled') return false
     const currentStatus = this.status()
     if (decision === 'ask-again') {
       // Undo a pin in place. Dropping keptActiveTabId re-raises the prompt for

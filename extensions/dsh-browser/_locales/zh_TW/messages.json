@@ -1,11 +1,11 @@
 {
   "extensionName": {
-    "message": "dsh 瀏覽器助手"
+    "message": "網頁助手"
   },
   "extensionDescription": {
-    "message": "讓 dsh 無需視覺能力即可直接讀取並操作瀏覽器的 Chrome 側邊欄擴充功能。"
+    "message": "在目前網頁旁直接提問、協助操作，並把常用流程提煉成可重複使用的 Skill。"
   },
   "actionTitle": {
-    "message": "開啟 dsh 瀏覽器助手"
+    "message": "開啟網頁助手"
   }
 }

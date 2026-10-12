@@ -5,3 +5,7 @@ node_modules/
 !benchmark/lib/**
 **/dist/
 **/dist-firefox/
+.build/
+.pnpm-store/
+**/__pycache__/
+.DS_Store

@@ -23,7 +23,7 @@ $ProgressPreference = 'SilentlyContinue'
 # message into question marks on a non-Chinese install.
 try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
 
-$Repository = 'Lum1104/dsh-browser'
+$Repository = 'samchen2009/tandix'
 $RemoteRef = 'main'
 $DshHomeDir = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME '.dsh' }
 $ManagedRoot = Join-Path $DshHomeDir 'dsh-browser'
@@ -388,11 +388,22 @@ $DshCli = Join-Path $Root 'node_modules\@deepseek-ai\dsh\lib\bin.js'
 Assert-Command 'pnpm' "未找到 pnpm；请先启用 Corepack 或安装 pnpm。" "pnpm was not found; enable Corepack or install pnpm first."
 Assert-Command 'node' "未找到 Node.js；请先安装受支持的 Node.js 版本。" "Node.js was not found; install a supported Node.js version first."
 
-Write-Step 1 "构建浏览器桥" "Build the browser bridge"
+if ($env:TANDIX_PREBUILT -eq '1') {
+  Write-Step 1 '准备浏览器桥' 'Prepare the browser bridge'
+} else {
+  Write-Step 1 '构建浏览器桥' 'Build the browser bridge'
+}
 Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('install', '--frozen-lockfile') `
   -FailZh "依赖安装失败。" -FailEn "Dependency installation failed."
-Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', $BridgePlugin, 'run', 'build') `
-  -FailZh "桥插件构建失败。" -FailEn "The bridge plugin build failed."
+if ($env:TANDIX_PREBUILT -eq '1') {
+  if (-not (Test-Path -LiteralPath (Join-Path $Plugin 'lib\index.js') -PathType Leaf) -or
+      -not (Test-Path -LiteralPath (Join-Path $Plugin 'lib\client.js') -PathType Leaf)) {
+    Stop-Install '预构建安装包缺少浏览器桥产物。' 'The prebuilt package is missing browser bridge files.'
+  }
+} else {
+  Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', $BridgePlugin, 'run', 'build') `
+    -FailZh "桥插件构建失败。" -FailEn "The bridge plugin build failed."
+}
 
 Write-Step 2 "注册到本机 web profile" "Register with the local web profile"
 # Initialize through dsh without forwarding a package path through cmd.exe.
@@ -443,9 +454,20 @@ $ProfileJson = ($ProfileManifest | ConvertTo-Json -Depth 20) + "`n"
   $ProfileJson,
   (New-Object System.Text.UTF8Encoding $false))
 
-Write-Step 3 "构建 Chrome 扩展" "Build the Chrome extension"
-Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', 'dsh-browser-extension', 'run', 'build') `
-  -FailZh "扩展构建失败。" -FailEn "The extension build failed."
+if ($env:TANDIX_PREBUILT -eq '1') {
+  Write-Step 3 '检查 Chrome 扩展' 'Check the Chrome extension'
+} else {
+  Write-Step 3 '构建 Chrome 扩展' 'Build the Chrome extension'
+}
+if ($env:TANDIX_PREBUILT -eq '1') {
+  if (-not (Test-Path -LiteralPath (Join-Path $Ext 'dist\manifest.json') -PathType Leaf) -or
+      -not (Test-Path -LiteralPath (Join-Path $Ext 'dist\background.js') -PathType Leaf)) {
+    Stop-Install '预构建安装包缺少 Chrome 扩展产物。' 'The prebuilt package is missing Chrome extension files.'
+  }
+} else {
+  Invoke-Quiet -WorkingDirectory $Root -Command 'pnpm' -Arguments @('--filter', 'dsh-browser-extension', 'run', 'build') `
+    -FailZh "扩展构建失败。" -FailEn "The Chrome extension build failed."
+}
 
 Write-Step 4 "准备扩展并打开 Chrome" "Prepare the extension and open Chrome"
 Confirm-Browser | Out-Null
@@ -479,7 +501,7 @@ if ($IsUpdate) {
   Write-Host ''
   Write-Pair "    地址栏输入 chrome://extensions" "    Type chrome://extensions in the address bar"
   Write-Host ''
-  Write-Pair '如果页面上已有“dsh 浏览器助手”卡片：' 'If the “dsh Browser Assistant” card is already listed:'
+  Write-Pair '如果页面上已有“网页助手”卡片：' 'If the “Tandix” card is already listed:'
   Write-Pair '  点击卡片上的“重新加载”按钮，让扩展加载新文件。' '  Click “Reload” on that card so it picks up the updated files.'
   Write-Host ''
   Write-Pair "如果没有该卡片（例如从未加载过）：" "If the card is not listed (e.g. it was never loaded):"
@@ -488,7 +510,7 @@ if ($IsUpdate) {
   Write-Pair "  选择这个目录：" "  Select this directory:"
   Write-Host ("   {0}" -f $DistDir)
   Write-Host ''
-  Write-Pair '出现 “dsh 浏览器助手” 卡片即成功。' 'When the “dsh Browser Assistant” card appears, it is loaded.'
+  Write-Pair '出现“网页助手”卡片即成功。' 'When the “Tandix” card appears, it is loaded.'
 } else {
   if ($ChromeOpened) {
     Write-Pair "Chrome 扩展管理页已打开，请完成以下操作：" "Chrome Extensions is open. Complete these steps:"
@@ -508,11 +530,12 @@ if ($IsUpdate) {
 
 Write-Host ''
 Write-Pair "加载完成后：" "After loading the extension:"
-Write-Pair "• 点击工具栏中的 DeepSeek 鲸鱼图标，打开侧边栏" "Click the DeepSeek whale icon in the toolbar to open the side panel"
+Write-Pair "• 点击工具栏中的网页助手图标，打开侧边栏" "Click the Tandix icon in the toolbar to open the side panel"
 Write-Pair "• 扩展会自动发现本机 dsh，无需填写地址或 token" "The extension discovers local dsh automatically; no address or token is required"
 $QuotedRoot = "'" + $Root.Replace("'", "''") + "'"
 Write-Host ("• 启动固定版本：cd {0}; pnpm start" -f $QuotedRoot)
 Write-Host ("   Start the pinned version: cd {0}; pnpm start" -f $QuotedRoot)
-Write-Pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.2.0-rc.2 web" "Or start the pinned version directly: npx @deepseek-ai/dsh@0.2.0-rc.2 web"
+Write-Pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.1.5-rc.2 web" "Or start the pinned version directly: npx @deepseek-ai/dsh@0.1.5-rc.2 web"
+Write-Pair "• 使用双击入口安装时，本地 Agent 会由安装向导自动启动" "The double-click launcher starts the local Agent automatically"
 Write-Host ''
-Write-Pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/Lum1104/dsh-browser" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/Lum1104/dsh-browser"
+Write-Pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/samchen2009/tandix" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/samchen2009/tandix"

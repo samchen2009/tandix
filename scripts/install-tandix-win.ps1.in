@@ -1,0 +1,63 @@
+# Small Tandix installer. Distribution URLs and hashes are filled at release time.
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'Continue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+$machine = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+$arch = switch ($machine) {
+  'AMD64' { 'x64' }
+  'ARM64' { 'arm64' }
+  default { throw "Unsupported Windows architecture: $machine" }
+}
+$fullUrl = if ($arch -eq 'arm64') { '__WIN_ARM64_URL__' } else { '__WIN_X64_URL__' }
+$fullSha = if ($arch -eq 'arm64') { '__WIN_ARM64_SHA__' } else { '__WIN_X64_SHA__' }
+Write-Host "Platform detected: Windows $arch."
+
+$node = Get-Command node -CommandType Application -ErrorAction SilentlyContinue
+$hasCompatibleNode = $false
+if ($node) {
+  & $node.Source -e 'const v=process.versions.node.split(".").map(Number);process.exit((v[0]===22&&v[1]>=19)||v[0]>=24?0:1)' 2>$null
+  $hasCompatibleNode = ($LASTEXITCODE -eq 0)
+}
+
+if ($hasCompatibleNode) {
+  $zipUrl = if ($env:TANDIX_LITE_ZIP_URL) { $env:TANDIX_LITE_ZIP_URL } else { '__WIN_LITE_URL__' }
+  $zipSha = '__WIN_LITE_SHA__'
+  Write-Host 'Compatible Node.js found; downloading the lite Tandix ZIP.'
+} else {
+  $zipUrl = if ($env:TANDIX_FULL_ZIP_URL) { $env:TANDIX_FULL_ZIP_URL } else { $fullUrl }
+  $zipSha = $fullSha
+  Write-Host 'Compatible Node.js not found; downloading the complete Tandix ZIP for this Windows architecture.'
+}
+
+if ($zipUrl -notmatch '^https?://') { throw 'A direct ZIP download URL has not been configured.' }
+$work = Join-Path $env:TEMP ('tandix-bootstrap-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $work | Out-Null
+try {
+  $archive = Join-Path $work 'tandix.zip'
+  Write-Host '[1/4] Downloading Tandix ZIP. Progress will appear below.'
+  # Use the same PowerShell downloader as the CMD bootstrap. Windows curl's
+  # Schannel revocation check can fail on company networks with exit code 35.
+  # Keep normal HTTPS certificate validation and native download progress.
+  Invoke-WebRequest -UseBasicParsing -Uri $zipUrl -OutFile $archive
+  Write-Host '[2/4] Verifying ZIP SHA-256...'
+  if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $zipSha) {
+    throw 'Tandix ZIP SHA-256 mismatch. The download may be a login page or a modified file.'
+  }
+  Write-Host '[3/4] Extracting files. The complete ZIP can take a little while...'
+  Expand-Archive -LiteralPath $archive -DestinationPath $work
+  $roots = @(Get-ChildItem -LiteralPath $work -Directory)
+  if ($roots.Count -ne 1) { throw 'Expected one installer folder in the verified ZIP.' }
+  $launchers = @(Get-ChildItem -LiteralPath $roots[0].FullName -File -Filter '*-win.cmd')
+  if ($launchers.Count -ne 1) { throw 'The verified ZIP does not contain one Windows installer.' }
+
+  if ($env:TANDIX_BOOTSTRAP_VERIFY_ONLY -eq '1') {
+    Write-Host 'Downloaded, verified and extracted the Windows installer successfully.'
+    exit 0
+  }
+  Write-Host '[4/4] Starting installer and opening Chrome extensions...'
+  & $launchers[0].FullName
+  if ($LASTEXITCODE -ne 0) { throw "Tandix installer exited with code $LASTEXITCODE." }
+} finally {
+  Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+}

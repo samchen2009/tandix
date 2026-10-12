@@ -8,6 +8,7 @@ type EventFrame = Extract<ServerFrame, { t: 'event' }>
  */
 export class TransientEventCache {
   private readonly questions = new Map<string, EventFrame>()
+  private readonly approvals = new Map<string, EventFrame>()
   private readonly running = new Map<string, EventFrame>()
 
   ingest(frame: ServerFrame): void {
@@ -26,28 +27,47 @@ export class TransientEventCache {
       }
       return
     }
+    if (frame.frame.method === 'agent-approval/requested') {
+      this.approvals.set(questionKey(sessionId, frame.frame.rpcId), frame)
+      return
+    }
+    if (frame.frame.method === 'agent-approval/resolved') {
+      if (typeof payload.approvalRpcId === 'string') {
+        this.approvals.delete(questionKey(sessionId, payload.approvalRpcId))
+      }
+      return
+    }
     if (frame.frame.method !== 'session/event' || !isRecord(payload.event)) return
     if (payload.event.type === 'turn/start') {
       this.running.set(sessionId, frame)
     } else if (payload.event.type === 'turn/end') {
       this.running.delete(sessionId)
       this.deleteSessionQuestions(sessionId)
+      this.deleteSessionApprovals(sessionId)
     }
   }
 
   replay(): EventFrame[] {
-    return [...this.running.values(), ...this.questions.values()]
+    return [...this.running.values(), ...this.questions.values(), ...this.approvals.values()]
   }
 
   clear(): void {
     this.running.clear()
     this.questions.clear()
+    this.approvals.clear()
   }
 
   private deleteSessionQuestions(sessionId: string): void {
     const prefix = `${sessionId}\0`
     for (const key of this.questions.keys()) {
       if (key.startsWith(prefix)) this.questions.delete(key)
+    }
+  }
+
+  private deleteSessionApprovals(sessionId: string): void {
+    const prefix = `${sessionId}\0`
+    for (const key of this.approvals.keys()) {
+      if (key.startsWith(prefix)) this.approvals.delete(key)
     }
   }
 }

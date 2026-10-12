@@ -7,7 +7,8 @@
  * @module
  */
 
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
+import { AGENT_CHOICES, agentLabel, agentPreference, type AgentBackend } from '../agent-backend.ts'
 import { BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeCaps } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
@@ -15,9 +16,9 @@ import type { BridgeState } from '../background/bridge.ts'
 import type { AffinityTab, TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
 import { connectPanel, PanelRpcError, type PanelApi, type PanelSettings } from './api.ts'
 import { renderMarkdown } from './markdown.ts'
-import whaleUrl from '../../assets/icons/deepseek-256.png'
+import brandIconUrl from '../../assets/icons/icon256.png'
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
-import { getUiLocale } from '../i18n.ts'
+import { getUiLocale, loadUiLocale, saveUiLocale, type UiLocale } from '../i18n.ts'
 import { PANEL_COPY, type PanelCopy } from './strings.ts'
 import {
   applyUiScale,
@@ -30,6 +31,8 @@ import {
 } from './ui-scale.ts'
 import { QuestionCard } from './QuestionCard.tsx'
 import { UpdateCard } from './UpdateCard.tsx'
+import { CodexCapabilities } from './CodexCapabilities.tsx'
+import { buildGoalContinuePrompt, buildGoalDraftPrompt, buildGoalObjective, buildGoalStartPrompt, parseGoalDraft, type GoalState } from './goal.ts'
 import { MessageImages } from './MessageImages.tsx'
 import type { QuestionAnswer } from './questions.ts'
 import {
@@ -48,10 +51,13 @@ import {
 import { approvalReadyForSession, approvalSessionToFocus } from './approvals.ts'
 import {
   browserTimeZone,
+  clipboardMediaFiles,
   draftImageDataUrl,
   parseImageAttachmentLimits,
+  prepareGenericFiles,
   prepareImageFiles,
   promptContent,
+  type DraftFile,
   type DraftImage,
   type ImageAttachmentLimits,
 } from './attachments.ts'
@@ -63,9 +69,9 @@ import {
   restoreSubmittedDraft,
   type ComposerDraft,
 } from './composer.ts'
-import { isNearScrollBottom } from './scroll.ts'
 import {
   latestSessionTitle,
+  latestSessionContentTitle,
   projectedSessionTitle,
   resumableSessions,
   sessionAcceptsPrompts,
@@ -74,18 +80,48 @@ import {
   SessionRuntimeCache,
   type SessionPickerEntry,
 } from './sessions.ts'
+import { RunSkillsPanel } from './ChatSkillPanels.tsx'
+import {
+  buildChatSkillPrompt,
+  buildExtractSkillPrompt,
+  CHAT_SKILLS_STORAGE_KEY,
+  checkpointChatSkillDraft,
+  clearChatSkillDraftCheckpoint,
+  deleteChatSkill,
+  finalizeExtractedSkill,
+  loadChatSkills,
+  parseExtractedSkill,
+  parseImportedSkill,
+  saveChatSkill,
+  type ChatSkill,
+  type ChatSkillDraft,
+} from '../skill/chat-skill.ts'
+import { CompactRecordingComposer } from '../recording/composer.ts'
+import { loadManagedSkills, MANAGED_SKILLS_STORAGE_KEY, parseManagedSkillEnvelope,
+  saveManagedSkill, type ManagedSkill, type ManagedSkillInput } from '../skill/managed-skill.ts'
+import { requestsSkillSave } from '../skill/save-intent.ts'
+import type { RecordingEventInput } from '../recording/schema.ts'
+import type { TeachState } from '../recording/state-machine.ts'
+import {
+  buildSkillExtractionEvidence,
+  hasSkillExtractionCandidates,
+} from '../skill/extraction-evidence.ts'
 
 /** One rendered conversation row. */
 import {
   appendLiveRow,
-  completeLastTool,
+  appendToolCall,
+  completeToolCall,
+  interruptRunningTools,
   mergeHistoryRows,
   pendingQuestionFromFrame,
+  agentApprovalFromFrame,
+  agentApprovalResolvedFromFrame,
   resolvedQuestionFromFrame,
   rowFromEvent,
-  toolSummary,
   type Row,
   type PendingQuestion,
+  type AgentApproval,
   type ResolvedQuestion,
   type SessionEventView,
 } from './events.ts'
@@ -108,23 +144,18 @@ interface RelayProfileDraft {
   setDefault: boolean
 }
 
+function latestSkillIntent(rows: Row[]): string {
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    const row = rows[index]
+    if (row?.kind !== 'user' || row.text.includes('<recent-activity>')) continue
+    const intent = row.text.split(/【操作记录】|\[Recorded actions\]/u, 1)[0]!.replace(/\s+/gu, ' ').trim()
+    if (intent !== '') return intent.slice(0, 500)
+  }
+  return ''
+}
+
 /** Route keys managed by the relay editor; core-owned routes are never touched. */
 const RELAY_ROUTE_PREFIX = 'relay-'
-
-/** One selectable entry from `session.models` for the composer chip list. */
-interface SessionModelOption {
-  provider: string
-  providerName: string
-  id: string
-  name: string
-}
-
-/** Advisory directory snapshot used by the composer model switcher. */
-interface SessionModelDirectory {
-  current: { provider: string; model: string; reasoningEffort?: string } | null
-  options: SessionModelOption[]
-  routable: boolean | null
-}
 
 /**
  * Display names are free-form (CJK included); the route key needs the
@@ -433,8 +464,13 @@ function TabAffinityBanner({
       <p>{body}</p>
       <div className="tab-affinity-actions">
         {handoff && <button className="keep" onClick={() => onDecision('keep')}>{copy.tabHandoff.keep}</button>}
+        {!handoff && !lost && state.controlled !== null && (
+          <button className="follow" onClick={() => onDecision('show-controlled')}>
+            {copy.tabHandoff.showControlled}
+          </button>
+        )}
         {state.active !== null && (
-          <button className="follow" onClick={() => onDecision('follow')}>
+          <button className={handoff || lost ? 'follow' : 'keep'} onClick={() => onDecision('follow')}>
             {lost ? copy.tabHandoff.useCurrent : handoff ? copy.tabHandoff.follow : copy.tabHandoff.followCurrent}
           </button>
         )}
@@ -511,6 +547,51 @@ function ApprovalDialog({
   )
 }
 
+function AgentApprovalDialog({ request, locale, onDecision, deciding }: {
+  request: AgentApproval
+  locale: UiLocale
+  onDecision: (decision: 'deny' | 'once' | 'session') => void
+  deciding: boolean
+}): React.JSX.Element {
+  const zh = locale === 'zh'
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent): void => { if (event.key === 'Escape') onDecision('deny') }
+    window.addEventListener('keydown', onKeyDown)
+    return () => { window.removeEventListener('keydown', onKeyDown) }
+  }, [request.rpcId, onDecision])
+  const title = request.kind === 'file-change' ? (zh ? '确认文件修改' : 'Approve file changes')
+    : request.kind === 'permissions' ? (zh ? '确认额外权限' : 'Approve permissions')
+      : (zh ? '确认本地命令' : 'Approve local command')
+  return <div className="approval-backdrop">
+    <section className="approval-dialog" role="alertdialog" aria-modal="true" aria-labelledby="agent-approval-title">
+      <div className="approval-rail" aria-hidden="true" />
+      <div className="approval-heading"><span className="approval-shield"><ShieldIcon /></span><div>
+        <span className="eyebrow">{request.backend.toUpperCase()} · {zh ? '授权请求' : 'Approval request'}</span>
+        <h2 id="agent-approval-title">{title}</h2>
+      </div></div>
+      <div className="approval-detail"><span>{zh ? '请求原因' : 'Reason'}</span>
+        <strong>{request.reason || (zh ? `${request.toolName} 请求授权` : `${request.toolName} requests approval`)}</strong>
+      </div>
+      {request.command !== '' && <div className="approval-detail"><span>{zh ? '将执行的命令' : 'Command'}</span>
+        <pre className="agent-approval-command">{request.command}</pre></div>}
+      {request.cwd !== '' && <div className="approval-detail"><span>{zh ? '工作目录' : 'Working directory'}</span><code>{request.cwd}</code></div>}
+      <div className="approval-detail"><span>{zh ? '所属会话' : 'Conversation'}</span><code>{request.sessionId}</code></div>
+      {request.details !== '' && <div className="approval-detail"><span>{zh ? '请求范围' : 'Requested scope'}</span>
+        <pre className="agent-approval-command">{request.details}</pre></div>}
+      {request.kind === 'command' && request.command === '' && <p className="approval-footnote">
+        {zh ? '未收到完整命令预览；请先查看聊天中的工具调用详情，不确定时拒绝。' : 'No full command preview was received. Inspect the tool call in chat; deny if unsure.'}
+      </p>}
+      <div className="approval-actions">
+        <button className="deny" autoFocus disabled={deciding} onClick={() => onDecision('deny')}>{zh ? '拒绝' : 'Deny'}</button>
+        <button className="allow" disabled={deciding} onClick={() => onDecision('once')}>{zh ? '允许一次' : 'Allow once'}</button>
+        {request.backend === 'codex' && <button className="session-trust" disabled={deciding}
+          onClick={() => onDecision('session')}>{zh ? '本会话允许' : 'Allow for session'}</button>}
+      </div>
+      <small className="approval-footnote">{zh ? '「允许一次」仅批准当前请求；浏览器授权不会授予本地文件权限。' : 'Allow once applies only to this request. Browser access does not grant filesystem access.'}</small>
+    </section>
+  </div>
+}
+
 /**
  * A page quote: the highlighted text plus where it came from. The quote is
  * page-authored, so it renders as plain text and never as markdown.
@@ -571,7 +652,9 @@ const MessageBody = memo(function MessageBody({
   if (row.kind === 'user' || row.kind === 'assistant') {
     // A user message may carry a page quote; show the quote, not its fence.
     const attached = row.kind === 'user' ? splitSelectionMessage(row.text) : null
-    const text = attached === null ? row.text : attached.message
+    const text = row.kind === 'assistant'
+      ? assistantDisplayText(row.text)
+      : attached === null ? row.text : attached.message
     return (
       <div className="body message-body md">
         <MessageImages
@@ -595,6 +678,14 @@ const MessageBody = memo(function MessageBody({
   return <pre>{row.text}</pre>
 })
 
+function assistantDisplayText(text: string): string {
+  return text
+    .replace(/<tandix-skill-save-json>[\s\S]*?<\/tandix-skill-save-json>/giu, '')
+    .replace(/<tandix-skill-pair-json>[\s\S]*?<\/tandix-skill-pair-json>/giu, '')
+    .replace(/<tandix-skill-json>[\s\S]*?<\/tandix-skill-json>/giu, '')
+    .trim()
+}
+
 interface HistoryPage {
   events: { event: SessionEventView }[]
   assistantStream?: unknown
@@ -607,32 +698,71 @@ interface HistoryPage {
 
 const ToolActivity = memo(function ToolActivity({ row, copy }: { row: Row; copy: PanelCopy }): React.JSX.Element {
   const running = row.status === 'running'
+  const tools = row.tools ?? []
+  const category = tools.length > 0 && tools.every((tool) => tool.name === 'bash')
+    ? copy.tool.localCommand
+    : tools.length > 0 && tools.every((tool) => tool.name.startsWith('browser_'))
+      ? running ? copy.tool.running : copy.tool.complete
+      : copy.tool.otherTool
+  const state = running ? <span className="spinner" />
+    : row.status === 'failed' ? copy.tool.failed
+    : row.status === 'interrupted' ? copy.tool.interrupted : copy.tool.done
   return (
-    <div className={`tool-activity ${running ? 'running' : 'complete'}`} role="status">
-      <span className="tool-icon"><ToolIcon /></span>
-      <span className="tool-copy">
-        <span className="tool-label">{running ? copy.tool.running : copy.tool.complete}</span>
-        <span className="tool-summary">{row.text}</span>
-      </span>
-      <span className="tool-state" aria-label={running ? copy.tool.inProgress : copy.tool.completed}>
-        {running ? <span className="spinner" /> : copy.tool.done}
-      </span>
-    </div>
+    <details className={`tool-activity ${running ? 'running' : row.status ?? 'complete'}`}>
+      <summary aria-label={`${category}: ${row.text}. ${copy.tool.details}`}>
+        <span className="tool-icon"><ToolIcon /></span>
+        <span className="tool-copy">
+          <span className="tool-label">{category}</span>
+          <span className="tool-summary">{row.text}</span>
+        </span>
+        <span className="tool-state" aria-label={running ? copy.tool.inProgress : copy.tool.completed}>{state}</span>
+      </summary>
+      <div className="tool-details">
+        {tools.map((tool, index) => <div className="tool-detail" key={`${tool.callId ?? tool.name}-${index}`}>
+          <strong>{tool.name} · {tool.status === 'running' ? copy.tool.inProgress
+            : tool.status === 'failed' ? copy.tool.failed
+            : tool.status === 'interrupted' ? copy.tool.interrupted : copy.tool.completed}</strong>
+          <span>{copy.tool.input}</span>
+          <pre>{tool.input}</pre>
+          {tool.output !== undefined && <><span>{copy.tool.output}</span><pre>{tool.output}</pre></>}
+        </div>)}
+      </div>
+    </details>
   )
 })
 
 export function App(): React.JSX.Element {
-  const locale = useMemo(() => getUiLocale(), [])
+  const [locale, setLocale] = useState<UiLocale>(getUiLocale)
   const copy = PANEL_COPY[locale]
+  useEffect(() => {
+    void loadUiLocale().then(setLocale)
+  }, [])
+  useEffect(() => {
+    document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en'
+    document.title = copy.documentTitle
+  }, [locale, copy.documentTitle])
   const [api] = useState<PanelApi>(() => connectPanel())
+  const [workspaceMode, setWorkspaceMode] = useState<'chat' | 'run'>('chat')
+  const [skills, setSkills] = useState<ChatSkill[]>([])
+  const [managedSkillCount, setManagedSkillCount] = useState(0)
+  const [proposedSkill, setProposedSkill] = useState<ChatSkillDraft | null>(null)
+  const [skillQuestionAnswers, setSkillQuestionAnswers] = useState<Record<number, string>>({})
+  const [skillExtracting, setSkillExtracting] = useState(false)
+  const recordingIdRef = useRef<string | null>(null)
+  const recentActionsRef = useRef<RecordingEventInput[]>([])
   const [state, setState] = useState<BridgeState>('stopped')
   const [caps, setCaps] = useState<BridgeCaps | null>(null)
+  const [backend, setBackend] = useState<AgentBackend>('dsh')
+  const backendRef = useRef<AgentBackend>('dsh')
+  const [showBackendPicker, setShowBackendPicker] = useState(false)
+  const [switchingBackend, setSwitchingBackend] = useState(false)
   const [settings, setSettings] = useState<PanelSettings | null>(null)
   const [rows, setRows] = useState<Row[]>([])
   const [streamRow, setStreamRow] = useState<Row | null>(null)
-  const [draft, setDraft] = useState<ComposerDraft<DraftImage>>(() => emptyComposerDraft())
+  const [draft, setDraft] = useState<ComposerDraft<DraftImage, DraftFile>>(() => emptyComposerDraft())
   const input = draft.text
   const draftImages = draft.images
+  const draftFiles = draft.files
   const [selection, setSelection] = useState<PageSelection | null>(null)
   const [imageLimits, setImageLimits] = useState<ImageAttachmentLimits | null>(null)
   const [addingImages, setAddingImages] = useState(false)
@@ -645,6 +775,8 @@ export function App(): React.JSX.Element {
   const uiScaleChosenRef = useRef(false)
   const [showTextSize, setShowTextSize] = useState(false)
   const [approvalQueue, setApprovalQueue] = useState<ApprovalRequest[]>([])
+  const [agentApprovals, setAgentApprovals] = useState<AgentApproval[]>([])
+  const [agentApprovalBusy, setAgentApprovalBusy] = useState(false)
   const [tabAffinity, setTabAffinity] = useState<TabAffinityState | null>(null)
   const [trustedOriginInput, setTrustedOriginInput] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -656,11 +788,21 @@ export function App(): React.JSX.Element {
   const [relayLoaded, setRelayLoaded] = useState(false)
   const [relayNotice, setRelayNotice] = useState<string | null>(null)
   const [relayBusy, setRelayBusy] = useState(false)
-  const [sessionModels, setSessionModels] = useState<SessionModelDirectory | null>(null)
-  const [modelSelecting, setModelSelecting] = useState(false)
-  const [showModelPicker, setShowModelPicker] = useState(false)
-  const modelPickerRef = useRef<HTMLDivElement | null>(null)
   const [sessionTitle, setSessionTitle] = useState<string | null>(null)
+  const [goal, setGoal] = useState<GoalState | null>(null)
+  const [goalBusy, setGoalBusy] = useState(false)
+  const [goalStartError, setGoalStartError] = useState<string | null>(null)
+  const [goalFormOpen, setGoalFormOpen] = useState(false)
+  const [goalTask, setGoalTask] = useState('')
+  const [goalDrafting, setGoalDrafting] = useState(false)
+  const [goalDraftReady, setGoalDraftReady] = useState(false)
+  const [goalOutcome, setGoalOutcome] = useState('')
+  const [goalVerification, setGoalVerification] = useState('')
+  const [goalConstraints, setGoalConstraints] = useState('')
+  const [goalBoundaries, setGoalBoundaries] = useState('')
+  const [goalIterationPolicy, setGoalIterationPolicy] = useState('')
+  const [goalBlockedStop, setGoalBlockedStop] = useState('')
+  const [goalBudgetLimit, setGoalBudgetLimit] = useState('')
   const [resumeHint, setResumeHint] = useState<{ ready: boolean; sessionId: string | null }>({ ready: false, sessionId: null })
   const [questions, setQuestions] = useState<PendingQuestion[]>([])
   const [questionSubmissions, setQuestionSubmissions] = useState<ResolvedQuestion[]>([])
@@ -691,41 +833,47 @@ export function App(): React.JSX.Element {
   const streamRefreshRef = useRef(new Set<string>())
   const seqRef = useRef(0)
   const sessionRef = useRef<string | null>(null)
+  const sessionPickerRequestRef = useRef(0)
+  const sessionContentTitlesRef = useRef(new Map<string, string | null>())
+  const pendingSkillExtractionRef = useRef<string | null>(null)
+  const pendingGoalDraftRef = useRef<string | null>(null)
+  const proposedSkillRef = useRef<ChatSkillDraft | null>(null)
+  const proposedSkillSessionRef = useRef<string | null>(null)
+  const importedSkillRef = useRef<ChatSkill | null>(null)
+  const skillSavingRef = useRef(false)
+  const pendingManagedSkillSaveRef = useRef<{ sessionId: string; sentAt: number; retries: number } | null>(null)
+  const managedSkillDraftRef = useRef<ManagedSkillInput | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
-  const atBottomRef = useRef(true)
-  const [atBottom, setAtBottom] = useState(true)
+
+  useEffect(() => {
+    const refreshSkills = (): void => {
+      void loadChatSkills().then(setSkills).catch((cause: unknown) => {
+        setError(cause instanceof Error ? cause.message : String(cause))
+      })
+    }
+    const refreshManagedSkillCount = (): void => {
+      void loadManagedSkills().then((items) => setManagedSkillCount(items.length)).catch(() => {})
+    }
+    refreshSkills()
+    refreshManagedSkillCount()
+    const onStorageChanged = (changes: Record<string, chrome.storage.StorageChange>, areaName: string): void => {
+      if (areaName === 'local' && changes[CHAT_SKILLS_STORAGE_KEY] !== undefined) refreshSkills()
+      if (areaName === 'local' && changes[MANAGED_SKILLS_STORAGE_KEY] !== undefined) refreshManagedSkillCount()
+    }
+    chrome.storage.onChanged?.addListener(onStorageChanged)
+    return () => { chrome.storage.onChanged?.removeListener(onStorageChanged) }
+  }, [])
 
   const nextSeq = (): number => { seqRef.current += 1; return seqRef.current }
-
-  function syncScrollBottom(): void {
-    const element = scrollRef.current
-    if (element === null) return
-    const next = isNearScrollBottom(element)
-    atBottomRef.current = next
-    setAtBottom((current) => current === next ? current : next)
-  }
-
-  function stickConversationToBottom(): void {
-    atBottomRef.current = true
-    setAtBottom(true)
-  }
-
-  function scrollMessagesToBottom(behavior: ScrollBehavior = 'smooth'): void {
-    const element = scrollRef.current
-    if (element === null) return
-    stickConversationToBottom()
-    element.scrollTo({ top: element.scrollHeight, behavior })
-  }
   const question = questions[0] ?? null
   const questionSubmitting = question !== null && hasPendingQuestion(questionSubmissions, question)
-  const sessionSwitchBlocked = sessionChanging || busy || addingImages || stopping
+  const sessionSwitchBlocked = sessionChanging || busy || addingImages || stopping || goalBusy || goalDrafting
     || questions.length > 0 || approvalQueue.length > 0
   const sessionReady = sessionAcceptsPrompts(
     state === 'connected',
     sessionChanging,
     sessionRef.current,
   )
-
   function replaceQuestions(next: PendingQuestion[]): void {
     questionsRef.current = next
     setQuestions(next)
@@ -793,14 +941,40 @@ export function App(): React.JSX.Element {
       setSettings({
         bridgeUrl: raw?.bridgeUrl ?? '',
         token: raw?.token ?? '',
+        agentBackend: agentPreference(raw?.agentBackend),
+        sandboxDirectory: raw?.sandboxDirectory ?? '',
         sharePageContent: raw?.sharePageContent ?? 'auto',
         unrestrictedBrowserAccess: raw?.unrestrictedBrowserAccess ?? false,
         trustedActionOrigins: raw?.trustedActionOrigins ?? [],
         approvalNotifications: raw?.approvalNotifications ?? true,
         autoResumeSession: raw?.autoResumeSession ?? true,
+        autoFollowTabs: raw?.autoFollowTabs ?? (import.meta.env.EXT_TARGET === 'firefox'),
       })
     })
   }, [])
+
+  useEffect(() => {
+    const offState = api.onRecordingState((next) => {
+      rememberRecordingState(next)
+    })
+    const offEvent = api.onRecordingEvent((recordingId, event) => {
+      if (recordingIdRef.current !== recordingId) return
+      const cutoff = Date.now() - 10 * 60_000
+      recentActionsRef.current = [...recentActionsRef.current, event]
+        .filter((item) => item.capturedAt >= cutoff).slice(-200)
+    })
+    void api.getRecordingState().then((next) => {
+      rememberRecordingState(next)
+    }).catch(() => {})
+    return () => { offState(); offEvent() }
+  }, [api])
+
+  function rememberRecordingState(next: TeachState): void {
+    // Chrome pauses one tab's recorder while the user works in another tab.
+    // Keep this panel's already-routed events so returning to the page still
+    // represents its own complete recent-ten-minute activity window.
+    recordingIdRef.current = next.phase === 'recording' ? next.recordingId ?? null : null
+  }
 
   // 每次连接重启（连接配置变更/断线重连）都新建会话。状态消息逐条监听：
   // React 会把 stopped/connecting 等瞬时状态合并进同一帧渲染，依赖渲染
@@ -808,9 +982,12 @@ export function App(): React.JSX.Element {
   const [sessionEpoch, setSessionEpoch] = useState(0)
   const lastStateRef = useRef<BridgeState | null>(null)
   useEffect(() => {
-    const offStatus = api.onStatus((next, nextCaps) => {
+    const offStatus = api.onStatus((next, nextCaps, nextBackend) => {
       setState(next)
       setCaps(nextCaps)
+      setBackend(nextBackend)
+      backendRef.current = nextBackend
+      if (next !== 'connected') setAgentApprovals([])
       const previous = lastStateRef.current
       lastStateRef.current = next
       if (previous !== null && next !== previous && next === 'stopped') {
@@ -824,16 +1001,19 @@ export function App(): React.JSX.Element {
         followSnapshotsRef.current.clear()
         pendingHistoriesRef.current.clear()
         streamRefreshRef.current.clear()
-        stickConversationToBottom()
         setStreamRow(null)
         setRows([])
-        setDraft((current) => ({ ...current, images: [] }))
+        setDraft((current) => ({ ...current, images: [], files: [] }))
         setImageLimits(null)
         imageProjectionRef.current = { sessionId: null, seq: Number.NEGATIVE_INFINITY, limits: null }
-        setSessionModels(null)
-        setModelSelecting(false)
-        setShowModelPicker(false)
         setSessionTitle(null)
+        setGoal(null)
+        setGoalStartError(null)
+        setGoalFormOpen(false)
+        setGoalTask('')
+        setGoalDrafting(false)
+        setGoalDraftReady(false)
+        pendingGoalDraftRef.current = null
         setWorking(false)
         setStopping(false)
         setSessionChanging(false)
@@ -850,7 +1030,9 @@ export function App(): React.JSX.Element {
     const offApprovalResolved = api.onApprovalResolved((id) => {
       updateApprovalQueue((current) => current.filter((request) => request.id !== id))
     })
-    const offTabAffinity = api.onTabAffinity(setTabAffinity)
+    const offTabAffinity = api.onTabAffinity((next) => {
+      setTabAffinity(next)
+    })
     const offSelection = api.onSelection(setSelection)
     // A side panel has no sender.tab, so it reports its own window; the
     // background answers with whatever that window already had selected.
@@ -886,43 +1068,10 @@ export function App(): React.JSX.Element {
     if (sessionId !== undefined && queuedApproval !== undefined) void focusApprovalSession(queuedApproval)
   }, [queuedApproval?.id, queuedApproval?.sessionId, sessionChanging, state])
 
-  // Stick to the newest row only while the user is already near the bottom.
-  useLayoutEffect(() => {
-    if (!atBottomRef.current) return
-    // Scroll before ResizeObserver measures new content, without intermediate
-    // smooth-scroll events disabling follow while content keeps growing.
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'instant' })
+  // Auto-scroll to the newest row.
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
   }, [rows, streamRow, working])
-
-  // Sibling chrome (session picker, question card, errors, attachments) can
-  // resize the scrollport without a scroll event; keep bottom state honest.
-  useEffect(() => {
-    if (showSettings) return
-    const element = scrollRef.current
-    if (element === null || typeof ResizeObserver === 'undefined') return
-    syncScrollBottom()
-    const observer = new ResizeObserver(() => { syncScrollBottom() })
-    observer.observe(element)
-    return () => observer.disconnect()
-  }, [showSettings, question, error, showSessionPicker, draftImages.length, selection])
-
-  useEffect(() => {
-    if (!showModelPicker) return
-    const onPointerDown = (event: PointerEvent): void => {
-      const root = modelPickerRef.current
-      if (root !== null && event.target instanceof Node && root.contains(event.target)) return
-      setShowModelPicker(false)
-    }
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setShowModelPicker(false)
-    }
-    document.addEventListener('pointerdown', onPointerDown, true)
-    document.addEventListener('keydown', onKeyDown, true)
-    return () => {
-      document.removeEventListener('pointerdown', onPointerDown, true)
-      document.removeEventListener('keydown', onKeyDown, true)
-    }
-  }, [showModelPicker])
 
   function applyImageProjection(sessionId: string, seq: number, value: unknown): void {
     if (sessionRef.current !== sessionId || !Number.isSafeInteger(seq)) return
@@ -949,6 +1098,43 @@ export function App(): React.JSX.Element {
   /** Live frame handling: session events append rows; turn/end reconciles with history. */
   async function onFrame(frame: ServerFrame): Promise<void> {
     if (frame.t !== 'event') return
+    if (frame.frame.method === 'goal/refresh') {
+      const payload = frame.frame.payload as { sessionId?: unknown } | undefined
+      if (payload?.sessionId === sessionRef.current) void refreshGoal(payload.sessionId as string)
+      return
+    }
+    if (frame.frame.method === 'goal/updated' || frame.frame.method === 'goal/cleared') {
+      const payload = frame.frame.payload as { sessionId?: unknown; goal?: GoalState } | undefined
+      if (payload?.sessionId === sessionRef.current) {
+        const nextGoal = frame.frame.method === 'goal/cleared' ? null : payload.goal ?? null
+        setGoal(nextGoal)
+        if (nextGoal?.status !== 'active') setGoalStartError(null)
+      }
+      return
+    }
+    if (frame.frame.method === 'codex/open-url') {
+      const payload = frame.frame.payload as { url?: unknown; sessionId?: unknown } | undefined
+      if (payload?.sessionId !== sessionRef.current || typeof payload.url !== 'string') return
+      try {
+        const url = new URL(payload.url)
+        if (url.protocol === 'https:' || (url.protocol === 'http:'
+          && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) {
+          await chrome.tabs.create({ url: url.toString() })
+        }
+      } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+      return
+    }
+    const agentApproval = agentApprovalFromFrame(frame.frame)
+    if (agentApproval !== null) {
+      setAgentApprovals((current) => current.some((entry) => entry.rpcId === agentApproval.rpcId)
+        ? current : [...current, agentApproval])
+      return
+    }
+    const resolvedAgentApproval = agentApprovalResolvedFromFrame(frame.frame)
+    if (resolvedAgentApproval !== null) {
+      setAgentApprovals((current) => current.filter((entry) => entry.rpcId !== resolvedAgentApproval))
+      return
+    }
     if (frame.frame.method === 'session/assistant-stream') {
       const payload = frame.frame.payload as { sessionId?: unknown; snapshotId?: unknown; frame?: unknown } | undefined
       if (typeof payload?.sessionId !== 'string' || typeof payload.frame !== 'object' || payload.frame === null) return
@@ -969,7 +1155,14 @@ export function App(): React.JSX.Element {
         pendingHistoriesRef.current.delete(payload.snapshotId)
         if (pending !== undefined) applyHistory(sessionId, pending.history)
       }
-      setStreamRow(stream.row())
+      const streamedRow = stream.row()
+      setStreamRow(streamedRow)
+      if (streamedRow?.kind === 'assistant') {
+        handleExtractedSkillText(streamedRow.text, sessionId)
+        if (pendingManagedSkillSaveRef.current?.sessionId === sessionId) {
+          managedSkillDraftRef.current = parseManagedSkillEnvelope(streamedRow.text) ?? managedSkillDraftRef.current
+        }
+      }
       if (update === 'rebaseline') await rebaselineStream(sessionId)
       return
     }
@@ -1006,6 +1199,9 @@ export function App(): React.JSX.Element {
     }
     const payload = frame.frame.payload as { sessionId?: string; event?: SessionEventView } | undefined
     if (payload?.sessionId === undefined || payload.event === undefined) return
+    if (payload.event.type === 'goal/change' && payload.sessionId === sessionRef.current) {
+      void refreshGoal(payload.sessionId)
+    }
     const followed = followSnapshotsRef.current.get(payload.sessionId)
     if (followed !== undefined && !followed.applied && !followed.overflow) {
       if (followed.suffix.length < 2048) followed.suffix.push(payload.event)
@@ -1019,12 +1215,15 @@ export function App(): React.JSX.Element {
     if (stream?.settle(payload.event) && payload.sessionId === sessionRef.current) setStreamRow(stream.row())
     const nextTitle = sessionTitleFromEvent(payload.event)
     if (nextTitle !== undefined && payload.sessionId === sessionRef.current) {
+      sessionContentTitlesRef.current.set(payload.sessionId, nextTitle)
       setSessionTitle(nextTitle)
       return
     }
+    if (payload.event.type === 'user/message') sessionContentTitlesRef.current.delete(payload.sessionId)
     if (payload.event.type === 'turn/start') {
       sessionRuntimeRef.current.startTurn(payload.sessionId)
       if (payload.sessionId !== sessionRef.current) return
+      setGoalStartError(null)
       stoppingRef.current = false
       setStopping(false)
       setWorking(true)
@@ -1033,28 +1232,94 @@ export function App(): React.JSX.Element {
     if (payload.event.type === 'turn/end') {
       sessionRuntimeRef.current.finishTurn(payload.sessionId)
       if (payload.sessionId !== sessionRef.current) return
+      setRows((prev) => interruptRunningTools(prev))
       stoppingRef.current = false
       setStopping(false)
       setWorking(false)
+      if (pendingSkillExtractionRef.current === payload.sessionId) {
+        setSkillExtracting(false)
+      }
       clearQuestions()
       await refreshHistory(payload.sessionId)
+      void refreshGoal(payload.sessionId)
+      const saveRequest = pendingManagedSkillSaveRef.current
+      if (saveRequest?.sessionId === payload.sessionId) {
+        try {
+          let stored = await loadManagedSkills()
+          if (!stored.some((skill) => skill.sourceSessionId === saveRequest.sessionId
+            && skill.updatedAt >= saveRequest.sentAt) && managedSkillDraftRef.current !== null) {
+            await saveManagedSkill(managedSkillDraftRef.current, saveRequest.sessionId)
+            stored = await loadManagedSkills()
+          }
+          if (stored.some((skill) => skill.sourceSessionId === saveRequest.sessionId
+            && skill.updatedAt >= saveRequest.sentAt)) {
+            setManagedSkillCount(stored.length)
+            pendingManagedSkillSaveRef.current = null
+            managedSkillDraftRef.current = null
+            setWorkspaceMode('run')
+          } else if (saveRequest.retries === 0) {
+            pendingManagedSkillSaveRef.current = { ...saveRequest, retries: 1 }
+            const clientTimeZone = browserTimeZone()
+            await api.rpc('session.prompt', {
+              sessionId: saveRequest.sessionId,
+              mode: 'queue',
+              tandixSkillSaveIntent: true,
+              content: promptContent(
+                'The user asked to save the skill from the preceding conversation in the Tandix Skills tab. ' +
+                'Tandix has not received a save receipt. Complete that request now: call tandix_skill_save ' +
+                'with the reusable skill name, when-to-use description, and instructions. ' +
+                'If that tool is unavailable, return only ' +
+                '<tandix-skill-save-json>{"name":"...","description":"...","instructions":"..."}</tandix-skill-save-json> ' +
+                'with real content so Tandix can save it. Do not claim success without confirmation.',
+                [],
+              ),
+              ...(clientTimeZone === undefined ? {} : { clientTimeZone }),
+            })
+          } else {
+            pendingManagedSkillSaveRef.current = null
+            setError(locale === 'zh'
+              ? '重试后仍未收到网页助手的技能保存回执，技能尚未保存到「技能」Tab。'
+              : 'No Tandix skill save receipt was found after a retry; nothing was saved to the Skills tab.')
+          }
+        } catch (cause) {
+          pendingManagedSkillSaveRef.current = null
+          setError(locale === 'zh' ? `无法核对技能保存结果：${cause instanceof Error ? cause.message : String(cause)}`
+            : `Could not verify skill storage: ${cause instanceof Error ? cause.message : String(cause)}`)
+        }
+      }
+      if (pendingGoalDraftRef.current === payload.sessionId) {
+        pendingGoalDraftRef.current = null
+        setGoalDrafting(false)
+        setError(locale === 'zh' ? 'Agent 未返回有效的目标草案，请重试或在聊天中补充任务信息。'
+          : 'The agent did not return a valid goal draft. Retry or add more task detail in chat.')
+      }
+      if (pendingSkillExtractionRef.current === payload.sessionId && proposedSkillRef.current === null) {
+        setError(locale === 'zh'
+          ? 'AI 未返回有效的“浏览器技能 + 非浏览器技能”草稿，请重新点击「生成技能」。'
+          : 'The AI did not return a valid browser + non-browser skill draft. Choose Create skill again.')
+      }
       return
     }
     if (payload.sessionId !== sessionRef.current) return
     const row = rowFromEvent(payload.event)
     if (row !== null) {
+      if (row.kind === 'assistant') {
+        handleExtractedSkillText(row.text, payload.sessionId)
+        handleGoalDraftText(row.text, payload.sessionId)
+        if (pendingManagedSkillSaveRef.current?.sessionId === payload.sessionId) {
+          managedSkillDraftRef.current = parseManagedSkillEnvelope(row.text) ?? managedSkillDraftRef.current
+        }
+      }
       setRows((prev) => appendLiveRow(prev, row.kind, row.text, nextSeq(), row.images))
       return
     }
     if (payload.event.type === 'tool/call') {
       setWorking(true)
-      const summary = toolSummary(payload.event.data?.name ?? 'tool', payload.event.data?.arguments, locale)
-      setRows((prev) => appendLiveRow(prev, 'tool', summary, nextSeq()))
+      setRows((prev) => appendToolCall(prev, payload.event!, nextSeq(), locale))
       return
     }
     if (payload.event.type === 'tool/result') {
-      // 并入最后一行工具行：调用已完成（不新增行）。
-      setRows((prev) => completeLastTool(prev, nextSeq()))
+      setRows((prev) => completeToolCall(prev, payload.event!, nextSeq()))
       return
     }
   }
@@ -1146,9 +1411,26 @@ export function App(): React.JSX.Element {
       followed.applied = true
       followed.suffix = []
     }
+    if (pendingSkillExtractionRef.current === id) {
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const candidate = rowFromEvent(events[index]!)
+        if (candidate?.kind === 'assistant' && handleExtractedSkillText(candidate.text, id)) break
+      }
+    }
+    if (pendingManagedSkillSaveRef.current?.sessionId === id && managedSkillDraftRef.current === null) {
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const candidate = rowFromEvent(events[index]!)
+        if (candidate?.kind !== 'assistant') continue
+        const draft = parseManagedSkillEnvelope(candidate.text)
+        if (draft !== null) { managedSkillDraftRef.current = draft; break }
+      }
+    }
     applyHistoryImageProjection(id, history.projections)
     const historyTitle = latestSessionTitle(events)
+    const contentTitle = latestSessionContentTitle(events)
+    sessionContentTitlesRef.current.set(id, historyTitle ?? contentTitle ?? null)
     if (historyTitle !== undefined) setSessionTitle(historyTitle)
+    else if (contentTitle !== undefined) setSessionTitle(contentTitle)
     setRows(mergeHistoryRows(events, nextSeq, locale))
     // Only the baseline correlated with this history may have a newer live
     // suffix. A view left by a previous follower is stale, even when revisiting
@@ -1173,132 +1455,191 @@ export function App(): React.JSX.Element {
     }
   }
 
+  async function refreshGoal(sessionId: string): Promise<void> {
+    try {
+      const result = await api.rpc<{ goal: GoalState | null }>('goal.get', { sessionId })
+      if (sessionRef.current === sessionId) {
+        setGoal(result?.goal ?? null)
+        if (result?.goal?.status !== 'active') setGoalStartError(null)
+      }
+    } catch {
+      // A backend without Goal support reports an error at creation.
+      if (sessionRef.current === sessionId) {
+        setGoal(null)
+        setGoalStartError(null)
+      }
+    }
+  }
+
+  function handleGoalDraftText(text: string, sessionId: string): boolean {
+    if (pendingGoalDraftRef.current !== sessionId) return false
+    const draft = parseGoalDraft(text, backendRef.current)
+    if (draft === null) return false
+    pendingGoalDraftRef.current = null
+    setGoalOutcome(draft.outcome)
+    setGoalVerification(draft.verification)
+    setGoalConstraints(draft.constraints)
+    setGoalBoundaries(draft.boundaries)
+    setGoalIterationPolicy(draft.iterationPolicy)
+    setGoalBlockedStop(draft.blockedStop)
+    setGoalBudgetLimit(String(draft.budgetLimit))
+    setGoalDraftReady(true)
+    setGoalDrafting(false)
+    return true
+  }
+
+  async function requestGoalDraft(): Promise<void> {
+    const sessionId = sessionRef.current
+    if (sessionId === null || working || busy || goalBusy
+      || pendingGoalDraftRef.current !== null || goalTask.trim() === '') return
+    pendingGoalDraftRef.current = sessionId
+    setGoalDraftReady(false)
+    setGoalDrafting(true)
+    setWorking(true)
+    setError(null)
+    try {
+      const clientTimeZone = browserTimeZone()
+      await api.rpc('session.prompt', { sessionId, mode: 'queue',
+        content: promptContent(buildGoalDraftPrompt(goalTask, backend), [], []),
+        ...(clientTimeZone === undefined ? {} : { clientTimeZone }),
+      })
+    } catch (cause) {
+      if (pendingGoalDraftRef.current === sessionId) pendingGoalDraftRef.current = null
+      if (sessionRef.current === sessionId) {
+        setGoalDrafting(false)
+        setWorking(false)
+        setError(cause instanceof Error ? cause.message : String(cause))
+      }
+    }
+  }
+
+  async function createGoal(): Promise<void> {
+    const sessionId = sessionRef.current
+    if (sessionId === null || goalBusy || working || !goalDraftReady
+      || goalOutcome.trim() === '' || goalVerification.trim() === ''
+      || goalIterationPolicy.trim() === '' || goalBlockedStop.trim() === '') return
+    const budgetLimit = Number(goalBudgetLimit)
+    if (!Number.isSafeInteger(budgetLimit) || budgetLimit <= 0
+      || (backend === 'dsh' && budgetLimit > 256)) {
+      setError(locale === 'zh' ? '预算上限必须是有效的正整数。' : 'Budget limit must be a valid positive integer.')
+      return
+    }
+    setGoalBusy(true)
+    setError(null)
+    setGoalStartError(null)
+    try {
+      const result = await api.rpc<{ goal: GoalState }>('goal.create', {
+        sessionId,
+        objective: buildGoalObjective({ outcome: goalOutcome, verification: goalVerification,
+          constraints: goalConstraints, boundaries: goalBoundaries,
+          iterationPolicy: goalIterationPolicy, blockedStop: goalBlockedStop }),
+        budgetLimit,
+      })
+      if (sessionRef.current === sessionId) {
+        setGoal(result.goal)
+        setGoalFormOpen(false)
+        setGoalDraftReady(false)
+        await startGoalTask(sessionId, goalTask)
+      }
+    } catch (cause) {
+      if (sessionRef.current === sessionId) setError(cause instanceof Error ? cause.message : String(cause))
+    } finally { setGoalBusy(false) }
+  }
+
+  async function startGoalTask(sessionId: string, task: string): Promise<void> {
+    if (sessionRef.current !== sessionId) return
+    setWorking(true)
+    setGoalStartError(null)
+    try {
+      const clientTimeZone = browserTimeZone()
+      await api.rpc('session.prompt', { sessionId, mode: 'queue',
+        content: promptContent(buildGoalStartPrompt(task), [], []),
+        ...(clientTimeZone === undefined ? {} : { clientTimeZone }),
+      })
+    } catch (cause) {
+      if (sessionRef.current !== sessionId) return
+      setWorking(false)
+      const detail = cause instanceof Error ? cause.message : String(cause)
+      setGoalStartError(detail)
+      setError(locale === 'zh'
+        ? `目标已创建，但启动任务失败：${detail}`
+        : `Goal created, but the task did not start: ${detail}`)
+    }
+  }
+
+  async function retryGoalStart(): Promise<void> {
+    const sessionId = sessionRef.current
+    if (sessionId === null || goal === null || goal.status !== 'active'
+      || goalBusy || working || goalStartError === null) return
+    setGoalBusy(true)
+    setError(null)
+    try { await startGoalTask(sessionId, goalTask) }
+    finally { setGoalBusy(false) }
+  }
+
+  async function continueGoal(): Promise<void> {
+    const sessionId = sessionRef.current
+    if (sessionId === null || goal?.status !== 'active' || goal.activation === 'disarmed'
+      || goalBusy || working || goalStartError !== null) return
+    setGoalBusy(true)
+    setWorking(true)
+    setError(null)
+    try {
+      const clientTimeZone = browserTimeZone()
+      await api.rpc('session.prompt', { sessionId, mode: 'queue',
+        content: promptContent(buildGoalContinuePrompt(), [], []),
+        ...(clientTimeZone === undefined ? {} : { clientTimeZone }),
+      })
+    } catch (cause) {
+      if (sessionRef.current === sessionId) {
+        setWorking(false)
+        const detail = cause instanceof Error ? cause.message : String(cause)
+        setError(locale === 'zh' ? `未能提交继续请求：${detail}` : `Could not submit continuation: ${detail}`)
+      }
+    } finally { setGoalBusy(false) }
+  }
+
+  async function updateGoalStatus(status: 'active' | 'paused'): Promise<void> {
+    const sessionId = sessionRef.current
+    if (sessionId === null || goalBusy) return
+    setGoalBusy(true)
+    setError(null)
+    try {
+      const result = await api.rpc<{ goal: GoalState }>(status === 'active' ? 'goal.resume' : 'goal.pause', { sessionId })
+      if (sessionRef.current === sessionId) setGoal(result.goal)
+    } catch (cause) {
+      if (sessionRef.current === sessionId) setError(cause instanceof Error ? cause.message : String(cause))
+    } finally { setGoalBusy(false) }
+  }
+
+  async function clearGoal(): Promise<void> {
+    const sessionId = sessionRef.current
+    if (sessionId === null || goalBusy || !window.confirm(locale === 'zh'
+      ? '结束并移除这个目标？已完成的工作与聊天记录会保留。'
+      : 'End and remove this goal? Existing work and chat history will remain.')) return
+    setGoalBusy(true)
+    setError(null)
+    try {
+      await api.rpc('goal.clear', { sessionId })
+      if (sessionRef.current === sessionId) {
+        setGoal(null)
+        setGoalStartError(null)
+      }
+    } catch (cause) {
+      if (sessionRef.current === sessionId) setError(cause instanceof Error ? cause.message : String(cause))
+    } finally { setGoalBusy(false) }
+  }
+
   async function createSession(transition: number): Promise<void> {
     const created = await api.rpc<{ sessionId: string }>('session.create', {})
     if (sessionTransitionRef.current !== transition) return
     sessionRef.current = created.sessionId
     await api.setActiveSession(created.sessionId, true)
     setSessionTitle(null)
+    setGoal(null)
+    setGoalStartError(null)
     sessionRuntimeRef.current.seedRunning(created.sessionId, false)
     applyHistory(created.sessionId, await readHistory(created.sessionId))
-    await refreshSessionModels(created.sessionId)
-  }
-
-  /** Pull the advisory model directory for the active session into the composer menu. */
-  async function refreshSessionModels(sessionId: string | null = sessionRef.current): Promise<void> {
-    if (sessionId === null) {
-      setSessionModels(null)
-      setShowModelPicker(false)
-      return
-    }
-    const fromSettings = await loadModelDirectoryFromSettings().catch(() => null)
-    try {
-      const result = await api.rpc<{
-        current?: { provider: string; model: string; reasoningEffort?: string }
-        routable?: boolean
-        groups?: Array<{ id: string; name: string; models: Array<{ id: string; name: string }> }>
-      }>('session.models', { sessionId })
-      if (sessionRef.current !== sessionId) return
-      const sessionOptions = (result.groups ?? []).flatMap((group) => group.models.map((model) => ({
-        provider: group.id,
-        providerName: group.name,
-        id: model.id,
-        name: model.name,
-      })))
-      const options = sessionOptions.length > 0 ? sessionOptions : (fromSettings?.options ?? [])
-      setSessionModels({
-        current: result.current
-          ?? fromSettings?.current
-          ?? (options[0] === undefined
-            ? null
-            : { provider: options[0].provider, model: options[0].id }),
-        routable: result.routable ?? fromSettings?.routable ?? null,
-        options,
-      })
-    } catch {
-      if (sessionRef.current !== sessionId) return
-      // Host-wide settings still list configured relays before a session exists.
-      setSessionModels(fromSettings)
-    }
-  }
-
-  /** Build a composer directory from saved llm-pi-ai routes (works without a Host session). */
-  async function loadModelDirectoryFromSettings(): Promise<SessionModelDirectory | null> {
-    const described = await api.rpc<{
-      namespaces?: Array<{ ns: string; value?: Record<string, unknown> }>
-    }>('settings.describe', {})
-    const providers = (described.namespaces?.find((candidate) => candidate.ns === 'llm-pi-ai')
-      ?.value?.providers ?? {}) as Record<string, {
-      displayName?: string
-      models?: Array<{ id: string; name?: string }>
-    }>
-    const defaults = (described.namespaces?.find((candidate) => candidate.ns === 'agent-default-model')
-      ?.value ?? {}) as { provider?: unknown; model?: unknown; reasoningEffort?: unknown }
-    const options = Object.entries(providers).flatMap(([provider, route]) => (
-      (route.models ?? []).map((model) => ({
-        provider,
-        providerName: typeof route.displayName === 'string' && route.displayName !== ''
-          ? route.displayName
-          : provider,
-        id: model.id,
-        name: typeof model.name === 'string' && model.name !== '' ? model.name : model.id,
-      }))
-    )).filter((option) => option.id !== '')
-    if (options.length === 0) return { current: null, options: [], routable: false }
-    const defaultProvider = typeof defaults.provider === 'string' ? defaults.provider : ''
-    const defaultModel = typeof defaults.model === 'string' ? defaults.model : ''
-    const matched = options.find((option) => (
-      option.provider === defaultProvider && option.id === defaultModel
-    )) ?? options[0]!
-    return {
-      current: {
-        provider: matched.provider,
-        model: matched.id,
-        ...(typeof defaults.reasoningEffort === 'string' && defaults.reasoningEffort !== ''
-          ? { reasoningEffort: defaults.reasoningEffort }
-          : {}),
-      },
-      options,
-      routable: true,
-    }
-  }
-
-  /** Switch the next assembled turn onto the chosen provider/model. */
-  async function selectSessionModel(option: SessionModelOption): Promise<void> {
-    const sessionId = sessionRef.current
-    if (sessionId === null || modelSelecting || busy || working) return
-    setShowModelPicker(false)
-    if (sessionModels?.current?.provider === option.provider
-      && sessionModels.current.model === option.id) return
-    setModelSelecting(true)
-    setError(null)
-    try {
-      const result = await api.rpc<{
-        selected: { provider: string; model: string; reasoningEffort?: string }
-      }>('session.selectModel', {
-        sessionId,
-        provider: option.provider,
-        model: option.id,
-      })
-      if (sessionRef.current !== sessionId) return
-      setSessionModels((current) => current === null
-        ? {
-          current: result.selected,
-          routable: true,
-          options: [option],
-        }
-        : {
-          ...current,
-          current: result.selected,
-          routable: true,
-        })
-    } catch (cause) {
-      if (sessionRef.current === sessionId) {
-        setError(cause instanceof Error ? cause.message : String(cause))
-      }
-    } finally {
-      setModelSelecting(false)
-    }
   }
 
   /** Load the raw host index plus workspace archive state once. */
@@ -1321,6 +1662,30 @@ export function App(): React.JSX.Element {
   async function loadVisibleSessions(): Promise<SessionPickerEntry[]> {
     const { items, archived } = await loadSessionCatalog()
     return resumableSessions(items).filter((entry) => !archived.has(entry.sessionId))
+  }
+
+  /** Backfill untitled rows from user messages without blocking the sorted list. */
+  async function hydrateSessionTitles(items: SessionPickerEntry[], request: number): Promise<void> {
+    const untitled = items.filter((entry) => entry.sessionId !== sessionRef.current
+      && projectedSessionTitle(entry) === undefined && !sessionContentTitlesRef.current.has(entry.sessionId))
+    let next = 0
+    const worker = async (): Promise<void> => {
+      while (next < untitled.length && sessionPickerRequestRef.current === request) {
+        const entry = untitled[next++]!
+        try {
+          const history = await readHistory(entry.sessionId)
+          const events = history.events.map((item) => item.event)
+          const title = latestSessionTitle(events) ?? latestSessionContentTitle(events)
+          if (sessionPickerRequestRef.current !== request) continue
+          sessionContentTitlesRef.current.set(entry.sessionId, title ?? null)
+          if (title === undefined) continue
+          setSessionList((current) => current.map((item) => item.sessionId === entry.sessionId
+            ? { ...item, contentTitle: title } : item))
+          if (sessionRef.current === entry.sessionId) setSessionTitle(title)
+        } catch { /* Keep the distinct ID fallback if this history cannot be read. */ }
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(4, untitled.length) }, worker))
   }
 
   /** Restore only the exact current-page conversation, otherwise create a chat. */
@@ -1349,7 +1714,7 @@ export function App(): React.JSX.Element {
             await api.setActiveSession(hinted)
             setSessionTitle(projectedSessionTitle(entry) ?? sessionDisplayTitle(entry))
             applyHistory(hinted, history)
-            await refreshSessionModels(hinted)
+            void refreshGoal(hinted)
             return
           }
         } catch {
@@ -1370,18 +1735,29 @@ export function App(): React.JSX.Element {
   /** 打开历史会话选择器：拉取持久化会话列表（已过滤空白会话），供恢复。 */
   async function openSessionPicker(): Promise<void> {
     if (showSessionPicker) {
+      sessionPickerRequestRef.current += 1
       setShowSessionPicker(false)
       return
     }
     if (state !== 'connected' || sessionSwitchBlocked || sessionChangingRef.current) return
+    const request = ++sessionPickerRequestRef.current
     setShowSessionPicker(true)
     setLoadingSessions(true)
     try {
-      const items = await loadVisibleSessions()
+      const items = (await loadVisibleSessions()).map((entry) => {
+        if (projectedSessionTitle(entry) !== undefined) return entry
+        const cached = sessionContentTitlesRef.current.get(entry.sessionId)
+        if (cached !== undefined && cached !== null) return { ...entry, contentTitle: cached }
+        return entry.sessionId === sessionRef.current && sessionTitle !== null
+          && sessionTitle !== entry.sessionId && !sessionTitle.endsWith(` · ${entry.sessionId.slice(-8)}`)
+          ? { ...entry, contentTitle: sessionTitle } : entry
+      })
+      if (sessionPickerRequestRef.current !== request) return
       const current = items.find((entry) => entry.sessionId === sessionRef.current)
       const currentTitle = current === undefined ? undefined : projectedSessionTitle(current)
       if (currentTitle !== undefined) setSessionTitle(currentTitle)
       setSessionList(items)
+      void hydrateSessionTitles(items, request)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -1401,7 +1777,7 @@ export function App(): React.JSX.Element {
       sessionRef.current = entry.sessionId
       setSessionTitle(projectedSessionTitle(entry) ?? sessionDisplayTitle(entry))
       await refreshHistory(entry.sessionId)
-      await refreshSessionModels(entry.sessionId)
+      void refreshGoal(entry.sessionId)
     } catch (cause) {
       if (sessionTransitionRef.current === transition) {
         setError(cause instanceof Error ? cause.message : String(cause))
@@ -1450,7 +1826,7 @@ export function App(): React.JSX.Element {
       setSessionTitle(sessionId)
       if (history !== undefined) applyHistory(sessionId, history)
       else setError(historyError instanceof Error ? historyError.message : String(historyError))
-      await refreshSessionModels(sessionId)
+      void refreshGoal(sessionId)
     } finally {
       finishSessionTransition(transition)
     }
@@ -1463,8 +1839,6 @@ export function App(): React.JSX.Element {
     try {
       sessionRef.current = null
       setSessionTitle(null)
-      setSessionModels(null)
-      setShowModelPicker(false)
       prepareSessionSwitch(false)
       await createSession(transition)
     } catch (cause) {
@@ -1501,8 +1875,14 @@ export function App(): React.JSX.Element {
     nextQuestions: PendingQuestion[] = [],
     preserveSelection = false,
   ): void {
-    stickConversationToBottom()
     setRows([])
+    setGoal(null)
+    setGoalStartError(null)
+    setGoalFormOpen(false)
+    setGoalTask('')
+    setGoalDrafting(false)
+    setGoalDraftReady(false)
+    pendingGoalDraftRef.current = null
     setStreamRow(null)
     setDraft(emptyComposerDraft())
     if (!preserveSelection) {
@@ -1545,17 +1925,48 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function send(textOverride?: string): Promise<void> {
+  async function addAttachmentFiles(files: readonly File[]): Promise<void> {
+    const images = files.filter((file) => !file.type.startsWith('video/'))
+    const generic = files.filter((file) => file.type.startsWith('video/'))
+    if (images.length > 0) await addImageFiles(images)
+    if (generic.length === 0) return
+    if (backend !== 'codex') {
+      setError(locale === 'zh' ? '视频附件需要使用 Codex；请切换 Agent。' : 'Video attachments require the Codex backend.')
+      return
+    }
+    const sessionId = sessionRef.current
+    if (sessionId === null || addingImagesRef.current || sendingRef.current) return
+    addingImagesRef.current = true
+    setAddingImages(true)
+    setError(null)
+    try {
+      const prepared = await prepareGenericFiles(generic)
+      if (sessionRef.current === sessionId) {
+        setDraft((current) => ({ ...current, files: [...current.files, ...prepared] }))
+      }
+    } catch (cause) {
+      if (sessionRef.current === sessionId) setError(imageErrorMessage(cause, copy, imageLimits ?? undefined))
+    } finally {
+      addingImagesRef.current = false
+      setAddingImages(false)
+    }
+  }
+
+  async function send(textOverride?: string): Promise<boolean> {
     const text = (textOverride ?? input).trim()
+    const saveSkillIntent = textOverride === undefined && requestsSkillSave(text)
     const submittedImages = textOverride === undefined ? draftImages : []
+    const submittedFiles = textOverride === undefined ? draftFiles : []
     // A quick-start prompt asks about the whole page, not about a quote.
     const submittedSelection = textOverride === undefined ? selection : null
     const id = sessionRef.current
     // busy state 是异步的：连续回车可能都通过 state 检查——用 ref 同步锁。
-    if ((text === '' && submittedImages.length === 0 && submittedSelection === null)
-      || busy || addingImagesRef.current || sendingRef.current || sessionChangingRef.current || id === null) return
+    if ((text === '' && submittedImages.length === 0 && submittedFiles.length === 0 && submittedSelection === null)
+      || busy || goalDrafting || addingImagesRef.current || sendingRef.current || sessionChangingRef.current || id === null) return false
     sendingRef.current = true
-    const submittedDraft: ComposerDraft<DraftImage> = { text, images: submittedImages }
+    const submittedDraft: ComposerDraft<DraftImage, DraftFile> = {
+      text, images: submittedImages, files: submittedFiles,
+    }
     if (textOverride === undefined) {
       setDraft(emptyComposerDraft())
     }
@@ -1564,18 +1975,22 @@ export function App(): React.JSX.Element {
     setError(null)
     // 不渲染乐观行：live user/message 事件即时回显，避免同一消息出现两行。
     try {
+      if (saveSkillIntent) {
+        pendingManagedSkillSaveRef.current = { sessionId: id, sentAt: Date.now(), retries: 0 }
+        managedSkillDraftRef.current = null
+      }
       const clientTimeZone = browserTimeZone()
       await api.rpc('session.prompt', {
         sessionId: id,
         mode: 'queue',
+        ...(saveSkillIntent ? { tandixSkillSaveIntent: true } : {}),
         content: promptContent(
           submittedSelection === null ? text : selectionPromptText(submittedSelection, text),
           submittedImages,
+          submittedFiles,
         ),
         ...(clientTimeZone === undefined ? {} : { clientTimeZone }),
       })
-      // Deferred sessions materialize on the first prompt; refresh so chips appear.
-      void refreshSessionModels(id)
       if (submittedSelection !== null) {
         // Keep the background authoritative while the prompt is in flight.
         // Conditional clearing cannot consume a newer highlight captured in
@@ -1584,7 +1999,12 @@ export function App(): React.JSX.Element {
           setSelection((current) => current?.capturedAt === submittedSelection.capturedAt ? null : current)
         }).catch(() => {})
       }
+      return true
     } catch (cause) {
+      if (saveSkillIntent && pendingManagedSkillSaveRef.current?.sessionId === id) {
+        pendingManagedSkillSaveRef.current = null
+        managedSkillDraftRef.current = null
+      }
       if (sessionRef.current === id) {
         setError(imageErrorMessage(cause, copy, imageLimits ?? undefined))
         setWorking(false)
@@ -1592,13 +2012,139 @@ export function App(): React.JSX.Element {
           setDraft((current) => restoreSubmittedDraft(current, submittedDraft))
         }
       }
+      return false
     } finally {
       setBusy(false)
       sendingRef.current = false
     }
   }
 
-  /** Cancel the active turn while keeping the sidebar session available. */
+  async function extractSkillFromRecentActions(): Promise<void> {
+    if (!sessionReady || sessionRef.current === null) {
+      setError(locale === 'zh' ? '请先连接 Agent。' : 'Connect an agent first.')
+      return
+    }
+    const cutoff = Date.now() - 10 * 60_000
+    const events = recentActionsRef.current.filter((event) => event.capturedAt >= cutoff)
+    const evidence = buildSkillExtractionEvidence(events, latestSkillIntent(rows))
+    const composer = new CompactRecordingComposer()
+    for (const event of events) composer.accept(event, locale)
+    const recap = composer.snapshot()
+    if (events.length === 0 || !hasSkillExtractionCandidates(evidence)) {
+      setError(locale === 'zh'
+        ? '最近 10 分钟没有可提炼的页面操作。请先在当前页面完成一些操作，再生成技能。'
+        : 'No useful page actions were observed in the last 10 minutes. Complete the workflow on the current page, then create the skill.')
+      return
+    }
+    pendingSkillExtractionRef.current = sessionRef.current
+    setSkillExtracting(true)
+    proposedSkillRef.current = null
+    await clearChatSkillDraftCheckpoint().catch(() => {})
+    setSkillQuestionAnswers({})
+    setProposedSkill(null)
+    const accepted = await send(buildExtractSkillPrompt(recap, locale, evidence))
+    if (!accepted) {
+      pendingSkillExtractionRef.current = null
+      setSkillExtracting(false)
+      setError(locale === 'zh' ? '提炼请求未发送，请检查 Agent 连接。' : 'Extraction request was not sent. Check the agent connection.')
+    }
+  }
+
+  /** Parse one extraction reply; every draft remains reviewable until explicitly confirmed. */
+  function handleExtractedSkillText(text: string, sourceSessionId: string): boolean {
+    const extracted = parseExtractedSkill(text)
+    if (extracted === null) return false
+    // A side-panel reload can clear React refs while the durable checkpoint and
+    // conversation remain. A valid protocol payload reclaims that session.
+    if (pendingSkillExtractionRef.current !== sourceSessionId) {
+      pendingSkillExtractionRef.current = sourceSessionId
+    }
+    setSkillExtracting(false)
+    const previousQuestions = proposedSkillRef.current?.questions ?? []
+    if (previousQuestions.length !== extracted.questions.length
+      || previousQuestions.some((question, index) => question !== extracted.questions[index])) {
+      setSkillQuestionAnswers({})
+    }
+    proposedSkillRef.current = extracted
+    proposedSkillSessionRef.current = sourceSessionId
+    void checkpointChatSkillDraft(extracted, sourceSessionId).catch(() => {})
+    importedSkillRef.current = null
+    setError(null)
+    setProposedSkill(extracted)
+    return true
+  }
+
+  async function acceptProposedSkill(): Promise<boolean> {
+    const currentDraft = proposedSkillRef.current ?? proposedSkill
+    if (currentDraft === null || currentDraft.questions.length > 0) return false
+    return await persistSkillDraft(currentDraft, proposedSkillSessionRef.current ?? '')
+  }
+
+  async function submitSkillQuestionAnswers(): Promise<void> {
+    const currentDraft = proposedSkillRef.current ?? proposedSkill
+    if (currentDraft === null || currentDraft.questions.length === 0) return
+    const answers = currentDraft.questions.map((question, index) => ({
+      question,
+      answer: (skillQuestionAnswers[index] ?? '').trim(),
+    }))
+    if (answers.some((entry) => entry.answer === '')) {
+      setError(locale === 'zh' ? '请回答全部待确认问题。' : 'Answer every clarification question.')
+      return
+    }
+    const prompt = locale === 'zh'
+      ? `对技能草案待确认问题的回答：\n${answers.map((entry, index) => `${index + 1}. ${entry.question}\n回答：${entry.answer}`).join('\n')}\n\n请应用这些回答，并重新输出完整的 <tandix-skill-pair-json>；没有已审核的 API/CLI 契约时，desktopSkill 保持 null。不要只回复更新说明。`
+      : `Answers to the skill draft questions:\n${answers.map((entry, index) => `${index + 1}. ${entry.question}\nAnswer: ${entry.answer}`).join('\n')}\n\nApply these answers and re-emit the complete <tandix-skill-pair-json>. Keep desktopSkill null without a reviewed API/CLI contract. Do not reply with an update summary only.`
+    if (await send(prompt)) setSkillQuestionAnswers({})
+  }
+
+  async function persistSkillDraft(skillDraft: ChatSkillDraft, sourceSessionId: string): Promise<boolean> {
+    if (skillSavingRef.current) return false
+    skillSavingRef.current = true
+    const skill = importedSkillRef.current ?? finalizeExtractedSkill(skillDraft, sourceSessionId)
+    try {
+      setSkills(await saveChatSkill(skill))
+      proposedSkillRef.current = null
+      setSkillQuestionAnswers({})
+      setProposedSkill(null)
+      pendingSkillExtractionRef.current = null
+      proposedSkillSessionRef.current = null
+      importedSkillRef.current = null
+      await clearChatSkillDraftCheckpoint().catch(() => {})
+      setError(null)
+      setWorkspaceMode('run')
+      return true
+    } catch (cause) {
+      setError(locale === 'zh'
+        ? `技能保存失败：${cause instanceof Error ? cause.message : String(cause)}`
+        : `Failed to save skill: ${cause instanceof Error ? cause.message : String(cause)}`)
+      return false
+    } finally {
+      skillSavingRef.current = false
+    }
+  }
+
+  async function importSkillJson(text: string): Promise<void> {
+    const skill = parseImportedSkill(text)
+    if (skill === null) throw new Error(locale === 'zh' ? '文件不是有效的 tandix.agent-skill/v1 技能。' : 'Not a valid tandix.agent-skill/v1 skill file.')
+    importedSkillRef.current = skill
+    proposedSkillRef.current = { ...skill, questions: [] }
+    setSkillQuestionAnswers({})
+    setProposedSkill(proposedSkillRef.current)
+    setWorkspaceMode('chat')
+  }
+
+  async function removeSavedSkill(id: string): Promise<void> {
+    setSkills(await deleteChatSkill(id))
+  }
+
+  async function runSavedSkill(skill: ChatSkill, values: Record<string, string>): Promise<void> {
+    if (!sessionReady) throw new Error(locale === 'zh' ? '请先连接聊天会话。' : 'Connect a chat session first.')
+    const prompt = buildChatSkillPrompt(skill, values, locale)
+    setWorkspaceMode('chat')
+    await send(prompt)
+  }
+
+  /** Stop the turn and, for an active Goal, prevent automatic continuation. */
   async function stopTurn(): Promise<void> {
     const id = sessionRef.current
     if (id === null || stoppingRef.current || sessionChangingRef.current) return
@@ -1606,8 +2152,16 @@ export function App(): React.JSX.Element {
     setStopping(true)
     setError(null)
     try {
+      if (goal?.status === 'active') {
+        const result = await api.rpc<{ goal: GoalState }>('goal.pause', { sessionId: id })
+        if (sessionRef.current === id) setGoal(result.goal)
+      }
       await api.rpc('session.cancel', { sessionId: id })
       if (sessionRef.current === id) {
+        if (pendingGoalDraftRef.current === id) {
+          pendingGoalDraftRef.current = null
+          setGoalDrafting(false)
+        }
         sessionRuntimeRef.current.finishTurn(id)
         setWorking(false)
         clearQuestions()
@@ -1622,20 +2176,44 @@ export function App(): React.JSX.Element {
 
   async function saveSettings(): Promise<void> {
     if (settings === null) return
+    const sandboxDirectory = settings.sandboxDirectory.trim()
+    if (sandboxDirectory !== '' && !sandboxDirectory.startsWith('/') && !sandboxDirectory.startsWith('~/')) {
+      setError(copy.settings.sandboxDirectoryInvalid)
+      return
+    }
+    if (sandboxDirectory !== '' && settings.bridgeUrl.trim() !== '') {
+      setError(copy.settings.sandboxDirectoryLocalOnly)
+      return
+    }
     try {
-      const relaySaved = await saveRelayProfiles()
+      const relaySaved = backend !== 'dsh' ? true : await saveRelayProfiles()
       if (!relaySaved) return
       await api.updateSettings(settings)
       setShowSettings(false)
-      await refreshSessionModels(sessionRef.current)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     }
   }
 
+  async function chooseBackend(next: PanelSettings['agentBackend']): Promise<void> {
+    if (settings === null || switchingBackend || working || sessionSwitchBlocked) return
+    setShowBackendPicker(false)
+    if (next === settings.agentBackend && state === 'connected') return
+    setSwitchingBackend(true)
+    setError(null)
+    try {
+      await api.updateSettings({ agentBackend: next }, true)
+      setSettings((current) => current === null ? current : { ...current, agentBackend: next })
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setSwitchingBackend(false)
+    }
+  }
+
   /** Load relay profiles from the llm-pi-ai settings namespace once per settings visit. */
   useEffect(() => {
-    if (!showSettings || relayLoaded) return
+    if (!showSettings || relayLoaded || backend !== 'dsh') return
     let cancelled = false
     void (async () => {
       try {
@@ -1696,7 +2274,7 @@ export function App(): React.JSX.Element {
       if (!cancelled) setRelayLoaded(true)
     })()
     return () => { cancelled = true }
-  }, [api, showSettings, relayLoaded])
+  }, [api, showSettings, relayLoaded, backend])
 
   function updateRelayProfile(index: number, patch: Partial<RelayProfileDraft>): void {
     setRelayProfiles((current) => current.map((profile, at) => at === index ? { ...profile, ...patch } : profile))
@@ -1877,6 +2455,20 @@ export function App(): React.JSX.Element {
     }
   }
 
+  async function decideAgentApproval(decision: 'deny' | 'once' | 'session'): Promise<void> {
+    const request = agentApprovals[0]
+    if (request === undefined || agentApprovalBusy) return
+    setAgentApprovalBusy(true)
+    try {
+      const receipt = await api.respond(request.rpcId, { ok: true,
+        value: request.backend === 'dsh' ? (decision === 'deny' ? 'rejected' : 'allowed-once')
+          : decision === 'deny' ? 'decline' : decision === 'session' ? 'acceptForSession' : 'accept' }) as { accepted?: boolean }
+      if (receipt.accepted !== true) throw new Error(locale === 'zh' ? '授权请求已过期或被取消' : 'Approval request expired or was cancelled')
+      setAgentApprovals((current) => current.filter((entry) => entry.rpcId !== request.rpcId))
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+    finally { setAgentApprovalBusy(false) }
+  }
+
   async function decideTabAffinity(decision: TabAffinityDecision): Promise<void> {
     if (tabAffinity === null) return
     try {
@@ -1902,35 +2494,14 @@ export function App(): React.JSX.Element {
   }
 
   // 状态栏只显示连接状态；快照上限是技术细节，在设置页说明（见 hint）。
-  const statusText = copy.status[state]
+  const statusText = state === 'connected'
+    ? (locale === 'zh' ? `${agentLabel(backend, locale)} 已连接` : `${agentLabel(backend, locale)} connected`)
+    : copy.status[state]
   const sessionMenuTitle = sessionTitle ?? copy.app.newSession
-  const currentModelOption = sessionModels?.options.find((option) => (
-    option.provider === sessionModels.current?.provider
-    && option.id === sessionModels.current.model
-  ))
-  const currentModelLabel = currentModelOption?.name
-    ?? (sessionModels !== null && sessionModels.options.length === 0
-      ? copy.app.noModelsConfigured
-      : copy.app.selectModel)
-  const modelMenuGroups = (() => {
-    const groups: Array<{ provider: string; providerName: string; models: SessionModelOption[] }> = []
-    for (const option of sessionModels?.options ?? []) {
-      const existing = groups.find((group) => group.provider === option.provider)
-      if (existing === undefined) {
-        groups.push({
-          provider: option.provider,
-          providerName: option.providerName,
-          models: [option],
-        })
-        continue
-      }
-      existing.models.push(option)
-    }
-    return groups
-  })()
-  const approvalDialog = !approvalReadyForSession(queuedApproval, sessionRef.current, sessionChanging)
-    ? null
-    : <ApprovalDialog request={queuedApproval!} onDecision={decideApproval} copy={copy} />
+  const approvalDialog = agentApprovals[0] !== undefined
+    ? <AgentApprovalDialog request={agentApprovals[0]} locale={locale} deciding={agentApprovalBusy} onDecision={(decision) => { void decideAgentApproval(decision) }} />
+    : !approvalReadyForSession(queuedApproval, sessionRef.current, sessionChanging)
+      ? null : <ApprovalDialog request={queuedApproval!} onDecision={decideApproval} copy={copy} />
 
   if (showSettings) {
     return (
@@ -1945,6 +2516,18 @@ export function App(): React.JSX.Element {
         <UpdateCard copy={copy.update} />
         <div className="settings-panel">
           <label>
+            <span>{copy.settings.language}</span>
+            <small>{copy.settings.languageHelp}</small>
+            <select value={locale} onChange={(event) => {
+              const next = event.target.value as UiLocale
+              setLocale(next)
+              void saveUiLocale(next)
+            }}>
+              <option value="zh">简体中文</option>
+              <option value="en">English</option>
+            </select>
+          </label>
+          {backend === 'dsh' && <><label>
             <span>{copy.settings.bridgeAddress}</span>
             <small>{copy.settings.bridgeHelp}</small>
             <input
@@ -1961,6 +2544,17 @@ export function App(): React.JSX.Element {
               value={settings?.token ?? ''}
               onChange={(e) => setSettings((prev) => prev === null ? prev : { ...prev, token: e.target.value })}
               placeholder={copy.settings.tokenPlaceholder}
+            />
+          </label></>}
+          <label className="sandbox-directory-setting">
+            <span>{copy.settings.sandboxDirectory}</span>
+            <small>{copy.settings.sandboxDirectoryHelp}</small>
+            <input
+              value={settings?.sandboxDirectory ?? ''}
+              onChange={(event) => setSettings((current) => current === null ? current
+                : { ...current, sandboxDirectory: event.target.value })}
+              placeholder={copy.settings.sandboxDirectoryPlaceholder}
+              spellCheck={false}
             />
           </label>
           <label>
@@ -2023,8 +2617,34 @@ export function App(): React.JSX.Element {
             />
             <span className="setting-toggle-control" aria-hidden="true"><span /></span>
           </label>
+          {import.meta.env.EXT_TARGET === 'firefox' && <label className="setting-toggle">
+            <span className="setting-toggle-copy">
+              <strong>{copy.settings.autoFollowTabs}</strong>
+              <small>{copy.settings.autoFollowTabsHelp}</small>
+            </span>
+            <input
+              className="setting-toggle-input"
+              type="checkbox"
+              checked={settings?.autoFollowTabs ?? true}
+              onChange={(event) => setSettings((current) => current === null
+                ? current
+                : { ...current, autoFollowTabs: event.target.checked })}
+            />
+            <span className="setting-toggle-control" aria-hidden="true"><span /></span>
+          </label>}
         </div>
-        <section className="relay-config" aria-labelledby="relay-title">
+        {backend === 'codex' ? (
+          <><section className="relay-config" aria-label="Codex">
+            <p>{locale === 'zh'
+              ? '正在使用已登录的 Codex。Skills、MCP 和 Plugins 来自同一 Codex 环境。'
+              : 'Using your signed-in Codex. Skills, MCP servers and plugins come from the same Codex environment.'}</p>
+          </section>
+          {state === 'connected' && <CodexCapabilities api={api} sessionId={sessionRef.current} locale={locale} />}</>
+        ) : backend === 'workbuddy' ? <section className="relay-config" aria-label="WorkBuddy">
+          <p>{locale === 'zh'
+            ? 'WorkBuddy 通过本机 ACP Agent 连接。请配置兼容的 Agent 运行时并完成其登录；此连接不会自动复用 WorkBuddy 桌面端账号。'
+            : 'WorkBuddy connects through a local ACP agent. Configure and sign in to a compatible runtime; this connection does not automatically reuse the WorkBuddy desktop login.'}</p>
+        </section> : <section className="relay-config" aria-labelledby="relay-title">
           <div className="relay-heading">
             <span id="relay-title">
               <strong>{copy.settings.relaySection}</strong>
@@ -2119,7 +2739,7 @@ export function App(): React.JSX.Element {
             </div>
           ))}
           {relayNotice !== null && <p className="hint">{relayNotice}</p>}
-        </section>
+        </section>}
         <section className="trusted-origins" aria-labelledby="trusted-origins-title">
           <div>
             <span id="trusted-origins-title">{copy.settings.trustedOrigins}</span>
@@ -2150,7 +2770,7 @@ export function App(): React.JSX.Element {
           <button className="primary" onClick={saveSettings}>{copy.settings.save}</button>
           <button className="secondary" onClick={() => setShowSettings(false)}>{copy.settings.cancel}</button>
         </div>
-        <p className="hint">{copy.settings.snapshotHint(caps?.snapshotMaxChars ?? DEFAULT_SNAPSHOT_MAX_CHARS)}</p>
+        <p className="hint">{copy.settings.snapshotHint(caps?.snapshotMaxChars ?? DEFAULT_SNAPSHOT_MAX_CHARS, backend)}</p>
       </div>{approvalDialog}</>
     )
   }
@@ -2158,10 +2778,26 @@ export function App(): React.JSX.Element {
   return (
     <><div className="app">
       <header className="topbar">
-        <span className="connection" role="status">
-          <span className={`dot ${state}`} />
-          <span className="connection-label">{statusText}</span>
-        </span>
+        <div className="connection-control">
+          <button type="button" className="connection" aria-expanded={showBackendPicker}
+            aria-label={locale === 'zh' ? `连接状态：${statusText}。点击选择 Agent` : `Connection: ${statusText}. Choose agent`}
+            onClick={() => setShowBackendPicker((shown) => !shown)}>
+            <span className={`dot ${state}`} />
+            <span className="connection-label">{statusText}</span>
+            <ChevronDownIcon />
+          </button>
+          {showBackendPicker && <div className="backend-picker" role="menu">
+            <p>{locale === 'zh' ? '连接到' : 'Connect to'}</p>
+            {AGENT_CHOICES.map((choice) => <button type="button" role="menuitemradio"
+              key={choice} aria-checked={settings?.agentBackend === choice}
+              disabled={settings === null || switchingBackend || working || sessionSwitchBlocked}
+              onClick={() => { void chooseBackend(choice) }}>
+              <span>{agentLabel(choice, locale)}</span>
+              {settings?.agentBackend === choice && <span aria-hidden="true">✓</span>}
+            </button>)}
+            {(working || sessionSwitchBlocked) && <small>{locale === 'zh' ? '请先停止当前任务再切换' : 'Stop the current task before switching'}</small>}
+          </div>}
+        </div>
         <button className="session-menu-trigger" disabled={state !== 'connected' || sessionSwitchBlocked}
           aria-expanded={showSessionPicker} aria-label={copy.app.openSessions}
           onClick={() => { void openSessionPicker() }} title={sessionMenuTitle}>
@@ -2178,19 +2814,110 @@ export function App(): React.JSX.Element {
             aria-expanded={showTextSize} aria-label={copy.textSize.open} title={copy.textSize.open}>
             <TextSizeIcon />
           </button>
-          <button className="icon-button settings-trigger" onClick={() => {
-            setShowModelPicker(false)
-            setShowSettings(true)
-          }}
+          <button className="icon-button settings-trigger" onClick={() => setShowSettings(true)}
             aria-label={copy.app.openSettings} title={copy.app.settings}><SettingsIcon /></button>
         </div>
       </header>
+      <nav className="workspace-nav" aria-label={locale === 'zh' ? '网页助手工作模式' : 'Tandix workspace mode'}>
+        {(['chat', 'run'] as const).map((mode) => (
+          <button key={mode} aria-current={workspaceMode === mode ? 'page' : undefined}
+            onClick={() => setWorkspaceMode(mode)}>
+            {mode === 'chat' ? 'Chat' : <span className="skills-tab-label">
+              <span>{locale === 'zh' ? '技能' : 'Skills'}</span>
+              <sup className="skills-tab-count" aria-label={locale === 'zh'
+                ? `${skills.length + managedSkillCount} 个技能` : `${skills.length + managedSkillCount} skills`}>{skills.length + managedSkillCount}</sup>
+            </span>}
+          </button>
+        ))}
+      </nav>
       {showTextSize && (
         <TextSizePanel scale={uiScale} copy={copy}
           onStep={(direction) => changeUiScale(stepUiScale(uiScaleRef.current, direction))}
           onReset={() => changeUiScale(DEFAULT_UI_SCALE)} />
       )}
+      {workspaceMode === 'chat' && <>
       <TabAffinityBanner state={tabAffinity} copy={copy} onDecision={decideTabAffinity} />
+      {backend !== 'workbuddy' && <section className="task-goal" aria-label={locale === 'zh' ? '任务目标' : 'Task goal'}>
+        {goal === null ? <>
+          <div className="task-goal-heading">
+            <div><strong>{locale === 'zh' ? '让 Agent 持续完成目标' : 'Give the agent a goal'}</strong>
+              <small>{locale === 'zh' ? '适合多步骤任务；普通聊天仍可直接发送。' : 'For multi-step work; regular chat stays available.'}</small></div>
+            <button type="button" className="secondary" disabled={!sessionReady || goalBusy || goalDrafting}
+              onClick={() => setGoalFormOpen((open) => !open)}>{goalFormOpen ? (locale === 'zh' ? '收起' : 'Close') : (locale === 'zh' ? '设定目标' : 'Set goal')}</button>
+          </div>
+          {goalFormOpen && <div className="task-goal-form">
+            <label>{locale === 'zh' ? '告诉 Agent 你想完成什么' : 'Tell the agent what you want done'}
+              <textarea value={goalTask} onChange={(event) => { setGoalTask(event.target.value); setGoalDraftReady(false) }}
+                placeholder={locale === 'zh' ? '例如：把这份飞书文档的本周报告补完整' : 'For example: complete this week’s report in the Feishu document'}
+                maxLength={4000} rows={3} /></label>
+            <button type="button" className="secondary" disabled={!sessionReady || working || busy || goalBusy || goalDrafting || goalTask.trim() === ''}
+              onClick={() => { void requestGoalDraft() }}>{goalDrafting
+                ? (locale === 'zh' ? 'Agent 正在拟定…' : 'Agent is drafting…')
+                : goalDraftReady ? (locale === 'zh' ? '重新生成草案' : 'Regenerate draft')
+                  : (locale === 'zh' ? '让 Agent 拟定目标' : 'Ask agent to draft')}</button>
+            {goalDraftReady && <>
+            <p className="task-goal-review-note">{locale === 'zh' ? '请核对 Agent 的建议；需要时可以修改，确认前不会启动目标。草案仅通过提示词约束为只读。' : 'Review the agent’s suggestion. The Goal starts only after confirmation. Drafting is read-only by instruction, not a hard sandbox.'}</p>
+            <label>{locale === 'zh' ? '期望结果' : 'Desired outcome'}
+              <textarea value={goalOutcome} onChange={(event) => setGoalOutcome(event.target.value)}
+                placeholder={locale === 'zh' ? '例如：在飞书文档中完成本周报告' : 'For example: complete this week’s report in Feishu'} rows={2} /></label>
+            <label>{locale === 'zh' ? '完成的证据 / 验收标准' : 'Evidence / completion criteria'}
+              <textarea value={goalVerification} onChange={(event) => setGoalVerification(event.target.value)}
+                placeholder={locale === 'zh' ? '例如：重新读取文档，确认新增内容和位置' : 'For example: reread the document and confirm content and placement'} rows={2} /></label>
+            <label>{locale === 'zh' ? '质量与资源约束（可选）' : 'Quality and resource constraints (optional)'}
+              <textarea value={goalConstraints} onChange={(event) => setGoalConstraints(event.target.value)} rows={2} /></label>
+            <label>{locale === 'zh' ? '范围、权限与审批（可选）' : 'Scope, permissions and approvals (optional)'}
+              <textarea value={goalBoundaries} onChange={(event) => setGoalBoundaries(event.target.value)}
+                placeholder={locale === 'zh' ? '例如：只修改指定文档；发送前必须让我确认' : 'For example: edit only the named document; ask before sending'} rows={2} /></label>
+            <label>{locale === 'zh' ? '迭代规则' : 'Iteration policy'}
+              <textarea value={goalIterationPolicy} onChange={(event) => setGoalIterationPolicy(event.target.value)} rows={2} /></label>
+            <label>{locale === 'zh' ? '何时停下并求助' : 'When to stop and ask for help'}
+              <textarea value={goalBlockedStop} onChange={(event) => setGoalBlockedStop(event.target.value)} rows={2} /></label>
+            <label className="task-goal-budget">{backend === 'codex'
+              ? (locale === 'zh' ? '建议 Token 上限' : 'Suggested token budget')
+              : (locale === 'zh' ? '建议自主轮次上限' : 'Suggested round limit')}
+              <input type="number" min="1" max={backend === 'dsh' ? '256' : undefined}
+                step={backend === 'codex' ? '1000' : '1'} value={goalBudgetLimit}
+                onChange={(event) => setGoalBudgetLimit(event.target.value)} /></label>
+            <button type="button" className="primary" disabled={!sessionReady || working || goalBusy
+              || goalOutcome.trim() === '' || goalVerification.trim() === ''
+              || goalIterationPolicy.trim() === '' || goalBlockedStop.trim() === ''}
+              onClick={() => { void createGoal() }}>{goalBusy ? (locale === 'zh' ? '启动中…' : 'Starting…') : (locale === 'zh' ? '确认并启动目标' : 'Confirm and start goal')}</button>
+            </>}
+          </div>}
+        </> : <>
+          <div className="task-goal-heading">
+            <div><strong>{locale === 'zh' ? '当前目标' : 'Current goal'}</strong>
+              <small role="status">{goal.status === 'active' && goalStartError !== null
+                ? (locale === 'zh' ? '目标已创建 · 首轮未启动' : 'Goal created · first turn did not start')
+                : goal.status === 'active' && goal.activation === 'disarmed'
+                  ? (locale === 'zh' ? '已停止自动续跑 · 需手动继续' : 'Auto-continuation stopped · resume manually')
+                  : goal.status === 'active' && working
+                    ? (locale === 'zh' ? '正在执行 · 目标仍活跃' : 'Working · goal active')
+                    : goal.status === 'active'
+                      ? (locale === 'zh' ? '本轮已结束 · 目标仍活跃' : 'Turn ended · goal still active')
+                : ({ active: locale === 'zh' ? '进行中' : 'Active', paused: locale === 'zh' ? '已暂停' : 'Paused', blocked: locale === 'zh' ? '遇到阻碍' : 'Blocked', usageLimited: locale === 'zh' ? '用量受限' : 'Usage limited', budgetLimited: locale === 'zh' ? '达到预算上限' : 'Budget reached', complete: locale === 'zh' ? 'Agent 标记完成 · 请核对证据' : 'Agent marked complete · review evidence' })[goal.status]}</small></div>
+            <span className="task-goal-usage">{goal.budgetUsed.toLocaleString()}{goal.budgetLimit === null ? '' : ` / ${goal.budgetLimit.toLocaleString()}`} {goal.budgetKind === 'tokens' ? 'tokens' : (locale === 'zh' ? '轮' : 'rounds')}</span>
+          </div>
+          <p className="task-goal-objective">{goal.objective}</p>
+          {goalStartError !== null && <p className="task-goal-review-note" role="alert">{locale === 'zh'
+            ? `首轮任务未启动：${goalStartError}。请检查会话记录后重试，避免重复执行。`
+            : `The first turn did not start: ${goalStartError}. Check the conversation before retrying to avoid duplicate work.`}</p>}
+          {goal.blockedReason && <p className="task-goal-review-note">{goal.blockedReason}</p>}
+          <div className="task-goal-actions">
+            {goal.status === 'active' && goalStartError !== null && <button type="button" className="secondary"
+              disabled={goalBusy || working} onClick={() => { void retryGoalStart() }}>{locale === 'zh' ? '重试启动' : 'Retry start'}</button>}
+            {goal.status === 'active' && goal.activation !== 'disarmed' && goalStartError === null && !working
+              && <button type="button" className="secondary" disabled={goalBusy}
+                onClick={() => { void continueGoal() }}>{locale === 'zh' ? '未自动续跑？继续' : 'Not continuing? Resume'}</button>}
+            {goal.status === 'active' && <button type="button" className="secondary" disabled={goalBusy}
+              onClick={() => { void updateGoalStatus('paused') }}>{locale === 'zh' ? '暂停目标' : 'Pause goal'}</button>}
+            {(goal.status === 'paused' || goal.status === 'blocked' || (goal.status === 'active' && goal.activation === 'disarmed')) && <button type="button" className="secondary" disabled={goalBusy || goal.budgetUsed >= (goal.budgetLimit ?? Infinity)}
+              onClick={() => { void updateGoalStatus('active') }}>{locale === 'zh' ? '继续目标' : 'Resume goal'}</button>}
+            <button type="button" className="secondary" disabled={goalBusy}
+              onClick={() => { void clearGoal() }}>{locale === 'zh' ? '移除目标' : 'Clear goal'}</button>
+          </div>
+        </>}
+      </section>}
       {showSessionPicker && (
         <section className="session-picker" aria-label={copy.app.sessions}>
           <div className="session-picker-head">
@@ -2219,7 +2946,7 @@ export function App(): React.JSX.Element {
                             {entry.cwd !== undefined && <span className="session-cwd" title={entry.cwd}>{entry.cwd}</span>}
                           </span>
                         </button>
-                        {!entry.running && (
+                        {backend === 'dsh' && !entry.running && (
                           <button className="icon-button session-delete" disabled={sessionSwitchBlocked}
                             aria-label={copy.app.deleteSession} title={copy.app.deleteSession}
                             onClick={() => { void deleteSession(entry) }}>
@@ -2233,11 +2960,10 @@ export function App(): React.JSX.Element {
               )}
         </section>
       )}
-      <div className="messages-pane">
-      <div className="messages" ref={scrollRef} onScroll={syncScrollBottom}>
+      <div className="messages" ref={scrollRef}>
         {rows.length === 0 && streamRow === null && !working && (
           <div className="empty">
-            <span className="empty-logo"><img src={whaleUrl} alt="" /></span>
+            <span className="empty-logo"><img src={brandIconUrl} alt="" /></span>
             <div>
               <h1>{copy.app.emptyTitle}</h1>
               <p>{copy.app.emptyDescription}</p>
@@ -2248,40 +2974,58 @@ export function App(): React.JSX.Element {
             </button>
           </div>
         )}
-        {rows.map((row) => (
+        {rows.map((row) => row.kind === 'assistant' && assistantDisplayText(row.text) === '' ? null : (
           <div key={row.seq} className={`row ${row.kind}`}>
-            {row.kind === 'assistant' && <span className="assistant-avatar"><img src={whaleUrl} alt={copy.app.assistant} /></span>}
+            {row.kind === 'assistant' && <span className="assistant-avatar"><img src={brandIconUrl} alt={copy.app.assistant} /></span>}
             {row.kind === 'tool'
               ? <ToolActivity row={row} copy={copy} />
               : <MessageBody row={row} sessionId={sessionRef.current ?? ''} api={api} copy={copy} />}
           </div>
         ))}
-        {streamRow !== null && (
+        {streamRow !== null && !(streamRow.kind === 'assistant' && assistantDisplayText(streamRow.text) === '') && (
           <div className="row assistant" aria-live="polite">
-            <span className="assistant-avatar"><img src={whaleUrl} alt={copy.app.assistant} /></span>
+            <span className="assistant-avatar"><img src={brandIconUrl} alt={copy.app.assistant} /></span>
             <MessageBody row={streamRow} sessionId={sessionRef.current ?? ''} api={api} copy={copy} />
           </div>
         )}
         {working && streamRow === null && question === null && rows[rows.length - 1]?.status !== 'running' && (
           <div className="ai-progress" role="status" aria-label={copy.app.assistantWorking}>
-            <span className="assistant-avatar"><img src={whaleUrl} alt="" /></span>
+            <span className="assistant-avatar"><img src={brandIconUrl} alt="" /></span>
             <span className="progress-dots" aria-hidden="true"><i /><i /><i /></span>
             <span>{rows[rows.length - 1]?.kind === 'tool' ? copy.app.organizingResults : copy.app.thinking}</span>
           </div>
         )}
       </div>
-      {!atBottom && (
-        <button
-          type="button"
-          className="scroll-to-bottom"
-          aria-label={copy.app.scrollToBottom}
-          title={copy.app.scrollToBottom}
-          onClick={() => scrollMessagesToBottom()}
-        >
-          <ChevronDownIcon />
-        </button>
-      )}
-      </div>
+      {proposedSkill !== null && <section className="chat-skill-review" aria-label={locale === 'zh' ? '待确认的技能草案' : 'Skill draft for review'}>
+        <strong>{locale === 'zh' ? '技能草案：' : 'Skill draft: '}{proposedSkill.name}</strong>
+        <p>{proposedSkill.goal}</p>
+        {proposedSkill.startUrl !== undefined && <p><strong>{locale === 'zh' ? '入口页面：' : 'Start page: '}</strong>{proposedSkill.startUrl}</p>}
+        <ol>{proposedSkill.steps.map((step, index) => <li key={index}>{step}</li>)}</ol>
+        <p>{locale === 'zh' ? '成功条件：' : 'Success: '}{proposedSkill.success || (locale === 'zh' ? '待澄清' : 'Needs clarification')}</p>
+        <p><strong>{locale === 'zh' ? '运行时需填写：' : 'Run-time inputs: '}</strong>{proposedSkill.parameters.length === 0
+          ? (locale === 'zh' ? '无需填写，筛选条件将按技能步骤自动设置。' : 'None; the skill will apply its fixed settings automatically.')
+          : proposedSkill.parameters.map((parameter) => parameter.label).join(locale === 'zh' ? '、' : ', ')}</p>
+        <p><strong>{locale === 'zh' ? '桌面 Agent 版本：' : 'Desktop Agent version: '}</strong>{proposedSkill.desktopAdapter === undefined
+          ? (locale === 'zh' ? '未提供已审核的 API/CLI 契约；可保存、运行和下载浏览器版。' : 'No reviewed API/CLI contract; the browser-only skill can be saved, run, and downloaded.')
+          : (locale === 'zh' ? `已生成 ${proposedSkill.desktopAdapter.requests.length} 个 HTTP 请求；下载后运行不依赖网页助手扩展。` : `${proposedSkill.desktopAdapter.requests.length} HTTP request(s) generated; the downloaded package does not depend on the Tandix browser extension.`)}</p>
+        {proposedSkill.questions.length > 0
+          ? <><p><strong>{locale === 'zh' ? '保存前请确认：' : 'Confirm before saving:'}</strong></p>
+            <div className="chat-skill-questions">{proposedSkill.questions.map((question, index) => <label className="chat-skill-field" key={index}>
+              <span>{index + 1}. {question}</span>
+              <input className="chat-skill-question-answer" value={skillQuestionAnswers[index] ?? ''}
+                onChange={(event) => setSkillQuestionAnswers((current) => ({ ...current, [index]: event.target.value }))}
+                placeholder={locale === 'zh' ? '输入答案' : 'Enter answer'} />
+            </label>)}</div></>
+          : <p>{locale === 'zh' ? '确认后将保存技能，并立即出现在「技能」Tab。' : 'Confirm to save the skill and update the Skills tab.'}</p>}
+        <div className="chat-skill-actions-footer">
+          {proposedSkill.questions.length > 0
+            ? <button className="primary skill-clarification-submit" type="button"
+                disabled={busy || working || proposedSkill.questions.some((_question, index) => (skillQuestionAnswers[index] ?? '').trim() === '')}
+                onClick={() => { void submitSkillQuestionAnswers() }}>{locale === 'zh' ? '提交答案' : 'Submit answers'}</button>
+            : <button className="primary" type="button" onClick={() => { void acceptProposedSkill() }}>{locale === 'zh' ? '确认保存' : 'Confirm'}</button>}
+          <button className="secondary" type="button" onClick={() => { proposedSkillRef.current = null; setSkillQuestionAnswers({}); setProposedSkill(null); pendingSkillExtractionRef.current = null; void clearChatSkillDraftCheckpoint().catch(() => {}) }}>{locale === 'zh' ? '放弃' : 'Discard'}</button>
+        </div>
+      </section>}
       {question !== null && (
         <QuestionCard
           key={`${question.sessionId}:${question.rpcId}`}
@@ -2325,10 +3069,30 @@ export function App(): React.JSX.Element {
               })}
             </div>
           )}
+          {draftFiles.length > 0 && (
+            <div className="draft-files" aria-label={locale === 'zh' ? '视频附件' : 'Video attachments'}>
+              {draftFiles.map((file) => (
+                <span className="draft-file" key={file.id} title={file.name}>
+                  <span>{file.name}</span>
+                  <button type="button"
+                    aria-label={locale === 'zh' ? `移除 ${file.name}` : `Remove ${file.name}`}
+                    onClick={() => setDraft((current) => ({
+                      ...current,
+                      files: current.files.filter((item) => item.id !== file.id),
+                    }))}
+                  >×</button>
+                </span>
+              ))}
+            </div>
+          )}
           <textarea
             value={input}
             onChange={(e) => {
               if (!sendingRef.current) setDraft((current) => ({ ...current, text: e.target.value }))
+            }}
+            onPaste={(e) => {
+              const files = clipboardMediaFiles(e.clipboardData)
+              if (files.length > 0) void addAttachmentFiles(files)
             }}
             onKeyDown={(e) => {
               // isComposing：输入法组词中的回车是确认选字，不是发送。
@@ -2338,7 +3102,7 @@ export function App(): React.JSX.Element {
               }
             }}
             placeholder={state === 'connected' ? copy.app.connectedPlaceholder : copy.app.disconnectedPlaceholder}
-            disabled={!sessionReady || busy}
+            disabled={!sessionReady || busy || goalDrafting}
             rows={2}
           />
           <div className="composer-actions">
@@ -2347,24 +3111,31 @@ export function App(): React.JSX.Element {
                 ref={fileInputRef}
                 className="image-file-input"
                 type="file"
-                accept={imageLimits?.mediaTypes.join(',')}
+                accept={`${imageLimits?.mediaTypes.join(',') ?? ''}${backend === 'codex' ? ',video/*' : ''}`}
                 multiple
                 tabIndex={-1}
                 onChange={(event) => {
                   const files = [...(event.target.files ?? [])]
                   event.target.value = ''
-                  void addImageFiles(files)
+                  void addAttachmentFiles(files)
                 }}
               />
               <button
                 type="button"
                 className="attachment-button"
                 disabled={!sessionReady || busy || addingImages || imageLimits === null
-                  || draftImages.length >= imageLimits.maxImagesPerMessage}
+                  || (backend === 'dsh' && draftImages.length >= imageLimits.maxImagesPerMessage)}
                 aria-label={copy.app.addImages}
                 title={imageLimits === null ? copy.app.imageUnavailable : copy.app.addImages}
                 onClick={() => fileInputRef.current?.click()}
               ><AttachmentIcon /></button>
+              <button type="button" className="recording-composer-button skill-extract-button"
+                disabled={!sessionReady || busy || working || skillExtracting}
+                aria-label={locale === 'zh' ? '生成技能' : 'Create skill'}
+                title={locale === 'zh' ? '根据最近 10 分钟录制的操作生成技能' : 'Create a skill from recorded actions in the last 10 minutes'}
+                onClick={() => { void extractSkillFromRecentActions() }}>
+                <span>{skillExtracting ? (locale === 'zh' ? '生成中…' : 'Creating…') : (locale === 'zh' ? '生成技能' : 'Create skill')}</span>
+              </button>
               <span>{copy.app.composerHelp}</span>
             </span>
             {working ? (
@@ -2379,59 +3150,22 @@ export function App(): React.JSX.Element {
               </button>
             ) : (
               <button onClick={() => void send()}
-                disabled={!sessionReady || busy || addingImages
-                  || (input.trim() === '' && draftImages.length === 0 && selection === null)}
+                disabled={!sessionReady || busy || goalDrafting || addingImages
+                  || (input.trim() === '' && draftImages.length === 0 && draftFiles.length === 0 && selection === null)}
                 aria-label={copy.app.sendMessage}><SendIcon /></button>
             )}
           </div>
         </div>
-        {state === 'connected' ? (
-          <div className="composer-model" ref={modelPickerRef}>
-            <button
-              type="button"
-              className="composer-model-trigger"
-              aria-expanded={showModelPicker}
-              aria-haspopup="listbox"
-              aria-label={copy.app.selectModel}
-              title={currentModelLabel}
-              disabled={!sessionReady || busy || addingImages || modelSelecting || working
-                || sessionModels === null || sessionModels.options.length === 0}
-              onClick={() => setShowModelPicker((open) => !open)}
-            >
-              <span>{currentModelLabel}</span>
-              <ChevronDownIcon />
-            </button>
-            {showModelPicker && sessionModels !== null && sessionModels.options.length > 0 ? (
-              <div className="composer-model-menu" role="listbox" aria-label={copy.app.selectModel}>
-                {modelMenuGroups.map((group) => (
-                  <div key={group.provider} className="composer-model-group" role="group" aria-label={group.providerName}>
-                    {modelMenuGroups.length > 1 ? (
-                      <div className="composer-model-group-title">{group.providerName}</div>
-                    ) : null}
-                    {group.models.map((option) => {
-                      const selected = sessionModels.current?.provider === option.provider
-                        && sessionModels.current.model === option.id
-                      return (
-                        <button
-                          key={`${option.provider}:${option.id}`}
-                          type="button"
-                          role="option"
-                          aria-selected={selected}
-                          className={selected ? 'isSelected' : undefined}
-                          title={`${option.providerName} · ${option.name}`}
-                          onClick={() => { void selectSessionModel(option) }}
-                        >
-                          <span>{option.name}</span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                ))}
-              </div>
-            ) : null}
-          </div>
-        ) : null}
       </footer>
+      </>}
+      {workspaceMode === 'run' && <RunSkillsPanel skills={skills} locale={locale} canRun={sessionReady && !busy && !working}
+        onUseManagedSkill={(skill: ManagedSkill) => {
+          setDraft((current) => ({ ...current, text: `${current.text.trimEnd()}\n${locale === 'zh'
+            ? `请先用 tandix_skill_read 读取网页助手技能「${skill.name}」，再按该技能协助我。`
+            : `Read the Tandix skill "${skill.name}" with tandix_skill_read, then use it to help me.`}`.trim() }))
+          setWorkspaceMode('chat')
+        }}
+        onRun={runSavedSkill} onDelete={removeSavedSkill} onImport={importSkillJson} />}
     </div>{approvalDialog}</>
   )
 }

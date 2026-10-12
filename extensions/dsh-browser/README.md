@@ -1,6 +1,8 @@
-# dsh Browser Control Extension (Chrome and Firefox MV3)
+# Tandix Extension (Chrome and Firefox MV3)
 
 English | [中文](README.zh.md)
+
+**Turn browser traces into reliable agent tasks.** The extension retains the full dsh-browser chat/control surface and adds Teach, Clarify, and Run workspaces. Phase one records privacy-safe DOM, navigation, and tab events into IndexedDB and exports versioned JSON or JSONL.
 
 The **browser-operation end** of dsh: the model reads and operates the browser page you have open — extract content, click elements, fill forms, scroll, and navigate, all in the real page with your login state preserved. The side panel is the conversation entry.
 
@@ -58,13 +60,13 @@ The recommended zero-configuration command does not require Git or a local clone
 1. **Build and install the extension**:
 
    ```sh
-   curl -fsSL https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.sh | bash
+   curl -fsSL https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install.sh | bash
    ```
 
    On Windows, run this in PowerShell instead:
 
    ```powershell
-   $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/Lum1104/dsh-browser/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+   $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
    ```
 
    The script downloads a managed workspace to `~/.dsh/dsh-browser`, builds the bridge plugin, registers its official bundle in the local dsh `web` profile, builds the extension, copies the output to the stable directory `~/.dsh/browser-extension`, and opens `chrome://extensions`. Enable Developer mode, choose Load unpacked, and select the extension directory. Running the command again updates the managed installation.
@@ -72,7 +74,7 @@ The recommended zero-configuration command does not require Git or a local clone
    A cloned checkout uses the same installer without downloading or overwriting source files:
 
    ```sh
-   git clone https://github.com/Lum1104/dsh-browser.git
+   git clone https://github.com/samchen2009/tandix.git
    cd dsh-browser
    ./scripts/install.sh
    ```
@@ -90,7 +92,7 @@ The recommended zero-configuration command does not require Git or a local clone
    Or use the exact supported public runtime:
 
    ```sh
-   npx @deepseek-ai/dsh@0.2.0-rc.2 web
+   npx @deepseek-ai/dsh@0.1.5-rc.2 web
    ```
 
    Both commands load the same bundle from the local `web` profile. Port 3080 is used by default; append `--port <port>` when it is occupied.
@@ -99,9 +101,15 @@ The recommended zero-configuration command does not require Git or a local clone
 
    Loading or reloading the extension is passive: it does not probe local ports or open a WebSocket until the side panel is opened. A healthy connection established by the user may remain available for background approvals after the panel closes, but it will not reconnect without an open panel if it drops or another browser replaces it.
 
-3. **Use it**: open a normal `http://` or `https://` page and click the DeepSeek whale icon. Both builds auto-discover local dsh. Chrome loopback connections need no address or token; Firefox must be given the token from `~/.dsh/ext-bridge-token` because a `moz-extension://` UUID is not an add-on identity. Chat directly or click "Read page" first.
+3. **Use it**: open a normal `http://` or `https://` page and click the Tandix icon. Both builds auto-discover local dsh. Chrome loopback connections need no address or token; Firefox must be given the token from `~/.dsh/ext-bridge-token` because a `moz-extension://` UUID is not an add-on identity. Chat directly or click "Read page" first.
+
+   On macOS Chrome, optional **on-demand startup** removes the need to run `pnpm start` manually. Load the extension in Chrome first, run `pnpm native:install` from the repository root, then reload the extension at `chrome://extensions` and accept its new native-messaging permission. The installer allows only the currently loaded Tandix extension ID and does not add a login item. Click the connection status at the top of the side panel to choose **Automatic**, **Codex**, or **dsh**. Automatic first checks for a locally installed Codex CLI signed in with ChatGPT and falls back to `dsh web --no-open`; an explicit choice does not silently switch to the other Agent. Codex uses the Tandix chat without a separately configured model, Base URL, or OpenAI API key; the Codex desktop window need not remain open. dsh model-provider configuration remains available in Settings. Switching Agents reconnects the bridge and starts a fresh chat session; prior sessions remain with their original Agent. The companion stops only Agent processes it started after all panels have been closed for ten minutes. An independently started dsh is never stopped by the companion. dsh startup diagnostics are in `~/.dsh/traceforge-native-host/dsh.log`.
+
+   The Settings "Sandbox directory" field applies only to the local native companion. Leave it empty for the defaults, or choose a specific local folder. Codex adds it to the `workspaceWrite` writable roots; dsh uses it as the workspace root for newly created conversations. Existing dsh sessions retain their original workspace. A separately started dsh cannot be retrofitted with this setting: stop it before reconnecting. The companion creates a missing selected directory, but macOS privacy permissions still apply. After changing the native host source, run `pnpm native:install` again and reload the extension.
 
 Pages that were already open before extension installation or reload are instrumented automatically on the first action, so they do not require a manual refresh. Browser-internal and protected pages such as `chrome://` and the Chrome Web Store expose only tab metadata and browser-level HTTP(S) navigation, back, forward, and reload; their DOM cannot be read or operated.
+
+Chat tool cards can be expanded to inspect the tool name, arguments or local bash command, and the returned status/output preview. Browser tools run through the extension in the controlled tab; `bash` is a separate local dsh tool, not a browser operation. Typed page values and obvious credential arguments are masked in these details.
 
 For extension-only development, load `extensions/dsh-browser/dist/` from `chrome://extensions`, or run `build:firefox` and load `extensions/dsh-browser/dist-firefox/manifest.json` from `about:debugging#/runtime/this-firefox`. Rebuild and reload after code changes.
 

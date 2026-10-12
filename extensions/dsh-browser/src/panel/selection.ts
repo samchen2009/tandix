@@ -16,6 +16,7 @@
  */
 
 import { wrapUntrustedContent } from '../security/untrusted.ts'
+import { sanitizeUrlForModel } from '../security/url-privacy.ts'
 import type { PageSelection } from '../selection.ts'
 
 const SELECTION_HEADER = '[user-selected page text] The user highlighted this text in their browser and attached it to the message below.'
@@ -43,9 +44,10 @@ export interface AttachedSelection {
  * @returns the fenced quote block followed by the user's own words.
  */
 export function selectionPromptText(selection: PageSelection, message: string): string {
+  const safeUrl = sanitizeUrlForModel(selection.url)
   const body = [
     `${TITLE_LABEL}${selection.title === '' ? '(untitled page)' : selection.title}`,
-    `${URL_LABEL}${selection.url === '' ? '(unknown URL)' : selection.url}`,
+    `${URL_LABEL}${safeUrl === '' ? '(unknown URL)' : safeUrl}`,
     `${TRUNCATED_LABEL}${selection.truncated ? TRUNCATED_NOTE : 'no'}`,
     TEXT_LABEL,
     selection.text,

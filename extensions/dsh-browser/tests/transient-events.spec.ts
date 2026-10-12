@@ -30,6 +30,15 @@ describe('TransientEventCache', () => {
     expect(cache.replay()).toEqual([first])
   })
 
+  it('replays pending agent approvals and removes them after a decision', () => {
+    const cache = new TransientEventCache()
+    const approval = event('approval-1', 'agent-approval/requested', { sessionId: 'a', backend: 'dsh' })
+    cache.ingest(approval)
+    expect(cache.replay()).toEqual([approval])
+    cache.ingest(event('resolved', 'agent-approval/resolved', { sessionId: 'a', approvalRpcId: 'approval-1' }))
+    expect(cache.replay()).toEqual([])
+  })
+
   it('drops a session turn and its questions at turn end', () => {
     const cache = new TransientEventCache()
     const other = event('other', 'question/requested', { sessionId: 'b', questions: [{}] })

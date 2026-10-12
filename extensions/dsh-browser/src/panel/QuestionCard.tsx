@@ -121,7 +121,7 @@ function QuestionItemView({
       )}
       <input
         className="question-custom"
-        type="text"
+        type={item.secret === true ? 'password' : 'text'}
         value={draft.custom}
         placeholder={item.options !== undefined && item.options.length > 0 ? copy.question.customAlternative : copy.question.customAnswer}
         aria-label={copy.question.customAnswer}

@@ -15,7 +15,7 @@
     "forceConsistentCasingInFileNames": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
-    "types": ["chrome", "vite/client"]
+    "types": ["chrome", "node", "vite/client"]
   },
   "include": ["src", "tests", "vite.shared.ts", "vite.background.config.ts", "vite.content.config.ts", "vite.panel.config.ts"]
 }
