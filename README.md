@@ -13,7 +13,46 @@ English | [中文](README.zh.md)
 
 Task inference from long, interleaved histories is currently an experimental CLI, rather than an automatic side-panel feature. See [activity inference](docs/activity-inference.md).
 
-## Prerequisites
+## Install for everyday use (recommended)
+
+You do **not** need to clone the repository. Complete installer packages include the built Chrome extension, Node, and connection dependencies. No Git, pnpm, or source compilation is required.
+
+Download a complete package for **Mac Apple Silicon**, **Mac Intel**, **Windows x64**, or **Windows ARM64** from [GitHub Releases](https://github.com/samchen2009/tandix/releases). Use an actual release attachment; the repository's **Download ZIP** is source code, not an installer. The first public installer upload is still pending.
+
+You need **Google Chrome** and a **locally runnable Codex that is already signed in**. These packages use the Codex installation flow.
+
+### Small installer script
+
+Once published, macOS users can also download `install.sh` from the release attachments and run it from the download directory:
+
+```bash
+bash ./install.sh
+```
+
+The script detects Intel or Apple Silicon, downloads and verifies the matching package, and starts its installer. It selects the lite package when compatible Node is already available, otherwise the complete package with bundled Node. Git and pnpm are unnecessary. On Windows, download the release's `install.ps1` and run `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1` in PowerShell.
+
+This refers to the **generated release bootstrap scripts**. The repository's `scripts/install.sh` and `scripts/install.ps1` are source installers and require Node and pnpm. The first public script and package upload is still pending.
+
+### macOS package
+
+1. Fully extract the ZIP.
+2. Double-click `安装网页助手-Mac.command` and follow the prompts. If macOS blocks the first launch, confirm it in **System Settings → Privacy & Security**.
+3. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select the directory printed by the installer.
+4. Return to the installer to register the native companion, then reload the extension.
+5. Open a regular webpage, click Tandix, and select **Codex** in the agent menu.
+
+### Windows package
+
+1. Fully extract the ZIP; do not run the entry point inside the archive viewer.
+2. Double-click `安装网页助手-win.cmd`.
+3. Enable **Developer mode** in `chrome://extensions` and load the printed extension directory.
+4. Return to the installer to register the companion, reload the extension, and select **Codex** in the side panel.
+
+To update, extract the new complete package, rerun the entry point, and reload the extension. The first Chrome extension load still requires user interaction.
+
+## Install from source (developers)
+
+Use this path for development, source changes, or dsh.
 
 Google Chrome, Git, Node.js **22.19+ or 24+**, and pnpm are required. macOS also needs `rsync`. Use the pnpm version specified in `package.json`.
 

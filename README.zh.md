@@ -13,7 +13,46 @@
 
 长历史中的任务关联推断目前是实验性 CLI，尚未接入侧栏自动提炼，见[活动推断说明](docs/activity-inference.md)。
 
-## 安装前准备
+## 普通用户安装（推荐）
+
+不需要 `git clone`。预构建安装包包含 Chrome 扩展、Node 和连接依赖，不需要 Git、pnpm 或源码编译。
+
+在 [GitHub Releases](https://github.com/samchen2009/tandix/releases) 下载适合电脑的 **完整安装包**：Mac Apple Silicon、Mac Intel、Windows x64 或 Windows ARM64。安装包以 Releases 实际发布的附件为准；仓库的「Download ZIP」是源码，不是预构建安装包。目前公开安装包仍待首次上传。
+
+安装前需要 **Google Chrome**，以及**已安装并登录的本机 Codex**。这些包使用 Codex 安装流程。
+
+### 小脚本安装入口
+
+发布后，macOS 用户也可以只下载 Releases 附件中的 `install.sh`，在文件所在目录运行：
+
+```bash
+bash ./install.sh
+```
+
+脚本自动识别 Intel / Apple Silicon，下载并校验对应安装包，再启动安装器。已有兼容 Node 时使用精简包，否则使用自带 Node 的完整包，无需 Git 或 pnpm。Windows 对应下载 Releases 的 `install.ps1`，在 PowerShell 运行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1`。
+
+这里指的是 **Releases 中生成的安装引导脚本**；仓库里的 `scripts/install.sh` 和 `scripts/install.ps1` 是下面的源码安装器，需要 Node 和 pnpm。目前上述公开脚本及安装包均待首次发布。
+
+### macOS 安装包
+
+1. 完整解压安装包。
+2. 双击 `安装网页助手-Mac.command`，按窗口提示操作。若首次被 macOS 拦截，在「系统设置 → 隐私与安全性」中确认仍要打开。
+3. 在 `chrome://extensions` 开启「开发者模式」，点击「加载已解压的扩展程序」，选择安装窗口打印的目录。
+4. 返回安装窗口继续，完成本机伴随程序注册；重新加载扩展。
+5. 打开普通网页，点击 Tandix 图标，在顶部 Agent 菜单选择 **Codex**。
+
+### Windows 安装包
+
+1. 完整解压安装包，不要在 ZIP 预览窗口中运行入口。
+2. 双击 `安装网页助手-win.cmd`。
+3. 在 `chrome://extensions` 开启「开发者模式」，加载安装窗口打印的扩展目录。
+4. 返回安装窗口继续，完成本机伴随程序注册；重新加载扩展，然后在侧栏选择 **Codex**。
+
+升级时解压新版完整包，重新双击安装入口，并在 Chrome 中重新加载扩展即可。浏览器扩展的首次加载仍需要用户操作。
+
+## 开发者源码安装
+
+以下步骤适合开发、修改源码或使用 dsh 的用户。
 
 需要 Google Chrome、Git、Node.js **22.19+ 或 24+**、pnpm；macOS 还需要系统自带的 `rsync`。使用 `package.json` 指定的 pnpm 版本。
 

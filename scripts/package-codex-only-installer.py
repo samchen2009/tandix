@@ -16,6 +16,7 @@ os_name, variant = args.platform.split('-')
 PREFIX = Path("网页助手_Tandix_Codex")
 PORTABLE = ROOT / ".build/codex-portable-runtime"
 FILES = {
+    "LICENSE",
     "安装网页助手-Codex.command", "安装网页助手-Codex.cmd",
     "scripts/install-codex-only.mjs", "scripts/install-codex-windows-host.ps1",
     "scripts/tandix-native-proxy.cs", "scripts/traceforge-native-host.mjs",
@@ -69,11 +70,24 @@ with ZipFile(OUTPUT, "w", compression=ZIP_DEFLATED) as archive:
         + ("Run 安装网页助手-Mac.command on macOS.\n" if os_name == 'mac' else "Run 安装网页助手-win.cmd on Windows.\n")
         + ("Includes one official Node.js runtime for this platform and CPU.\n" if variant != 'lite' else "Uses existing Node.js 22.19+ or 24+; otherwise downloads official Node.js.\n")
         + "Requires Chrome and a locally runnable Codex signed in to ChatGPT.\n"
+        "No Git, pnpm, source build, or npm dependency download is needed for a complete package.\n"
         "Enable Chrome Developer mode, then Load unpacked using the folder printed by the installer.\n")
+    archive.writestr(str(PREFIX / '先看这里.txt'),
+        "Tandix 网页助手安装\n\n"
+        "安装前：需要 Google Chrome，以及已安装并登录的本机 Codex。\n"
+        "完整包自带 Node 和连接依赖，不需要 Git、pnpm，也不需要编译源码。\n"
+        "精简包需要已有兼容 Node，缺少时会联网下载。\n\n"
+        "1. 完整解压 ZIP，不要在压缩包预览窗口中运行安装入口。\n"
+        + ("2. Mac 双击 安装网页助手-Mac.command。若首次被系统拦截，在隐私与安全性中确认仍要打开。\n" if os_name == 'mac'
+           else "2. Windows 双击 安装网页助手-win.cmd。\n")
+        + "3. 在 Chrome 的 chrome://extensions 开启开发者模式，加载安装窗口打印的扩展目录。\n"
+        "4. 返回安装窗口继续，完成本机伴随程序注册；重新加载扩展。\n"
+        "5. 打开普通网页，点击 Tandix 图标，在顶部 Agent 菜单选择 Codex。\n\n"
+        "这些包采用 Codex 安装流程。WorkBuddy 连接需另行安装并登录兼容 ACP 运行时，不能自动继承桌面账号。\n")
     archive.writestr(str(PREFIX / 'tandix-package.json'), json.dumps({'platform': os_name, 'architecture': None if variant == 'lite' else variant, 'includes_node': variant != 'lite'}))
     for relative in sorted(FILES):
         archive.write(ROOT / relative, str(PREFIX / INSTALLER_NAMES.get(relative, relative)))
     portable_files = sorted(path for directory in portable_roots for path in directory.rglob('*') if path.is_file())
     for path in portable_files:
         archive.write(path, str(PREFIX / path.relative_to(PORTABLE)))
-print(f"{OUTPUT} ({len(FILES) + 4 + len(portable_files)} files)")
+print(f"{OUTPUT} ({len(FILES) + 5 + len(portable_files)} files)")
