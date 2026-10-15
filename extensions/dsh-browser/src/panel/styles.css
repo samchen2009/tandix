@@ -1334,6 +1334,26 @@ textarea:focus-visible {
   border-top: 1px solid var(--line);
 }
 
+.md .math-block {
+  display: block;
+  max-width: 100%;
+  margin: 9px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.md .math-block .katex-display {
+  margin: 0;
+  padding: 3px 0;
+  text-align: left;
+}
+
+.md .math-fallback {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
 .ai-progress {
   display: flex;
   min-height: 28px;

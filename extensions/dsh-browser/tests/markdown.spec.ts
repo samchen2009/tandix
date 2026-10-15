@@ -55,4 +55,123 @@ describe('renderMarkdown', () => {
     expect(renderMarkdown('')).toBe('')
     expect(renderMarkdown('plain text')).toContain('plain text')
   })
+
+  it('renders inline and display LaTeX without Markdown consuming commands', () => {
+    const html = renderMarkdown(String.raw`行内 \(CH_3SH\) 和 $x^2$。
+\[
+M=16+4\times1+32=52\ \mathrm{g/mol}
+\]
+$$n=\frac{2.4}{52}\ \mathrm{mol}$$`)
+    const root = document.createElement('div')
+    root.innerHTML = html
+    expect(root.querySelectorAll('.katex')).toHaveLength(4)
+    expect(root.querySelectorAll('.math-block')).toHaveLength(2)
+    expect(root.querySelectorAll('math')).toHaveLength(4)
+    expect(root.querySelector('annotation')?.textContent).toBe('CH_3SH')
+    expect(root.querySelector('.mfrac')).not.toBeNull()
+    expect(root.querySelector('.math-fallback')).toBeNull()
+  })
+
+  it('renders the reported Tandix chemistry output and repairs its continuation escapes', () => {
+    const html = renderMarkdown(String.raw`\
+以下按试卷给定的 **H＝1、C＝16、S＝32** 解答。
+答案依次为：**第 1 题见方程式；第 2 题 B；第 3 题 D；第 4 题 C；第 5 题 1076 kJ；第 6 题 C；第 7 题 CD。**
+**1．甲硫醇燃烧的热化学方程式**
+先计算甲硫醇 CH₃SH 的摩尔质量：
+[\
+M=16+4\times1+32=52\ \mathrm{g/mol}\
+]
+2.4 g 甲硫醇的物质的量为：
+[\
+n=\frac{2.4}{52}\ \mathrm{mol}\
+]
+这部分甲硫醇燃烧放热 52.42 kJ，所以 **1 mol 甲硫醇完全燃烧**的放热量为：
+[\
+Q=\frac{52.42}{2.4/52}\
+\=1135.77\ \mathrm{kJ}\
+]`)
+    const root = document.createElement('div')
+    root.innerHTML = html
+    expect(root.querySelectorAll('.katex')).toHaveLength(3)
+    expect(root.querySelectorAll('.math-block')).toHaveLength(3)
+    expect(root.querySelector('.math-fallback')).toBeNull()
+    const formulas = [...root.querySelectorAll('annotation')].map(node => node.textContent)
+    expect(formulas).toEqual([
+      String.raw`M=16+4\times1+32=52\ \mathrm{g/mol}`,
+      String.raw`n=\frac{2.4}{52}\ \mathrm{mol}`,
+      String.raw`Q=\frac{52.42}{2.4/52}
+=1135.77\ \mathrm{kJ}`,
+    ])
+    expect(html).toContain('<strong>1 mol 甲硫醇完全燃烧</strong>')
+  })
+
+  it('supports standalone bare brackets with TeX and preserves aligned line breaks', () => {
+    const html = renderMarkdown(String.raw`[
+\begin{aligned}a&=1\\
+b&=2\end{aligned}
+]`)
+    expect(html).toContain('class="katex"')
+    expect(html).not.toContain('math-fallback')
+    expect(html).toContain(String.raw`a&amp;=1\\`)
+  })
+
+  it('supports chemistry notation, formulas in lists, and display formulas within prose', () => {
+    const html = renderMarkdown(String.raw`- 反应：\(\ce{CH3SH + 3O2 -> CO2 + 2H2O + SO2}\)
+- 结果：\[x=1\] 完成`)
+    const root = document.createElement('div')
+    root.innerHTML = html
+    expect(root.querySelectorAll('li .katex')).toHaveLength(2)
+    expect(root.querySelector('.math-fallback')).toBeNull()
+  })
+
+  it('leaves code, currency, ordinary brackets and links unchanged', () => {
+    const html = renderMarkdown(String.raw`价格 $20 和 $30，转义 \$40。 [官网](https://example.com)
+普通 [方括号] 和
+[
+普通文本
+]
+行内代码：\`\(x^2\)\` 和 \`$x$\`
+
+~~~tex
+\[x^2\]
+[\
+\frac{1}{2}\
+]
+~~~
+
+<pre><code>\(x\)</code></pre>` .replaceAll('\\`', '`'))
+    expect(html).not.toContain('class="katex"')
+    expect(html).toContain('$20 和 $30')
+    expect(html).toContain('$40')
+    expect(html).toContain('[方括号]')
+    expect(html).toContain('href="https://example.com"')
+    expect(html).toContain(String.raw`<code>\(x^2\)</code>`)
+    expect(html).toContain('<code>$x$</code>')
+  })
+
+  it('keeps incomplete streamed math readable, then renders when closed', () => {
+    const incomplete = String.raw`结果：\(\frac{1}{2}`
+    expect(renderMarkdown(incomplete)).not.toContain('class="katex"')
+    expect(renderMarkdown(incomplete + String.raw`\)`)).toContain('class="katex"')
+    const malformed = renderMarkdown(String.raw`\(\frac{<img src=x onerror=alert(1)>}\)`)
+    expect(malformed).toContain('math-fallback')
+    expect(malformed).not.toContain('<img')
+    expect(malformed).toContain('&lt;img')
+  })
+
+  it('does not enable HTML injection or resource-loading TeX commands', () => {
+    const html = renderMarkdown(String.raw`\(\href{javascript:alert(1)}{click}\)
+\(\includegraphics{https://evil.example/leak}\)
+\(\htmlStyle{position:fixed;inset:0}{fake}\)
+<span class="katex" style="position:fixed">raw html</span>
+<svg onload="alert(1)"></svg>`)
+    expect(html).not.toContain('href=')
+    expect(html).not.toContain('<img')
+    expect(html).not.toContain('src=')
+    const root = document.createElement('div')
+    root.innerHTML = html
+    expect(root.querySelector('[style*="position:fixed"]')).toBeNull()
+    expect(html).not.toContain('onload')
+    expect(html).toContain('raw html')
+  })
 })

@@ -35,6 +35,7 @@ function mockChrome(options: {
   responses?: Array<unknown>
   injectionError?: Error
   frames?: Array<{ frameId: number; parentFrameId: number; documentId?: string; url: string }>
+  scriptResults?: unknown[]
   respond?: (message: unknown, frameId: number) => unknown
 }) {
   const responses = [...(options.responses ?? [OK])]
@@ -57,8 +58,9 @@ function mockChrome(options: {
     if (response instanceof Error) throw response
     return response
   })
+  const scriptResults = [...(options.scriptResults ?? [])]
   const executeScript = options.injectionError === undefined
-    ? vi.fn(async () => [{ frameId: 0, result: undefined }])
+    ? vi.fn(async () => scriptResults.shift() ?? [{ frameId: 0, result: undefined }])
     : vi.fn(async () => { throw options.injectionError })
   const allTabs = () => options.tabs ?? (options.tab === undefined ? [] : [options.tab as chrome.tabs.Tab])
   const query = vi.fn(async (queryInfo?: chrome.tabs.QueryInfo) => Object.keys(queryInfo ?? {}).length === 0
@@ -131,6 +133,28 @@ describe('dispatchToolCall', () => {
     })
     expect(chromeMock.captureVisibleTab).toHaveBeenCalledWith(1, { format: 'png' })
     expect(chromeMock.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('reads the webpage image when viewport capture lacks activeTab permission', async () => {
+    const image = { index: 0, src: 'https://example.com/api/attachments/exam/content', visibleArea: 400000, naturalWidth: 2400, naturalHeight: 3200 }
+    const chromeMock = mockChrome({
+      tab: { id: 7, windowId: 1, active: true, url: 'https://example.com/exams' },
+      scriptResults: [[{ frameId: 0, documentId: 'document-7', result: image }],
+        [{ frameId: 0, documentId: 'document-7', result: { ...image, mediaType: 'image/png', data: 'AQID', width: 2400, height: 3200 } }]],
+    })
+    chromeMock.captureVisibleTab.mockRejectedValue(new Error("Either the '<all_urls>' or 'activeTab' permission is required."))
+    const answer = await dispatchToolCall({ id: 'shot', name: 'browser_screenshot', args: {} }, 'auto')
+    expect(answer).toMatchObject({ ok: true, result: { image: { mediaType: 'image/png', data: 'AQID' } } })
+    expect((answer.result as { text: string }).text).toContain('complete image')
+    expect(chromeMock.executeScript).toHaveBeenCalledTimes(2)
+  })
+
+  it('never uses the direct image fallback when page sharing is denied', async () => {
+    const chromeMock = mockChrome({ tab: { id: 7, windowId: 1, active: true, url: 'https://example.com/exams' } })
+    const answer = await dispatchToolCall({ id: 'shot', name: 'browser_screenshot', args: {} }, 'ask', undefined, async () => 'denied')
+    expect(answer.ok).toBe(false)
+    expect(chromeMock.captureVisibleTab).not.toHaveBeenCalled()
+    expect(chromeMock.executeScript).not.toHaveBeenCalled()
   })
 
   it('uses an already-loaded content script without injecting', async () => {
