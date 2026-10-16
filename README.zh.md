@@ -15,6 +15,8 @@
 
 ## 命令行安装（源码方式）
 
+**Windows 免命令安装：**下载 [安装网页助手.cmd](https://raw.githubusercontent.com/samchen2009/tandix/main/%E5%AE%89%E8%A3%85%E7%BD%91%E9%A1%B5%E5%8A%A9%E6%89%8B.cmd)，保存后双击即可。如果浏览器显示脚本文本，右键链接选择「链接另存为」，保留 `.cmd` 后缀。只需这一个文件，无需下载整个源码或预装 Node、pnpm、Git。脚本会自动拉取最新安装向导，检测系统架构和已有组件，安装缺失依赖、构建扩展、注册本机伴随程序并检查连接。源码目录内的同名入口优先使用该目录的本地代码。
+
 macOS 先安装 **Google Chrome** 和 **Node.js 22.19+ 或 24+（含 npm）**。Windows 向导会自动准备 Node.js、私有 pnpm 11.7.0、Chrome、dsh、WorkBuddy/CodeBuddy CLI 和 Codex CLI。不需要 Git。安装与依赖下载需要联网；已有兼容运行时和登录配置会保留。
 
 **macOS**，在终端运行：

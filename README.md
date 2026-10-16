@@ -15,6 +15,8 @@ Task inference from long, interleaved histories is currently an experimental CLI
 
 ## Command-line installation (from source)
 
+**Windows, without commands:** download [安装网页助手.cmd](https://raw.githubusercontent.com/samchen2009/tandix/main/%E5%AE%89%E8%A3%85%E7%BD%91%E9%A1%B5%E5%8A%A9%E6%89%8B.cmd), save it, and double-click. If your browser displays the script, right-click the link and choose **Save link as**, keeping the `.cmd` extension. This single file downloads the latest wizard, detects architecture and existing tools, installs missing dependencies, builds the extension, registers its companion, and checks connections. No source ZIP, Node, pnpm, or Git is needed beforehand. Inside a source checkout, the same launcher uses that checkout's local code.
+
 On macOS, install **Google Chrome** and **Node.js 22.19+ or 24+ with npm**. The Windows wizard automatically prepares Node.js, private pnpm 11.7.0, Chrome, dsh, WorkBuddy/CodeBuddy CLI and Codex CLI. No Git is required. Downloads require internet access. Compatible existing runtimes and sign-in settings are preserved.
 
 **macOS**, in Terminal:
