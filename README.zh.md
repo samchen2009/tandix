@@ -13,6 +13,30 @@
 
 长历史中的任务关联推断目前是实验性 CLI，尚未接入侧栏自动提炼，见[活动推断说明](docs/activity-inference.md)。
 
+## 命令行安装（源码方式）
+
+先安装 **Google Chrome** 和 **Node.js 22.19+ 或 24+（含 npm）**，重新打开终端。不需要 Git，也不需要全局安装 pnpm；下面的入口会临时使用项目固定的 pnpm 11.7.0，下载源码并构建。依赖和源码下载需要联网。
+
+**macOS**，在终端运行：
+
+```bash
+curl -fL https://raw.githubusercontent.com/samchen2009/tandix/main/scripts/install-macos.sh -o install-macos.sh && bash ./install-macos.sh
+```
+
+**Windows**，在 PowerShell 5.1 或更高版本运行：
+
+```powershell
+$installer = Join-Path $env:TEMP 'tandix-install-windows.ps1'
+Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Uri 'https://raw.githubusercontent.com/samchen2009/tandix/main/scripts/install-windows.ps1' -OutFile $installer
+powershell -NoProfile -ExecutionPolicy Bypass -File $installer
+```
+
+也可以直接下载 [macOS 脚本](scripts/install-macos.sh)或 [Windows 脚本](scripts/install-windows.ps1)，保存后运行。脚本不会全局修改 PowerShell 执行策略。
+
+安装后，在 `chrome://extensions` 开启「开发者模式」，选择「加载已解压的扩展程序」，加载脚本打印的目录（默认 `~/.dsh/browser-extension`）。按脚本最后打印的启动命令运行 dsh，在 Tandix 中选择 **dsh** 并配置模型。macOS 如需 Codex，先加载扩展，再按脚本提示注册本机伴随程序。Windows 的此源码流程使用 dsh；Codex 需要下面的专用安装包。
+
+再次运行入口即可更新托管源码安装；更新后在 Chrome 中重新加载扩展。已有安装目录不由脚本管理时，安装器会停止，避免覆盖。
+
 ## 普通用户安装（推荐）
 
 不需要 `git clone`。预构建安装包包含 Chrome 扩展、Node 和连接依赖，不需要 Git、pnpm 或源码编译。

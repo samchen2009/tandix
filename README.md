@@ -13,6 +13,30 @@ English | [中文](README.zh.md)
 
 Task inference from long, interleaved histories is currently an experimental CLI, rather than an automatic side-panel feature. See [activity inference](docs/activity-inference.md).
 
+## Command-line installation (from source)
+
+Install **Google Chrome** and **Node.js 22.19+ or 24+ with npm**, then reopen your terminal. No Git or global pnpm installation is needed. These entry points use the project's pinned pnpm 11.7.0 to download and build the source. Internet access is required for source and dependencies.
+
+**macOS**, in Terminal:
+
+```bash
+curl -fL https://raw.githubusercontent.com/samchen2009/tandix/main/scripts/install-macos.sh -o install-macos.sh && bash ./install-macos.sh
+```
+
+**Windows**, in PowerShell 5.1 or newer:
+
+```powershell
+$installer = Join-Path $env:TEMP 'tandix-install-windows.ps1'
+Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Uri 'https://raw.githubusercontent.com/samchen2009/tandix/main/scripts/install-windows.ps1' -OutFile $installer
+powershell -NoProfile -ExecutionPolicy Bypass -File $installer
+```
+
+Alternatively, download the [macOS script](scripts/install-macos.sh) or [Windows script](scripts/install-windows.ps1) and run the saved file. The scripts do not change the global PowerShell execution policy.
+
+After installation, enable **Developer mode** in `chrome://extensions`, choose **Load unpacked**, and select the printed directory (normally `~/.dsh/browser-extension`). Follow the final startup commands, select **dsh** in Tandix, and configure a model. For Codex on macOS, load the extension first, then follow the companion registration command. This Windows source flow uses dsh; Codex requires the dedicated installer package below.
+
+Rerun the entry point to update a managed source installation, then reload the extension in Chrome. The installer stops if an existing installation directory is not managed by it, to avoid overwriting it.
+
 ## Install for everyday use (recommended)
 
 You do **not** need to clone the repository. Complete installer packages include the built Chrome extension, Node, and connection dependencies. No Git, pnpm, or source compilation is required.
