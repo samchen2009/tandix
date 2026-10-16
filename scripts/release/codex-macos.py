@@ -55,6 +55,7 @@ with ZipFile(OUTPUT) as archive:
     names = set(archive.namelist())
     assert NEW_PREFIX + MAC_ENTRY in names
     assert not any(name.endswith('.cmd') or 'node-win-' in name for name in names)
-    assert NEW_PREFIX + 'scripts/install/codex.mjs' in names
+    assert any(NEW_PREFIX + path in names for path in (
+        'scripts/install/codex.mjs', 'scripts/install-codex-only.mjs'))
     assert NEW_PREFIX + 'extensions/dsh-browser/dist/manifest.json' in names
 print(OUTPUT)

@@ -24,7 +24,8 @@ with ZipFile(OUTPUT) as archive:
     names = set(archive.namelist())
     assert PREFIX + "安装网页助手-Mac.command" in names
     assert PREFIX + "安装网页助手-win.cmd" in names
-    assert PREFIX + "scripts/install/codex.mjs" in names
+    assert any(PREFIX + path in names for path in (
+        'scripts/install/codex.mjs', 'scripts/install-codex-only.mjs'))
     assert not any(name.startswith(PREFIX + "runtime/") for name in names)
 
 print(f"{OUTPUT}: {OUTPUT.stat().st_size} bytes, SHA-256 {sha256(OUTPUT.read_bytes()).hexdigest()}")
