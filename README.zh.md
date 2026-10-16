@@ -33,7 +33,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $installer
 
 也可以直接下载 [macOS 脚本](scripts/install-macos.sh)或 [Windows 脚本](scripts/install-windows.ps1)，保存后运行。脚本不会全局修改 PowerShell 执行策略。
 
-安装后，在 `chrome://extensions` 开启「开发者模式」，选择「加载已解压的扩展程序」，加载脚本打印的目录（默认 `~/.dsh/browser-extension`）。按脚本最后打印的启动命令运行 dsh，在 Tandix 中选择 **dsh** 并配置模型。macOS 如需 Codex，先加载扩展，再按脚本提示注册本机伴随程序。Windows 的此源码流程使用 dsh；Codex 需要下面的专用安装包。
+安装后，在 `chrome://extensions` 开启「开发者模式」，选择「加载已解压的扩展程序」，加载脚本打印的目录（默认 `~/.dsh/browser-extension`）。按脚本最后打印的启动命令运行 dsh，在 Tandix 中选择 **dsh** 并配置模型。macOS 如需 Codex，先加载扩展，再按脚本提示注册本机伴随程序。Windows 连接 WorkBuddy 或 Codex 时，也需先加载扩展，再在源码目录运行 `pnpm.cmd native:install` 并重新加载扩展；对应的 CLI 必须已安装并登录。
 
 再次运行入口即可更新托管源码安装；更新后在 Chrome 中重新加载扩展。已有安装目录不由脚本管理时，安装器会停止，避免覆盖。
 
@@ -117,7 +117,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
 2. 点击「加载已解压的扩展程序」，选择脚本打印的目录，默认是 `$HOME\.dsh\browser-extension`。
 3. 在工程目录运行 `pnpm start`，保持窗口运行。打开 Tandix 侧栏并选择 **dsh**，在设置中配置模型。
 
-源码安装的 Windows 流程目前使用手动运行的 dsh。Codex/ACP 本机伴随程序需要单独准备支持 Windows 的安装包；`pnpm native:install` 的源码入口目前只支持 macOS。
+连接 **WorkBuddy 或 Codex** 时，完成 Chrome 扩展加载后，在源码目录执行：
+
+```powershell
+pnpm.cmd native:install
+```
+
+该命令在当前用户下注册 Chrome 本机伴随程序，不需要管理员权限。随后在 Chrome 中重新加载 Tandix，再选择对应 Agent。WorkBuddy 需要兼容 ACP 的 CLI，并完成该 CLI 的登录，详见[接入说明](docs/workbuddy-agent.md)；桌面版登录态不会自动复用。此流程无需保持 `pnpm start` 运行。
+
+如果无法自动识别扩展 ID，在 `chrome://extensions` 复制 Tandix 的 ID，然后执行 `node scripts/traceforge-native-host.mjs install --extension-id 你的扩展ID`。
 
 ### 更新
 

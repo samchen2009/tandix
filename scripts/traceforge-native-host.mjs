@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * macOS Chrome Native Messaging host for on-demand TraceForge bridge startup.
+ * macOS/Windows Chrome Native Messaging host for on-demand TraceForge bridge startup.
  * Only the fixed "ensure" request is accepted; it never executes browser-supplied
  * commands or paths. Chrome's host manifest restricts callers to one extension ID.
  */
@@ -17,7 +17,6 @@ import { findCodex, nativeHostWrapper } from './traceforge-runtime-discovery.mjs
 const HOST_NAME = 'io.traceforge.bridge'
 const HOST_DIR = join(homedir(), '.dsh', 'traceforge-native-host')
 const HOST_PATH = join(HOST_DIR, 'host.mjs')
-const WRAPPER_PATH = join(HOST_DIR, 'host.sh')
 const CONFIG_PATH = join(HOST_DIR, 'config.json')
 const LOG_PATH = join(HOST_DIR, 'dsh.log')
 const MANIFEST_PATH = join(homedir(), 'Library', 'Application Support', 'Google', 'Chrome', 'NativeMessagingHosts', `${HOST_NAME}.json`)
@@ -162,22 +161,33 @@ async function installCodex() {
     codexHome: process.env.CODEX_HOME ?? null,
     workbuddyAgentPath: process.env.WORKBUDDY_AGENT_PATH ?? null, extensionId }, null, 2) + '\n', { mode: 0o600 })
 
+  registerChromeNativeHost({ workspace, extensionId })
+  process.stdout.write(`Registered ${HOST_NAME} for Chrome extension ${extensionId}. Reload Tandix in chrome://extensions.\n`)
+}
+
+export function registerChromeNativeHost({ workspace, extensionId, hostDir = HOST_DIR, hostPath = HOST_PATH,
+  platform = process.platform, nodePath = process.execPath, searchPath = process.env.PATH ?? '',
+  macManifestPath = MANIFEST_PATH, run = spawnSync }) {
+  if (!['darwin', 'win32'].includes(platform)) throw new Error('Native host supports macOS and Windows Chrome only.')
+  if (!/^[a-p]{32}$/u.test(extensionId)) throw new Error('Invalid Chrome extension ID.')
+  const wrapperPath = join(hostDir, 'host.sh')
+  mkdirSync(hostDir, { recursive: true, mode: 0o700 })
   let manifestPath
   let executablePath
-  if (process.platform === 'darwin') {
-    manifestPath = MANIFEST_PATH
-    executablePath = WRAPPER_PATH
+  if (platform === 'darwin') {
+    manifestPath = macManifestPath
+    executablePath = wrapperPath
     mkdirSync(dirname(manifestPath), { recursive: true })
-    writeFileSync(WRAPPER_PATH, nativeHostWrapper({ hostPath: HOST_PATH,
-      searchPath: process.env.PATH ?? '', nodeHint: process.execPath }), { mode: 0o700 })
-    chmodSync(WRAPPER_PATH, 0o700)
+    writeFileSync(wrapperPath, nativeHostWrapper({ hostPath,
+      searchPath, nodeHint: nodePath }), { mode: 0o700 })
+    chmodSync(wrapperPath, 0o700)
   } else {
-    manifestPath = join(HOST_DIR, `${HOST_NAME}.json`)
-    executablePath = join(HOST_DIR, `native-host-${Date.now()}.exe`)
+    manifestPath = join(hostDir, `${HOST_NAME}.json`)
+    executablePath = join(hostDir, `native-host-${Date.now()}.exe`)
     const compiler = join(workspace, 'scripts', 'install-codex-windows-host.ps1')
-    const result = spawnSync('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass',
+    const result = run('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass',
       '-File', compiler, '-Source', join(workspace, 'scripts', 'tandix-native-proxy.cs'),
-      '-OutputPath', executablePath, '-HostPath', HOST_PATH, '-NodePath', process.execPath],
+      '-OutputPath', executablePath, '-HostPath', hostPath, '-NodePath', nodePath],
     { stdio: 'inherit' })
     if (result.status !== 0 || !existsSync(executablePath)) throw new Error('Could not compile the Windows native host.')
   }
@@ -186,20 +196,19 @@ async function installCodex() {
     if (previous.name !== HOST_NAME) throw new Error(`Refusing to replace unrelated native host: ${manifestPath}`)
   }
   writeFileSync(manifestPath, JSON.stringify({ name: HOST_NAME,
-    description: 'Tandix Codex local companion', path: executablePath,
+    description: 'Tandix local agent companion', path: executablePath,
     type: 'stdio', allowed_origins: [`chrome-extension://${extensionId}/`],
   }, null, 2) + '\n', { mode: 0o600 })
-  if (process.platform === 'win32') {
+  if (platform === 'win32') {
     const registryKey = `HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\${HOST_NAME}`
-    const result = spawnSync('reg.exe', ['ADD', registryKey, '/ve', '/t', 'REG_SZ', '/d', manifestPath, '/f'],
+    const result = run('reg.exe', ['ADD', registryKey, '/ve', '/t', 'REG_SZ', '/d', manifestPath, '/f'],
       { stdio: 'inherit' })
     if (result.status !== 0) throw new Error('Could not register the Windows native messaging host.')
   }
-  process.stdout.write(`Registered ${HOST_NAME} for Chrome extension ${extensionId}. Reload Tandix in chrome://extensions.\n`)
+  return manifestPath
 }
-
 function install() {
-  if (process.platform !== 'darwin') throw new Error('On-demand native host installation currently supports macOS Chrome only.')
+  if (!['darwin', 'win32'].includes(process.platform)) throw new Error('Native host installation supports macOS and Windows Chrome only.')
   const workspace = resolve(dirname(SOURCE_PATH), '..')
   const args = process.argv.slice(3)
   let extensionId
@@ -210,30 +219,14 @@ function install() {
 
   const cliPath = join(workspace, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
   if (!existsSync(cliPath)) throw new Error(`dsh CLI not found at ${cliPath}; run pnpm install first.`)
-  if (existsSync(MANIFEST_PATH)) {
-    const existing = JSON.parse(readFileSync(MANIFEST_PATH, 'utf8'))
-    if (existing.name !== HOST_NAME || existing.path !== WRAPPER_PATH) {
-      throw new Error(`Refusing to overwrite an unrelated native host: ${MANIFEST_PATH}`)
-    }
-  }
 
   mkdirSync(HOST_DIR, { recursive: true, mode: 0o700 })
-  mkdirSync(dirname(MANIFEST_PATH), { recursive: true })
   copyFileSync(SOURCE_PATH, HOST_PATH)
   copyFileSync(DISCOVERY_SOURCE_PATH, join(HOST_DIR, 'traceforge-runtime-discovery.mjs'))
   writeFileSync(CONFIG_PATH, JSON.stringify({ cliPath, workspace,
     codexHome: process.env.CODEX_HOME ?? null,
     workbuddyAgentPath: process.env.WORKBUDDY_AGENT_PATH ?? null, extensionId }, null, 2) + '\n', { mode: 0o600 })
-  writeFileSync(WRAPPER_PATH, nativeHostWrapper({ hostPath: HOST_PATH,
-    searchPath: process.env.PATH ?? '', nodeHint: process.execPath }), { mode: 0o700 })
-  chmodSync(WRAPPER_PATH, 0o700)
-  writeFileSync(MANIFEST_PATH, JSON.stringify({
-    name: HOST_NAME,
-    description: 'Tandix on-demand local agent bridge',
-    path: WRAPPER_PATH,
-    type: 'stdio',
-    allowed_origins: [`chrome-extension://${extensionId}/`],
-  }, null, 2) + '\n', { mode: 0o600 })
+  registerChromeNativeHost({ workspace, extensionId })
   process.stdout.write(`Registered ${HOST_NAME} for extension ${extensionId}. Reload Tandix in chrome://extensions.\n`)
 }
 
@@ -246,7 +239,10 @@ let ensureQueue = Promise.resolve()
 
 function stopOwnedChild() {
   if (ownedChild?.pid === undefined) return
-  try { process.kill(-ownedChild.pid, 'SIGTERM') } catch { /* Already exited. */ }
+  try {
+    if (process.platform === 'win32') ownedChild.kill()
+    else process.kill(-ownedChild.pid, 'SIGTERM')
+  } catch { /* Already exited. */ }
   ownedChild = null
   ownedChildSandboxDirectory = ''
 }

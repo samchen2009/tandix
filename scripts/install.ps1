@@ -539,3 +539,6 @@ Write-Pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.1.5-rc.2 we
 Write-Pair "• 使用双击入口安装时，本地 Agent 会由安装向导自动启动" "The double-click launcher starts the local Agent automatically"
 Write-Host ''
 Write-Pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/samchen2009/tandix" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/samchen2009/tandix"
+
+Write-Pair "连接 WorkBuddy 或 Codex：先加载扩展，再在此源码目录运行 pnpm.cmd native:install，随后重新加载扩展。" "For WorkBuddy or Codex: load the extension, run pnpm.cmd native:install in this source directory, then reload the extension."
+Write-Pair "WorkBuddy 需要兼容 ACP 的命令行程序及其登录态；桌面应用登录不会自动复用。" "WorkBuddy requires a signed-in ACP-compatible CLI; desktop login is not automatically reused."

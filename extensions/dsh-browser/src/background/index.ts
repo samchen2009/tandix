@@ -41,7 +41,7 @@ import {
 import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { BRIDGE_CONFIG_PATH, BRIDGE_PATH } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { BridgeClient, type BridgeState } from './bridge.ts'
-import { ensureNativeBridge, nativePanelOpened, nativePanelsClosed } from './native-host.ts'
+import { ensureNativeBridge, nativeBridgeError, nativePanelOpened, nativePanelsClosed } from './native-host.ts'
 import { createRpc } from './rpc.ts'
 import { agentBackend, agentPreference, type AgentBackend, type AgentPreference } from '../agent-backend.ts'
 import {
@@ -1475,7 +1475,7 @@ function cancelAllToolCalls(): void {
 }
 
 /** (Re)start the bridge with the current settings. 零配置：地址留空时自动探测；回环连接无需 token。 */
-async function startBridge(): Promise<void> {
+async function startBridge(): Promise<string | undefined> {
   const revision = ++bridgeStartRevision
   if (panelPorts.size === 0) return
   let url = settings.bridgeUrl
@@ -1510,6 +1510,13 @@ async function startBridge(): Promise<void> {
     rpc = null
     if (settings.agentBackend === 'codex' || settings.agentBackend === 'workbuddy') activeBackend = settings.agentBackend
     broadcastStatus()
+    if (explicitLocalAgent) {
+      const label = settings.agentBackend === 'workbuddy' ? 'WorkBuddy' : 'Codex'
+      const detail = nativeBridgeError() ?? 'The native companion is unavailable.'
+      return getUiLocale() === 'zh'
+        ? `${label} 连接失败。请在源码目录运行 pnpm native:install，重新加载扩展，并确认对应的命令行程序已安装和登录。详细原因：${detail}`
+        : `${label} connection failed. Run pnpm native:install in the source directory, reload the extension, and confirm the agent CLI is installed and signed in. Details: ${detail}`
+    }
     return
   }
   let detectedBackend: AgentBackend = 'dsh'
@@ -1529,7 +1536,9 @@ async function startBridge(): Promise<void> {
     rpc = null
     activeBackend = settings.agentBackend === 'workbuddy' ? 'workbuddy' : 'codex'
     broadcastStatus()
-    return
+    return getUiLocale() === 'zh'
+      ? '本机伴随程序返回了其他 Agent，请更新伴随程序后重新连接。'
+      : 'The native companion returned a different agent. Update the companion and reconnect.'
   }
   activeBackend = detectedBackend
   // 手动填的地址常只有主机部分（如 ws://127.0.0.1:3080）；桥路径是协议
@@ -1747,7 +1756,10 @@ chrome.runtime.onConnect.addListener((port) => {
               || settings.sandboxDirectory !== previousConnection.sandboxDirectory
               || settingsMsg.forceReconnect === true
             if (panelPorts.size > 0) {
-              if (connectionChanged) await startBridge()
+              if (connectionChanged) {
+                const failure = await startBridge()
+                if (failure !== undefined) throw new Error(failure)
+              }
               if (settings.sandboxDirectory !== '' && bridge === null) {
                 throw new Error('Could not apply the sandbox directory. Reinstall the native companion, then reconnect.')
               }

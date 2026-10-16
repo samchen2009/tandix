@@ -1,5 +1,5 @@
 /**
- * Optional macOS Chrome companion. The extension never starts a process by
+ * Optional macOS/Windows Chrome companion. The extension never starts a process by
  * itself: Chrome launches only the explicitly installed, allowlisted Native
  * Messaging host when a panel needs a local bridge that is not yet running.
  */
@@ -19,6 +19,10 @@ let finishPending: ((url: string | undefined) => void) | null = null
 let idleTimer: ReturnType<typeof setTimeout> | undefined
 let unavailableUntil = 0
 let hostWasReady = false
+let lastFailure: string | null = null
+
+/** Preserve the host's diagnostic so an explicit connect action can display it. */
+export function nativeBridgeError(): string | null { return lastFailure }
 
 function validLocalBridgeUrl(value: unknown): value is string {
   if (typeof value !== 'string') return false
@@ -44,6 +48,7 @@ function dropPort(current: chrome.runtime.Port, suppressRetry = false): void {
   // failure when the companion has not been installed yet.
   const error = chrome.runtime.lastError?.message
   if (error !== undefined) console.warn(`Tandix native companion: ${error}`)
+  lastFailure = error ?? 'The local companion disconnected before it became ready.'
   port = null
   settle(undefined)
   if (!suppressRetry) unavailableUntil = hostWasReady ? 0 : Date.now() + UNAVAILABLE_RETRY_MS
@@ -75,18 +80,21 @@ export function ensureNativeBridge(backend: AgentPreference = 'auto', sandboxDir
   // probe failed, rather than inheriting its five-minute cooldown.
   if (backend !== 'auto') unavailableUntil = 0
   if (import.meta.env.EXT_TARGET === 'firefox' || Date.now() < unavailableUntil) {
+    if (import.meta.env.EXT_TARGET === 'firefox') lastFailure = 'The local companion requires Google Chrome.'
     return Promise.resolve(undefined)
   }
   if (pending !== null) {
     return pendingBackend === backend && pendingSandboxDirectory === sandboxDirectory
       ? pending : pending.then(() => ensureNativeBridge(backend, sandboxDirectory))
   }
+  lastFailure = null
   let current = port
   if (current === null) {
     try {
       current = chrome.runtime.connectNative(HOST_NAME)
     } catch (error: unknown) {
       console.warn('Tandix native companion is unavailable', error)
+      lastFailure = error instanceof Error ? error.message : String(error)
       unavailableUntil = Date.now() + UNAVAILABLE_RETRY_MS
       return Promise.resolve(undefined)
     }
@@ -101,6 +109,7 @@ export function ensureNativeBridge(backend: AgentPreference = 'auto', sandboxDir
   const timeout = setTimeout(() => {
     if (port !== active || pending === null) return
     console.warn('Tandix native companion: timed out waiting for the local host response (60 seconds).')
+    lastFailure = 'The local companion did not respond within 60 seconds.'
     active.onMessage.removeListener(onMessage)
     port = null
     settle(undefined)
@@ -116,6 +125,7 @@ export function ensureNativeBridge(backend: AgentPreference = 'auto', sandboxDir
       hostWasReady = true
       if (sandboxDirectory !== '' && frame.sandboxConfigured !== true) {
         console.warn('Tandix native companion is outdated; reinstall it to apply the sandbox directory.')
+        lastFailure = 'Reinstall the local companion to apply the sandbox directory.'
         settle(undefined)
       } else {
         settle(frame.wsUrl)
@@ -124,6 +134,7 @@ export function ensureNativeBridge(backend: AgentPreference = 'auto', sandboxDir
       clearTimeout(timeout)
       active.onMessage.removeListener(onMessage)
       console.warn('Tandix native companion:', frame.message)
+      lastFailure = typeof frame.message === 'string' ? frame.message : 'The local companion could not start the selected agent.'
       port = null
       settle(undefined)
       unavailableUntil = Date.now() + UNAVAILABLE_RETRY_MS
@@ -137,6 +148,7 @@ export function ensureNativeBridge(backend: AgentPreference = 'auto', sandboxDir
     clearTimeout(timeout)
     active.onMessage.removeListener(onMessage)
     console.warn('Tandix native companion:', error)
+    lastFailure = error instanceof Error ? error.message : String(error)
     port = null
     settle(undefined)
     unavailableUntil = Date.now() + UNAVAILABLE_RETRY_MS

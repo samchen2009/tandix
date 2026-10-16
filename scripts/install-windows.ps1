@@ -7,7 +7,7 @@ if ($Help) {
   Write-Host 'Usage: powershell -NoProfile -ExecutionPolicy Bypass -File .\install-windows.ps1'
   Write-Host 'Requires Chrome and Node.js 22.19+ or 24+ (with npm).'
   Write-Host 'Downloads Tandix source from GitHub and builds it using pnpm 11.7.0.'
-  Write-Host 'The Windows source install uses dsh; Codex requires a separate Windows package.'
+  Write-Host 'Load the extension, then run pnpm native:install to connect WorkBuddy or Codex.'
   exit 0
 }
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
@@ -41,7 +41,9 @@ try {
     Write-Host "  Set-Location -LiteralPath '$root'"
     Write-Host '  npm.cmd exec --yes --package=pnpm@11.7.0 -- pnpm start'
     Write-Host 'Load the extension in chrome://extensions, select dsh in Tandix, and configure a model.'
-    Write-Host 'Connecting Codex on Windows requires a separate Windows installer package.'
+    Write-Host 'For WorkBuddy or Codex, load the extension first, then run in that source directory:'
+    Write-Host '  npm.cmd exec --yes --package=pnpm@11.7.0 -- pnpm native:install'
+    Write-Host 'Reload the extension and ensure the chosen agent CLI is installed and signed in.'
   }
 } finally {
   Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue

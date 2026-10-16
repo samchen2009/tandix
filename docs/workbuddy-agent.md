@@ -12,7 +12,7 @@ CodeBuddy CLI 的安装、登录和 ACP 用法见官方文档：[安装](https:/
 
 1. 安装兼容 CLI，例如 `npm install -g @tencent-ai/codebuddy-code`，运行 `codebuddy` 完成该 CLI 的登录，然后退出交互会话。
 2. 在仓库运行 `pnpm build`，生成 `extensions/dsh-browser/dist`。
-3. 更新本机伴随程序。源码安装可运行 `pnpm native:install`；已使用独立安装包的环境需要重新生成并运行包含本次改动的安装包。只刷新 Chrome 扩展不足以更新已复制的伴随程序。
+3. 更新本机伴随程序。macOS/Windows 源码安装可运行 `pnpm native:install`（Windows PowerShell 可用 `pnpm.cmd native:install`）；已使用独立安装包的环境需要重新生成并运行包含本次改动的安装包。只刷新 Chrome 扩展不足以更新已复制的伴随程序。
 4. 在 Chrome 扩展管理页重新加载构建目录，在 Tandix 顶部的 Agent 菜单选择 WorkBuddy，发送“读取当前网页，告诉我标题”。
 5. 验证流式回复、切换网页、创建新会话和停止任务。检查会话记录没有混入 Codex/dsh 的会话。
 
@@ -31,3 +31,31 @@ WORKBUDDY_AGENT_PATH=/absolute/path/to/agent pnpm native:install
 - 指定沙箱目录时会拒绝连接，因为当前 ACP 适配器还不能保证该目录的访问边界。
 - 授权仅映射本次允许/拒绝，不授予永久权限。浏览器回调使用独立凭据及会话路由。
 - `node --test scripts/tests/traceforge-workbuddy.test.mjs` 使用协议测试替身，覆盖 ACP 子进程 → MCP → WebSocket 浏览器工具 → 回复链路，不能代替真实账号和真实浏览器验收。
+
+## Windows：点击连接没有反应
+
+只构建或加载 `dist`，或只运行 `pnpm start`，都不会注册 WorkBuddy 使用的 Chrome 本机伴随程序。请更新源码后，在源码根目录执行：
+
+```powershell
+pnpm.cmd install --frozen-lockfile
+pnpm.cmd build
+npm.cmd install -g @tencent-ai/codebuddy-code
+codebuddy.cmd
+```
+
+按 CLI 提示完成登录后退出，确认 Chrome 已加载 Tandix 扩展，再执行：
+
+```powershell
+pnpm.cmd native:install
+```
+
+重新加载 Chrome 扩展，选择 WorkBuddy。如果自动识别扩展 ID 失败，可执行 `node scripts/traceforge-native-host.mjs install --extension-id 你的扩展ID`。注册在当前用户下完成，无需管理员权限。连接失败会在侧栏显示原因。
+
+如果使用的是独立 `codebuddy.exe` 或其他 ACP 运行时，请先完成它的登录，并显式保存其绝对路径：
+
+```powershell
+$env:WORKBUDDY_AGENT_PATH = 'C:\你的实际路径\codebuddy.exe'
+pnpm.cmd native:install
+```
+
+当前 Windows 注册流程的自动化测试使用编译器与注册表替身；真实 Windows 环境、真实 CLI 登录和 ACP 握手仍需现场验证。

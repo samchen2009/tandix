@@ -141,6 +141,36 @@ afterEach(() => {
 })
 
 describe('background bridge lifecycle', () => {
+  it.each(['missing host', 'missing ACP runtime'])('reports %s to an explicit WorkBuddy connect action', async (failure) => {
+    const chromeMock = mockChrome({ localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }) })
+    const native = panelPort()
+    Object.assign(native.port, { disconnect: vi.fn() })
+    chrome.runtime.connectNative = vi.fn(() => native.port)
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    try {
+      await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+      panel.onMessage.emit({ type: 'settings', id: 'workbuddy-connect', settings: { agentBackend: 'workbuddy' }, forceReconnect: true })
+      await vi.waitFor(() => expect(native.postMessage).toHaveBeenCalledWith({ type: 'ensure', backend: 'workbuddy', sandboxDirectory: '' }))
+      if (failure === 'missing host') {
+        Object.assign(chrome.runtime, { lastError: { message: 'Specified native messaging host not found.' } })
+        native.onDisconnect.emit()
+        Object.assign(chrome.runtime, { lastError: undefined })
+      } else native.onMessage.emit({ type: 'error', message: 'WorkBuddy ACP runtime was not found.' })
+      await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'settings.result', id: 'workbuddy-connect', ok: false,
+        error: expect.objectContaining({ message: expect.stringContaining(failure === 'missing host' ? 'native messaging host not found' : 'ACP runtime was not found') }),
+      })))
+      expect(FakeWebSocket.instances).toHaveLength(1)
+    } finally {
+      native.onDisconnect.emit()
+      panel.onDisconnect.emit()
+      await new Promise(resolve => setTimeout(resolve, 600))
+    }
+  })
+
   it.each(['workbuddy', 'dsh'])('explicit WorkBuddy requires a matching %s companion identity', async (reportedBackend) => {
     const chromeMock = mockChrome({ localGet: async () => ({ dshSettings: { agentBackend: 'workbuddy' } }) })
     const native = panelPort()

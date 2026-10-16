@@ -22,6 +22,7 @@ jobs:
           node-version: 24
       - run: npm exec --yes --package=pnpm@11.7.0 -- pnpm --version
       - run: python scripts/tests/test_source_installers.py
+      - run: node --test scripts/tests/traceforge-native-registration.test.mjs
 
   clean-install:
     runs-on: ubuntu-latest
