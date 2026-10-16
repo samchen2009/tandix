@@ -8,6 +8,7 @@ import { homedir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join } from 'node:path'
 import { createInterface } from 'node:readline'
 import { TANDIX_BROWSER_INSTRUCTIONS } from './traceforge-browser-guidance.mjs'
+import { stopAgentProcess } from './traceforge-runtime-discovery.mjs'
 
 const CAPS = { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 }
 const IMAGE_LIMITS = { maxImageBytes: 10 * 1024 * 1024, maxImagesPerMessage: 10,
@@ -61,9 +62,12 @@ export class WorkBuddyBridge {
     if (this.sandboxDirectory !== '') throw new Error('WorkBuddy ACP does not yet enforce the selected sandbox folder. Clear that setting or use Codex/dsh.')
     const cwd = this.sandboxDirectory || join(this.workspace, 'workspace')
     mkdirSync(cwd, { recursive: true })
-    this.proc = spawn(this.agentPath, ['--acp'], {
+    const script = /\.(?:mjs|cjs|js)$/iu.test(this.agentPath)
+    const batch = process.platform === 'win32' && /\.(cmd|bat)$/iu.test(this.agentPath)
+    this.proc = spawn(script ? this.nodePath : batch ? `"${this.agentPath}"` : this.agentPath,
+      script ? [this.agentPath, '--acp'] : ['--acp'], {
       cwd, stdio: ['pipe', 'pipe', 'pipe'],
-      shell: process.platform === 'win32' && /\.(cmd|bat)$/iu.test(this.agentPath),
+      shell: batch,
       env: { ...process.env, CODEBUDDY_CODE_DISABLE_BACKGROUND_TASKS: '1' },
     })
     this.proc.stderr.on('data', chunk => process.stderr.write(chunk))
@@ -199,6 +203,13 @@ export class WorkBuddyBridge {
   }
   async rpc(method, payload) {
     switch (method) {
+      case 'connection.check': {
+        // A session handshake checks CLI authentication without sending a
+        // model prompt or adding a conversation to Tandix history.
+        const result = await this.call('session/new', { cwd: this.sandboxDirectory || join(this.workspace, 'workspace'), mcpServers: [] })
+        if (typeof result?.sessionId !== 'string') throw new Error('WorkBuddy authentication check did not return an ACP session ID')
+        return { authenticated: true }
+      }
       case 'session.create': {
         const token = randomBytes(16).toString('hex')
         const result = await this.call('session/new', { cwd: this.sandboxDirectory || join(this.workspace, 'workspace'), mcpServers: this.mcpConfig(token) })
@@ -317,6 +328,6 @@ export class WorkBuddyBridge {
     for (const id of [...this.permissions.keys()]) this.settlePermission(id, 'decline')
     for (const pending of this.toolPending.values()) { clearTimeout(pending.timer); pending.reject(new Error('WorkBuddy bridge stopped')) }
     this.toolPending.clear(); this.fail(new Error('WorkBuddy bridge stopped'))
-    this.browser?.close(); this.ws?.close(); this.http?.close(); this.proc?.kill('SIGTERM')
+    this.browser?.close(); this.ws?.close(); this.http?.close(); stopAgentProcess(this.proc)
   }
 }

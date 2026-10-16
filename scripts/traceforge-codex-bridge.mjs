@@ -11,6 +11,7 @@ import { homedir } from 'node:os'
 import { LarkAuth } from './traceforge-lark-auth.mjs'
 import { TANDIX_BROWSER_INSTRUCTIONS } from './traceforge-browser-guidance.mjs'
 import { titleFromCodexTurns } from './traceforge-session-title.mjs'
+import { stopAgentProcess } from './traceforge-runtime-discovery.mjs'
 
 const CAPS = { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 }
 const REQUEST_TIMEOUT_MS = 30_000
@@ -98,10 +99,11 @@ export class CodexBridge {
   }
 
   async start() {
-    this.proc = spawn(this.codexPath, ['app-server'], {
+    const batch = process.platform === 'win32' && /\.(?:cmd|bat)$/iu.test(this.codexPath)
+    this.proc = spawn(batch ? `"${this.codexPath}"` : this.codexPath, ['app-server'], {
       cwd: this.workspace,
       stdio: ['pipe', 'pipe', 'pipe'],
-      shell: process.platform === 'win32' && /\.(?:cmd|bat)$/iu.test(this.codexPath),
+      shell: batch,
       env: { ...process.env, CODEX_HOME: this.codexHome,
         PATH: `${dirname(this.codexPath)}${delimiter}${process.env.PATH ?? ''}` },
     })
@@ -1007,6 +1009,6 @@ export class CodexBridge {
     this.browser?.close()
     this.ws?.close()
     this.http?.close()
-    this.proc?.kill('SIGTERM')
+    stopAgentProcess(this.proc)
   }
 }

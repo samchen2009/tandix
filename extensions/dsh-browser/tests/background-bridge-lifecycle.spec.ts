@@ -141,6 +141,33 @@ afterEach(() => {
 })
 
 describe('background bridge lifecycle', () => {
+  it('shows dsh startup failures in status and in the connect action result', async () => {
+    const chromeMock = mockChrome({ localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }) })
+    const native = panelPort()
+    Object.assign(native.port, { disconnect: vi.fn() })
+    chrome.runtime.connectNative = vi.fn(() => native.port)
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 503 })))
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const panel = panelPort()
+    chromeMock.onConnect.emit(panel.port)
+    try {
+      await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+      panel.onMessage.emit({ type: 'settings', id: 'dsh-connect', settings: { agentBackend: 'dsh', bridgeUrl: '' }, forceReconnect: true })
+      await vi.waitFor(() => expect(native.postMessage).toHaveBeenCalledWith({ type: 'ensure', backend: 'dsh', sandboxDirectory: '' }))
+      native.onMessage.emit({ type: 'error', message: 'dsh profile plugin could not load' })
+      await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'settings.result', id: 'dsh-connect', ok: false,
+        error: expect.objectContaining({ message: expect.stringContaining('dsh profile plugin could not load') }),
+      })))
+      expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'status', error: expect.stringContaining('dsh profile plugin could not load') }))
+    } finally {
+      native.onDisconnect.emit()
+      panel.onDisconnect.emit()
+      await new Promise(resolve => setTimeout(resolve, 600))
+    }
+  })
+
   it.each(['missing host', 'missing ACP runtime'])('reports %s to an explicit WorkBuddy connect action', async (failure) => {
     const chromeMock = mockChrome({ localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }) })
     const native = panelPort()

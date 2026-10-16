@@ -185,6 +185,7 @@ let settingsPersistence = Promise.resolve()
 let caps: BridgeCaps | null = null
 let activeBackend: AgentBackend = 'dsh'
 let bridge: BridgeClient | null = null
+let connectionFailure: string | null = null
 let rpc: ReturnType<typeof createRpc> | null = null
 const panelPorts = new Set<chrome.runtime.Port>()
 const recordingService = new RecordingService(new InMemoryRecentRecordingStore(), broadcastRecordingState, broadcastRecordingEvent)
@@ -368,10 +369,21 @@ function disarmBridgeKeepalive(): void {
 }
 
 function broadcastStatus(): void {
-  const payload = { type: 'status', state: currentBridgeState(), caps, backend: activeBackend }
+  const payload = bridgeStatus()
   for (const port of panelPorts) {
     try { port.postMessage(payload) } catch { /* port already closed */ }
   }
+}
+
+function bridgeStatus() {
+  return { type: 'status', state: currentBridgeState(), caps, backend: activeBackend,
+    ...(connectionFailure === null ? {} : { error: connectionFailure }) }
+}
+
+function connectionFailed(message: string): string {
+  connectionFailure = message
+  broadcastStatus()
+  return message
 }
 
 function currentBridgeState(): BridgeState {
@@ -1477,6 +1489,7 @@ function cancelAllToolCalls(): void {
 /** (Re)start the bridge with the current settings. 零配置：地址留空时自动探测；回环连接无需 token。 */
 async function startBridge(): Promise<string | undefined> {
   const revision = ++bridgeStartRevision
+  connectionFailure = null
   if (panelPorts.size === 0) return
   let url = settings.bridgeUrl
   const explicitLocalAgent = settings.agentBackend === 'codex' || settings.agentBackend === 'workbuddy'
@@ -1510,12 +1523,12 @@ async function startBridge(): Promise<string | undefined> {
     rpc = null
     if (settings.agentBackend === 'codex' || settings.agentBackend === 'workbuddy') activeBackend = settings.agentBackend
     broadcastStatus()
-    if (explicitLocalAgent) {
-      const label = settings.agentBackend === 'workbuddy' ? 'WorkBuddy' : 'Codex'
+    if (settings.agentBackend !== 'auto') {
+      const label = settings.agentBackend === 'workbuddy' ? 'WorkBuddy' : settings.agentBackend === 'codex' ? 'Codex' : 'dsh'
       const detail = nativeBridgeError() ?? 'The native companion is unavailable.'
-      return getUiLocale() === 'zh'
-        ? `${label} 连接失败。请在源码目录运行 pnpm native:install，重新加载扩展，并确认对应的命令行程序已安装和登录。详细原因：${detail}`
-        : `${label} connection failed. Run pnpm native:install in the source directory, reload the extension, and confirm the agent CLI is installed and signed in. Details: ${detail}`
+      return connectionFailed(getUiLocale() === 'zh'
+        ? `${label} 连接失败。请重新运行 Tandix 安装向导完成依赖安装和本机连接检查，再重新加载扩展。详细原因：${detail}`
+        : `${label} connection failed. Rerun the Tandix installer to finish runtime setup and connection checks, then reload the extension. Details: ${detail}`)
     }
     return
   }
@@ -1530,15 +1543,15 @@ async function startBridge(): Promise<string | undefined> {
     verifiedBackend = config.backend === settings.agentBackend
   } catch { /* Explicit local backends require a matching companion. */ }
   if (revision !== bridgeStartRevision || panelPorts.size === 0) return
-  if (explicitLocalAgent && !verifiedBackend) {
+  if ((explicitLocalAgent && !verifiedBackend) || (settings.agentBackend === 'dsh' && detectedBackend !== 'dsh')) {
     bridge?.stop()
     bridge = null
     rpc = null
-    activeBackend = settings.agentBackend === 'workbuddy' ? 'workbuddy' : 'codex'
+    activeBackend = agentBackend(settings.agentBackend)
     broadcastStatus()
-    return getUiLocale() === 'zh'
+    return connectionFailed(getUiLocale() === 'zh'
       ? '本机伴随程序返回了其他 Agent，请更新伴随程序后重新连接。'
-      : 'The native companion returned a different agent. Update the companion and reconnect.'
+      : 'The native companion returned a different agent. Update the companion and reconnect.')
   }
   activeBackend = detectedBackend
   // 手动填的地址常只有主机部分（如 ws://127.0.0.1:3080）；桥路径是协议
@@ -1552,7 +1565,11 @@ async function startBridge(): Promise<string | undefined> {
   }
   if (bridge === null) {
     const client = new BridgeClient({
+      onError: (message) => {
+        connectionFailed(getUiLocale() === 'zh' ? `Agent 连接失败，请查看安装向导的连接报告。详细原因：${message}` : message)
+      },
       onStateChange: (state) => {
+        if (state === 'connected') connectionFailure = null
         if (state !== 'connected') {
           for (const id of agentApprovalPending) clearAgentApprovalNotification(id)
           cancelAllToolCalls()
@@ -1672,7 +1689,7 @@ chrome.runtime.onConnect.addListener((port) => {
     if (!panelPorts.has(port)) return
     if (bridge === null || bridge.state === 'stopped') return startBridge()
   })
-  try { port.postMessage({ type: 'status', state: currentBridgeState(), caps, backend: activeBackend }) } catch { /* port closed */ }
+  try { port.postMessage(bridgeStatus()) } catch { /* port closed */ }
   try { port.postMessage({ type: 'recording.state', state: recordingStateForPanel(port) }) } catch { /* port closed */ }
   void affinityReady.then(async () => {
     await syncActiveTab()
@@ -2019,7 +2036,7 @@ chrome.runtime.onConnect.addListener((port) => {
       }
       case 'request-status':
         try {
-          port.postMessage({ type: 'status', state: currentBridgeState(), caps, backend: activeBackend })
+          port.postMessage(bridgeStatus())
           sendTabAffinity(port)
           port.postMessage({ type: 'recording.state', state: recordingStateForPanel(port) })
           const statusWindowId = panelWindows.get(port)

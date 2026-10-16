@@ -15,7 +15,7 @@ Task inference from long, interleaved histories is currently an experimental CLI
 
 ## Command-line installation (from source)
 
-Install **Google Chrome** and **Node.js 22.19+ or 24+ with npm**, then reopen your terminal. No Git or global pnpm installation is needed. These entry points use the project's pinned pnpm 11.7.0 to download and build the source. Internet access is required for source and dependencies.
+On macOS, install **Google Chrome** and **Node.js 22.19+ or 24+ with npm**. The Windows wizard automatically prepares Node.js, private pnpm 11.7.0, Chrome, dsh, WorkBuddy/CodeBuddy CLI and Codex CLI. No Git is required. Downloads require internet access. Compatible existing runtimes and sign-in settings are preserved.
 
 **macOS**, in Terminal:
 
@@ -33,7 +33,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $installer
 
 Alternatively, download the [macOS script](scripts/install-macos.sh) or [Windows script](scripts/install-windows.ps1) and run the saved file. The scripts do not change the global PowerShell execution policy.
 
-After installation, enable **Developer mode** in `chrome://extensions`, choose **Load unpacked**, and select the printed directory (normally `~/.dsh/browser-extension`). Follow the final startup commands, select **dsh** in Tandix, and configure a model. For Codex on macOS, load the extension first, then follow the companion registration command. For WorkBuddy or Codex on Windows, load the extension, run `pnpm.cmd native:install` in the source directory, and reload the extension. The selected agent CLI must be installed and signed in.
+On the first install, enable **Developer mode** in `chrome://extensions`, choose **Load unpacked**, and select the printed folder (normally `~/.dsh/browser-extension`). Windows waits for extension loading, registers the native companion and checks native messaging, WebSocket authentication and session listing. WorkBuddy also gets an ACP session authentication check. If sign-in is needed, the wizard opens the CLI for you to complete it. It never supplies your account passwords or model credentials.
+
+Windows installs and checks all three agents by default, selecting **dsh**. Reload the extension and configure a provider/model in Tandix Settings if needed. **No `pnpm start` terminal is required**. Add `-Agent workbuddy` to use WorkBuddy as the required agent, or `-Agents dsh` to install only dsh. On macOS, continue following the printed startup or companion registration commands.
+
+Windows logs and per-agent results are saved to `%LOCALAPPDATA%\Tandix\install.log` and `%LOCALAPPDATA%\Tandix\install-report.json`. A failed selected agent returns a failed installation status. Other agent failures are explicitly reported. If Chrome cannot be installed through the package manager, the wizard opens its official download page and waits for installation.
 
 Rerun the entry point to update a managed source installation, then reload the extension in Chrome. The installer stops if an existing installation directory is not managed by it, to avoid overwriting it.
 
@@ -55,7 +59,7 @@ bash ./install.sh
 
 The script detects Intel or Apple Silicon, downloads and verifies the matching package, and starts its installer. It selects the lite package when compatible Node is already available, otherwise the complete package with bundled Node. Git and pnpm are unnecessary. On Windows, download the release's `install.ps1` and run `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1` in PowerShell.
 
-This refers to the **generated release bootstrap scripts**. The repository's `scripts/install.sh` and `scripts/install.ps1` are source installers and require Node and pnpm. The first public script and package upload is still pending.
+This refers to the **generated release bootstrap scripts**. The Windows source wizard above is already available and prepares its dependencies automatically. The first public release bootstrap and prebuilt package upload is still pending.
 
 ### macOS package
 
@@ -113,19 +117,17 @@ cd tandix
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
 
-1. Open `chrome://extensions` and enable **Developer mode**.
-2. Choose **Load unpacked** and select the printed extension directory, normally `$HOME\.dsh\browser-extension`.
-3. Run `pnpm start` from the repository directory and keep the window open. Open Tandix, select **dsh**, and configure a model in Settings.
+Alternatively, extract GitHub's source ZIP and double-click `安装网页助手.cmd`. Both entry points use the complete setup wizard: dependencies, source build, plugin registration, native companion registration and actual connection checks.
 
-For **WorkBuddy or Codex**, load the extension first, then run in the source directory:
+Follow the first-time Chrome extension-loading and sign-in prompts, then reload the extension. No separate `pnpm native:install` command or persistent `pnpm start` terminal is required. Configure your own model credentials in Tandix Settings for dsh. WorkBuddy uses a compatible ACP CLI, with separate sign-in from the desktop app; see [setup](docs/workbuddy-agent.md).
+
+To require a working WorkBuddy connection:
 
 ```powershell
-pnpm.cmd native:install
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1 -Agent workbuddy
 ```
 
-This registers Chrome's native companion for the current user without administrator privileges. Reload Tandix in Chrome and select the agent. WorkBuddy requires a signed-in ACP-compatible CLI; the desktop login is not automatically reused. See [setup](docs/workbuddy-agent.md). You do not need to keep `pnpm start` running for this flow.
-
-If automatic extension detection fails, copy Tandix's ID from `chrome://extensions`, then run `node scripts/traceforge-native-host.mjs install --extension-id YOUR_EXTENSION_ID`.
+If extension ID detection fails, the wizard prompts for the ID from Chrome's extension card.
 
 ### Updating
 

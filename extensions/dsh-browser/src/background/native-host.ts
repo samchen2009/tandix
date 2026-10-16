@@ -8,7 +8,7 @@ import type { AgentPreference } from '../agent-backend.ts'
 
 const HOST_NAME = 'io.traceforge.bridge'
 const IDLE_STOP_MS = 10 * 60_000
-const START_TIMEOUT_MS = 60_000
+const START_TIMEOUT_MS = 90_000
 const UNAVAILABLE_RETRY_MS = 5 * 60_000
 
 let port: chrome.runtime.Port | null = null
@@ -108,8 +108,8 @@ export function ensureNativeBridge(backend: AgentPreference = 'auto', sandboxDir
   const active = current
   const timeout = setTimeout(() => {
     if (port !== active || pending === null) return
-    console.warn('Tandix native companion: timed out waiting for the local host response (60 seconds).')
-    lastFailure = 'The local companion did not respond within 60 seconds.'
+    console.warn('Tandix native companion: timed out waiting for the local host response (90 seconds).')
+    lastFailure = 'The local companion did not respond within 90 seconds.'
     active.onMessage.removeListener(onMessage)
     port = null
     settle(undefined)

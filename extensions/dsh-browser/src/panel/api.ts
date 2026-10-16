@@ -55,6 +55,7 @@ interface StatusMessage {
   state: BridgeState
   caps: BridgeCaps | null
   backend?: AgentBackend
+  error?: string
 }
 
 interface EventMessage {
@@ -139,7 +140,7 @@ function panelRpcError(failure: RpcFailurePayload | undefined, fallbackMessage: 
 export interface PanelApi {
   rpc<T = unknown>(method: string, payload?: unknown): Promise<T>
   respond(rpcId: string, result: RespondResult): Promise<unknown>
-  onStatus(callback: (state: BridgeState, caps: BridgeCaps | null, backend: AgentBackend) => void): () => void
+  onStatus(callback: (state: BridgeState, caps: BridgeCaps | null, backend: AgentBackend, error?: string) => void): () => void
   onEvent(callback: (frame: ServerFrame) => void): () => void
   onApprovalRequest(callback: (request: ApprovalRequest) => void): () => void
   onApprovalResolved(callback: (id: string) => void): () => void
@@ -184,7 +185,7 @@ export function connectPanel(): PanelApi {
     resolve: (value: unknown) => void
     reject: (error: Error) => void
   }>()
-  const statusListeners = new Set<(state: BridgeState, caps: BridgeCaps | null, backend: AgentBackend) => void>()
+  const statusListeners = new Set<(state: BridgeState, caps: BridgeCaps | null, backend: AgentBackend, error?: string) => void>()
   const eventListeners = new Set<(frame: ServerFrame) => void>()
   const approvalListeners = new Set<(request: ApprovalRequest) => void>()
   const approvalResolvedListeners = new Set<(id: string) => void>()
@@ -238,7 +239,7 @@ export function connectPanel(): PanelApi {
         break
       }
       case 'status':
-        for (const listener of statusListeners) listener(msg.state, msg.caps, agentBackend(msg.backend))
+        for (const listener of statusListeners) listener(msg.state, msg.caps, agentBackend(msg.backend), msg.error)
         break
       case 'event':
         for (const listener of eventListeners) listener(msg.frame)

@@ -135,7 +135,7 @@ test('selected sandbox boundaries are rejected until ACP enforces them', async (
   b.close()
 })
 
-test('local ACP process reaches the browser through the real MCP transport and returns a durable reply', { skip: process.platform === 'win32', timeout: 15_000 }, async () => {
+test('local ACP process reaches the browser through the real MCP transport and returns a durable reply', { timeout: 15_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'tandix-wb-ipc-'))
   const fixture = fileURLToPath(new URL('./fixtures/workbuddy-acp.mjs', import.meta.url))
   const workspace = fileURLToPath(new URL('../../', import.meta.url))

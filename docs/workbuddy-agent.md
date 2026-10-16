@@ -32,30 +32,23 @@ WORKBUDDY_AGENT_PATH=/absolute/path/to/agent pnpm native:install
 - 授权仅映射本次允许/拒绝，不授予永久权限。浏览器回调使用独立凭据及会话路由。
 - `node --test scripts/tests/traceforge-workbuddy.test.mjs` 使用协议测试替身，覆盖 ACP 子进程 → MCP → WebSocket 浏览器工具 → 回复链路，不能代替真实账号和真实浏览器验收。
 
-## Windows：点击连接没有反应
+## Windows 完整安装与修复
 
-只构建或加载 `dist`，或只运行 `pnpm start`，都不会注册 WorkBuddy 使用的 Chrome 本机伴随程序。请更新源码后，在源码根目录执行：
-
-```powershell
-pnpm.cmd install --frozen-lockfile
-pnpm.cmd build
-npm.cmd install -g @tencent-ai/codebuddy-code
-codebuddy.cmd
-```
-
-按 CLI 提示完成登录后退出，确认 Chrome 已加载 Tandix 扩展，再执行：
+更新源码后，在源码根目录运行下面的向导，或双击 `安装网页助手.cmd`：
 
 ```powershell
-pnpm.cmd native:install
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1 -Agent workbuddy
 ```
 
-重新加载 Chrome 扩展，选择 WorkBuddy。如果自动识别扩展 ID 失败，可执行 `node scripts/traceforge-native-host.mjs install --extension-id 你的扩展ID`。注册在当前用户下完成，无需管理员权限。连接失败会在侧栏显示原因。
+向导会自动准备 Node、私有 pnpm、dsh、CodeBuddy CLI、Codex CLI，构建扩展并注册本机伴随程序。Chrome 首次加载扩展和账号登录需要你按提示完成。默认连接 dsh；`-Agent workbuddy` 要求 WorkBuddy 的连接检查通过。
 
-如果使用的是独立 `codebuddy.exe` 或其他 ACP 运行时，请先完成它的登录，并显式保存其绝对路径：
+向导会验证本机消息通道、Agent 身份、WebSocket 握手和会话列表。WorkBuddy 还会进行一次无模型提示的 ACP 会话握手，检查登录；不会在 Tandix 历史中创建测试对话。失败会显示原因，必要时打开 CLI 完成登录后重试。报告位于 `%LOCALAPPDATA%\Tandix\install-report.json`，安装日志位于同目录的 `install.log`。无需手动保持 `pnpm start` 运行。
+
+如使用另一个已登录的 ACP 运行时，可在运行向导前设置：
 
 ```powershell
 $env:WORKBUDDY_AGENT_PATH = 'C:\你的实际路径\codebuddy.exe'
-pnpm.cmd native:install
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1 -Agent workbuddy
 ```
 
-当前 Windows 注册流程的自动化测试使用编译器与注册表替身；真实 Windows 环境、真实 CLI 登录和 ACP 握手仍需现场验证。
+CLI 的安装与登录依据[CodeBuddy 官方说明](https://www.codebuddy.cn/docs/cli/installation)、[登录说明](https://www.codebuddy.cn/docs/cli/quickstart)。Codex CLI 的可选安装依据 [OpenAI 官方说明](https://developers.openai.com/cookbook/examples/codex/using_goals_in_codex)。Windows CI 覆盖完整安装、实际代理程序与真实 dsh 连接；ACP 自动化链路使用测试运行时，真实第三方账号登录仍需要用户完成。

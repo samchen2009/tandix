@@ -1,6 +1,6 @@
 /** Discover local runtimes when the native host starts, not only when it is installed. */
 
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { accessSync, constants, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, delimiter, join } from 'node:path'
@@ -128,4 +128,16 @@ fi
 printf '%s\\n' 'Tandix: Node runtime not found; reinstall Node and the Tandix native host.' >&2
 exit 127
 `
+}
+
+/** Stop a child we launched, including the CLI behind a Windows .cmd wrapper. */
+export function stopAgentProcess(child, { platform = process.platform, run = spawnSync } = {}) {
+  if (!child) return
+  try {
+    if (platform === 'win32' && Number.isInteger(child.pid) && child.pid > 0 && child.exitCode === null && child.signalCode == null) {
+      const result = run('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 5000, windowsHide: true })
+      if (result.status === 0) return
+    }
+    child.kill('SIGTERM')
+  } catch { /* The child may have already exited. */ }
 }

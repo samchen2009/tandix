@@ -21,6 +21,7 @@ export type BridgeState = 'connecting' | 'connected' | 'reconnecting' | 'stopped
 
 /** Frame/state sinks owned by the background assembly. */
 export interface BridgeSinks {
+  onError?(message: string): void
   onStateChange(state: BridgeState): void
   onFrame(frame: ServerFrame): void
   onHelloOk(caps: BridgeCaps): void
@@ -115,12 +116,20 @@ export class BridgeClient {
       if (!this.running || generation !== this.generation) return
       if (!this.retryAllowed()) return
       if (!reachable) {
+        this.sinks.onError?.('The agent bridge is not reachable. Rerun the Tandix installer and check its connection report.')
         this.emitState('reconnecting')
         await this.waitBeforeRetry()
         continue
       }
 
-      const socket = new WebSocket(this.url)
+      let socket: WebSocket
+      try { socket = new WebSocket(this.url) }
+      catch (error) {
+        this.sinks.onError?.(error instanceof Error ? error.message : String(error))
+        this.running = false
+        this.emitState('stopped')
+        return
+      }
       this.ws = socket
       // A replacement is an ownership handoff, not a transient transport
       // failure. Yield permanently so two open profiles cannot reconnect in a
@@ -144,6 +153,7 @@ export class BridgeClient {
         return
       }
       if (socket.readyState !== WebSocket.OPEN) {
+        this.sinks.onError?.('The WebSocket connection to the agent failed. Check the Tandix install log.')
         await this.fail(socket)
         continue
       }
@@ -167,6 +177,7 @@ export class BridgeClient {
               resolve(true)
               this.sinks.onHelloOk(frame.caps)
             } else if (frame.t === 'error' || frame.t === 'rpc.result' || frame.t === 'event') {
+              if (frame.t === 'error') this.sinks.onError?.(frame.message)
               this.sinks.onFrame(frame)
             }
             return
@@ -182,7 +193,10 @@ export class BridgeClient {
           this.clearAckTimer()
           resolve(false)
         }, { once: true })
-        this.ackTimer = setTimeout(() => resolve(false), HELLO_ACK_TIMEOUT_MS)
+        this.ackTimer = setTimeout(() => {
+          this.sinks.onError?.('The agent did not accept the WebSocket handshake within 5 seconds.')
+          resolve(false)
+        }, HELLO_ACK_TIMEOUT_MS)
       })
       if (!accepted || !this.running || generation !== this.generation) {
         await this.fail(socket)

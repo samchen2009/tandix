@@ -8,11 +8,11 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
-import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join, parse, resolve } from 'node:path'
+import { delimiter, dirname, isAbsolute, join, parse, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { findCodex, nativeHostWrapper } from './traceforge-runtime-discovery.mjs'
+import { findCodex, nativeHostWrapper, stopAgentProcess } from './traceforge-runtime-discovery.mjs'
 
 const HOST_NAME = 'io.traceforge.bridge'
 const HOST_DIR = join(homedir(), '.dsh', 'traceforge-native-host')
@@ -159,6 +159,8 @@ async function installCodex() {
   copyFileSync(DISCOVERY_SOURCE_PATH, join(HOST_DIR, 'traceforge-runtime-discovery.mjs'))
   writeFileSync(CONFIG_PATH, JSON.stringify({ mode: 'codex-only', runtimePath, workspace,
     codexHome: process.env.CODEX_HOME ?? null,
+    searchPath: process.env.PATH ?? '', dshHome: process.env.DSH_HOME ?? null,
+    codexPath: findCodex(),
     workbuddyAgentPath: process.env.WORKBUDDY_AGENT_PATH ?? null, extensionId }, null, 2) + '\n', { mode: 0o600 })
 
   registerChromeNativeHost({ workspace, extensionId })
@@ -224,13 +226,17 @@ function install() {
   copyFileSync(SOURCE_PATH, HOST_PATH)
   copyFileSync(DISCOVERY_SOURCE_PATH, join(HOST_DIR, 'traceforge-runtime-discovery.mjs'))
   writeFileSync(CONFIG_PATH, JSON.stringify({ cliPath, workspace,
+    reuseExternalDsh: false,
     codexHome: process.env.CODEX_HOME ?? null,
+    searchPath: process.env.PATH ?? '', dshHome: process.env.DSH_HOME ?? null,
+    codexPath: findCodex(),
     workbuddyAgentPath: process.env.WORKBUDDY_AGENT_PATH ?? null, extensionId }, null, 2) + '\n', { mode: 0o600 })
   registerChromeNativeHost({ workspace, extensionId })
   process.stdout.write(`Registered ${HOST_NAME} for extension ${extensionId}. Reload Tandix in chrome://extensions.\n`)
 }
 
 let ownedChild = null
+let ownedBridgeUrl = null
 let ownedChildSandboxDirectory = ''
 let codexBridge = null
 let workbuddyBridge = null
@@ -240,10 +246,11 @@ let ensureQueue = Promise.resolve()
 function stopOwnedChild() {
   if (ownedChild?.pid === undefined) return
   try {
-    if (process.platform === 'win32') ownedChild.kill()
+    if (process.platform === 'win32') stopAgentProcess(ownedChild)
     else process.kill(-ownedChild.pid, 'SIGTERM')
   } catch { /* Already exited. */ }
   ownedChild = null
+  ownedBridgeUrl = null
   ownedChildSandboxDirectory = ''
 }
 
@@ -271,14 +278,17 @@ function shutdown(code = 0) {
   process.exit(code)
 }
 
-async function probeBridge() {
-  const results = await Promise.all(PORTS.map(async port => {
+async function probeBridge(ownedOnly = false) {
+  const candidates = [...new Set([ownedBridgeUrl, ...(ownedOnly ? [] : PORTS.map(port => `ws://127.0.0.1:${port}/ext/bridge`))].filter(Boolean))]
+  const results = await Promise.all(candidates.map(async expected => {
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/ext/bridge-config`, { signal: AbortSignal.timeout(700) })
+      const target = new URL(expected)
+      target.protocol = 'http:'
+      target.pathname = '/ext/bridge-config'
+      const response = await fetch(target, { signal: AbortSignal.timeout(700) })
       if (!response.ok) return null
       const body = await response.json()
-      const expected = `ws://127.0.0.1:${port}/ext/bridge`
-      return body?.wsUrl === expected ? expected : null
+      return body?.wsUrl === expected && (body.backend === undefined || body.backend === 'dsh') ? expected : null
     } catch { return null }
   }))
   return results.find(Boolean) ?? null
@@ -313,7 +323,7 @@ async function ensureBridge(preference = 'auto', requestedSandboxDirectory = '')
   codexBridge?.close()
   codexBridge = null
   const config = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'))
-  const codexPath = findCodex({ savedPath: config.codexPath })
+  const codexPath = preference === 'dsh' ? null : findCodex({ savedPath: config.codexPath })
   if (config.mode === 'codex-only') {
     if (preference === 'dsh') throw new Error('This Tandix installation supports Codex only. Select Codex or Auto in the side panel.')
     if (codexPath === null) throw new Error('Codex CLI was not found. Install Codex and sign in, then reconnect.')
@@ -344,9 +354,9 @@ async function ensureBridge(preference = 'auto', requestedSandboxDirectory = '')
   if (ownedChild !== null && ownedChildSandboxDirectory !== sandboxDirectory) {
     stopOwnedChild()
     const deadline = Date.now() + 5_000
-    while (await probeBridge() !== null && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100))
+    while (await probeBridge(config.reuseExternalDsh === false) !== null && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100))
   }
-  const existing = await probeBridge()
+  const existing = await probeBridge(config.reuseExternalDsh === false)
   if (existing !== null) {
     if (sandboxDirectory !== '' && ownedChild === null) {
       throw new Error('An independently started dsh is already running. Stop it and reconnect so Tandix can apply the sandbox directory.')
@@ -361,46 +371,64 @@ async function ensureBridge(preference = 'auto', requestedSandboxDirectory = '')
     if (!existsSync(config.cliPath)) {
       throw new Error('dsh runtime is missing; reinstall the Tandix native host.')
     }
-    const log = openSync(LOG_PATH, 'a', 0o600)
-    try {
-      const childEnv = { ...process.env, PATH: `${dirname(process.execPath)}:${process.env.PATH ?? '/usr/bin:/bin'}` }
+    {
+      const childEnv = nativeEnvironment(config)
       if (sandboxDirectory === '') delete childEnv.DSH_BROWSER_SESSION_WORKSPACE
       else childEnv.DSH_BROWSER_SESSION_WORKSPACE = sandboxDirectory
-      ownedChild = spawn(process.execPath, [config.cliPath, 'web', '--no-open'], {
+      ownedChild = spawn(process.execPath, [config.cliPath, 'web', '--no-open', '--port', '0'], {
         cwd: config.workspace,
         detached: true,
-        stdio: ['ignore', log, log],
+        stdio: ['ignore', 'pipe', 'pipe'],
         env: childEnv,
       })
       ownedChildSandboxDirectory = sandboxDirectory
-    } finally {
-      closeSync(log)
     }
-    ownedChild.on('error', error => {
+    const started = ownedChild
+    let output = ''
+    const logOutput = chunk => {
+      appendFileSync(LOG_PATH, chunk, { mode: 0o600 })
+      output = (output + chunk).slice(-8192)
+      const url = output.match(/dsh web: (http:\/\/127\.0\.0\.1:\d+)/)?.[1]
+      if (url && ownedChild === started) ownedBridgeUrl = url.replace('http:', 'ws:') + '/ext/bridge'
+    }
+    started.stdout.on('data', logOutput)
+    started.stderr.on('data', logOutput)
+    started.on('error', error => {
+      if (ownedChild !== started) return
       if (!stopping) {
         send({ type: 'error', message: `Could not start dsh web: ${error.message}` })
         shutdown(1)
       }
     })
-    ownedChild.on('exit', () => {
+    started.on('exit', () => {
+      if (ownedChild !== started) return
       if (!stopping) {
         send({ type: 'error', message: 'dsh web exited unexpectedly; inspect ~/.dsh/traceforge-native-host/dsh.log' })
         shutdown(1)
       }
     })
   }
-  const deadline = Date.now() + 20_000
+  const deadline = Date.now() + 60_000
   while (Date.now() < deadline) {
-    const url = await probeBridge()
+    const url = await probeBridge(config.reuseExternalDsh === false)
     if (url !== null) return url
     if (ownedChild === null || ownedChild.exitCode !== null) throw new Error('dsh web exited before the bridge became ready.')
     await new Promise(resolve => setTimeout(resolve, 250))
   }
   stopOwnedChild()
-  throw new Error('dsh web did not expose its bridge within 20 seconds; inspect ~/.dsh/traceforge-native-host/dsh.log')
+  throw new Error('dsh web did not expose its bridge within 60 seconds; inspect ~/.dsh/traceforge-native-host/dsh.log')
 }
 
 function runHost() {
+  // Chrome may have been opened before Node or the agent CLIs were installed.
+  // Restore the installer environment instead of depending on that stale PATH.
+  try {
+    const config = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'))
+    const env = nativeEnvironment(config)
+    process.env.PATH = env.PATH
+    if (env.DSH_HOME) process.env.DSH_HOME = env.DSH_HOME
+    if (typeof config.codexPath === 'string') process.env.CODEX_CLI_PATH = config.codexPath
+  } catch { /* ensureBridge will report a missing or invalid configuration. */ }
   let buffer = Buffer.alloc(0)
   process.stdin.on('data', chunk => {
     buffer = Buffer.concat([buffer, chunk])
@@ -430,8 +458,18 @@ function runHost() {
   process.stdin.resume()
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === SOURCE_PATH) {
+export function nativeEnvironment(config, { env = process.env, nodePath = process.execPath, separator = delimiter } = {}) {
+  const result = { ...env }
+  const previous = config.searchPath || Object.entries(env).find(([key]) => key.toLowerCase() === 'path')?.[1] || ''
+  for (const key of Object.keys(result)) if (key.toLowerCase() === 'path') delete result[key]
+  result.PATH = [dirname(nodePath), previous].filter(Boolean).join(separator)
+  if (typeof config.dshHome === 'string' && config.dshHome) result.DSH_HOME = config.dshHome
+  return result
+}
+
+if (process.argv[1] && realpathSync(resolve(process.argv[1])) === SOURCE_PATH) {
   if (process.argv[2] === 'install') install()
+  else if (process.argv[2] === 'extension-id') process.stdout.write(await waitForExtensionId(resolve(dirname(SOURCE_PATH), '..')))
   else if (process.argv[2] === 'install-codex') await installCodex()
   else runHost()
 }

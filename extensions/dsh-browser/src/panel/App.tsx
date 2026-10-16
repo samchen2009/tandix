@@ -780,6 +780,7 @@ export function App(): React.JSX.Element {
   const [tabAffinity, setTabAffinity] = useState<TabAffinityState | null>(null)
   const [trustedOriginInput, setTrustedOriginInput] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [connectionError, setConnectionError] = useState<string | null>(null)
   const [showSessionPicker, setShowSessionPicker] = useState(false)
   const [loadingSessions, setLoadingSessions] = useState(false)
   const [sessionChanging, setSessionChanging] = useState(false)
@@ -982,7 +983,8 @@ export function App(): React.JSX.Element {
   const [sessionEpoch, setSessionEpoch] = useState(0)
   const lastStateRef = useRef<BridgeState | null>(null)
   useEffect(() => {
-    const offStatus = api.onStatus((next, nextCaps, nextBackend) => {
+    const offStatus = api.onStatus((next, nextCaps, nextBackend, failure) => {
+      setConnectionError(failure ?? null)
       setState(next)
       setCaps(nextCaps)
       setBackend(nextBackend)
@@ -3036,7 +3038,7 @@ export function App(): React.JSX.Element {
           onDismiss={() => { void dismissQuestion(question) }}
         />
       )}
-      {error !== null && <div className="error">{error}</div>}
+      {(error ?? connectionError) !== null && <div className="error">{error ?? connectionError}</div>}
       <footer className="composer">
         <div className="composer-box">
           {selection !== null && (

@@ -1,6 +1,7 @@
 name: Runtime compatibility
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
@@ -42,3 +43,37 @@ jobs:
       - run: pnpm run test
       - run: pnpm run build
       - run: pnpm run test:smoke
+
+  windows-complete-install:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      DSH_HOME: ${{ runner.temp }}\tandix-dsh
+      DSH_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          run_install: false
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: python scripts/tests/test_source_installers.py
+      - run: node --test scripts/tests/tandix-connection-check.test.mjs scripts/tests/traceforge-native-registration.test.mjs scripts/tests/traceforge-workbuddy.test.mjs
+      - name: Use a checkout path containing spaces
+        shell: powershell
+        run: New-Item -ItemType Junction -Path (Join-Path $env:RUNNER_TEMP 'Tandix source') -Target $env:GITHUB_WORKSPACE | Out-Null
+      - name: Complete setup, real Windows proxy and real dsh handshake
+        shell: powershell
+        run: >-
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
+          -SourceRoot "$env:RUNNER_TEMP\Tandix source" -InstallHome "$env:RUNNER_TEMP\TandixInstall"
+          -Agents dsh -Agent dsh -NonInteractive -ExtensionId aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      - name: Show connection report
+        if: always()
+        shell: powershell
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'TandixInstall\install-report.json'
+          if (Test-Path -LiteralPath $report) { Get-Content -LiteralPath $report -Raw }

@@ -15,7 +15,7 @@
 
 ## 命令行安装（源码方式）
 
-先安装 **Google Chrome** 和 **Node.js 22.19+ 或 24+（含 npm）**，重新打开终端。不需要 Git，也不需要全局安装 pnpm；下面的入口会临时使用项目固定的 pnpm 11.7.0，下载源码并构建。依赖和源码下载需要联网。
+macOS 先安装 **Google Chrome** 和 **Node.js 22.19+ 或 24+（含 npm）**。Windows 向导会自动准备 Node.js、私有 pnpm 11.7.0、Chrome、dsh、WorkBuddy/CodeBuddy CLI 和 Codex CLI。不需要 Git。安装与依赖下载需要联网；已有兼容运行时和登录配置会保留。
 
 **macOS**，在终端运行：
 
@@ -33,7 +33,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $installer
 
 也可以直接下载 [macOS 脚本](scripts/install-macos.sh)或 [Windows 脚本](scripts/install-windows.ps1)，保存后运行。脚本不会全局修改 PowerShell 执行策略。
 
-安装后，在 `chrome://extensions` 开启「开发者模式」，选择「加载已解压的扩展程序」，加载脚本打印的目录（默认 `~/.dsh/browser-extension`）。按脚本最后打印的启动命令运行 dsh，在 Tandix 中选择 **dsh** 并配置模型。macOS 如需 Codex，先加载扩展，再按脚本提示注册本机伴随程序。Windows 连接 WorkBuddy 或 Codex 时，也需先加载扩展，再在源码目录运行 `pnpm.cmd native:install` 并重新加载扩展；对应的 CLI 必须已安装并登录。
+首次安装时，在 `chrome://extensions` 开启「开发者模式」，选择「加载已解压的扩展程序」，加载脚本打印的目录（默认 `~/.dsh/browser-extension`）。Windows 向导会等待扩展加载、注册本机伴随程序，并实际检查本机消息、WebSocket 和会话列表；WorkBuddy 还会进行 ACP 会话认证检查。账号未登录时，向导会打开对应 CLI，让你完成登录。不会代替你输入账号密码或模型密钥。
+
+Windows 默认检查并安装三种 Agent，默认使用 **dsh**。完成后重新加载扩展，在侧栏选择 dsh；首次使用还需在设置中选择模型并填写自己的凭据。**不需要手动运行 `pnpm start`**。如主要使用 WorkBuddy，在命令末尾加 `-Agent workbuddy`；仅安装 dsh 可加 `-Agents dsh`。macOS 仍按脚本提示启动 dsh 或注册 Codex 本机伴随程序。
+
+Windows 安装日志和逐项连接报告默认保存在 `%LOCALAPPDATA%\Tandix\install.log`、`%LOCALAPPDATA%\Tandix\install-report.json`。某个 Agent 连接失败时会明确列出原因；所选 Agent 未就绪时安装器返回失败，不会把文件构建完成当成连接成功。Chrome 无法通过系统包管理器自动安装时，向导会打开官方下载页并等待你完成安装。
 
 再次运行入口即可更新托管源码安装；更新后在 Chrome 中重新加载扩展。已有安装目录不由脚本管理时，安装器会停止，避免覆盖。
 
@@ -55,7 +59,7 @@ bash ./install.sh
 
 脚本自动识别 Intel / Apple Silicon，下载并校验对应安装包，再启动安装器。已有兼容 Node 时使用精简包，否则使用自带 Node 的完整包，无需 Git 或 pnpm。Windows 对应下载 Releases 的 `install.ps1`，在 PowerShell 运行 `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1`。
 
-这里指的是 **Releases 中生成的安装引导脚本**；仓库里的 `scripts/install.sh` 和 `scripts/install.ps1` 是下面的源码安装器，需要 Node 和 pnpm。目前上述公开脚本及安装包均待首次发布。
+这里指的是 **Releases 中生成的安装引导脚本**。源码入口与安装包入口不同；上面的 Windows 源码向导已经可用，会自动准备依赖。目前 Releases 中的公开引导脚本及预构建安装包仍待首次发布。
 
 ### macOS 安装包
 
@@ -113,19 +117,17 @@ cd tandix
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
 ```
 
-1. 在 Chrome 打开 `chrome://extensions`，开启「开发者模式」。
-2. 点击「加载已解压的扩展程序」，选择脚本打印的目录，默认是 `$HOME\.dsh\browser-extension`。
-3. 在工程目录运行 `pnpm start`，保持窗口运行。打开 Tandix 侧栏并选择 **dsh**，在设置中配置模型。
+也可以解压 GitHub 的源码 ZIP，双击根目录的 `安装网页助手.cmd`。上述两个入口都会进入同一完整向导，自动安装依赖、构建、注册插件、注册本机连接程序并检查连接。
 
-连接 **WorkBuddy 或 Codex** 时，完成 Chrome 扩展加载后，在源码目录执行：
+按窗口提示完成 Chrome 扩展首次加载和 Agent 登录，然后重新加载扩展。无需另外执行 `pnpm native:install` 或保持 `pnpm start` 运行。向导默认使用 dsh；dsh 的模型与凭据仍在 Tandix 设置中配置。WorkBuddy 接入兼容 ACP 的 CLI，不会复用桌面版账号，见[接入说明](docs/workbuddy-agent.md)。
+
+若要直接验证 WorkBuddy：
 
 ```powershell
-pnpm.cmd native:install
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1 -Agent workbuddy
 ```
 
-该命令在当前用户下注册 Chrome 本机伴随程序，不需要管理员权限。随后在 Chrome 中重新加载 Tandix，再选择对应 Agent。WorkBuddy 需要兼容 ACP 的 CLI，并完成该 CLI 的登录，详见[接入说明](docs/workbuddy-agent.md)；桌面版登录态不会自动复用。此流程无需保持 `pnpm start` 运行。
-
-如果无法自动识别扩展 ID，在 `chrome://extensions` 复制 Tandix 的 ID，然后执行 `node scripts/traceforge-native-host.mjs install --extension-id 你的扩展ID`。
+自动识别扩展 ID 失败时，向导会提示从 Chrome 扩展卡片复制 ID，无需再执行其他注册命令。
 
 ### 更新
 

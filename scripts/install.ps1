@@ -354,7 +354,7 @@ function Install-RemoteWorkspace {
     New-Item -ItemType Directory -Path $ManagedRoot -Force | Out-Null
     New-Item -ItemType File -Path $ManagedMarker -Force | Out-Null
     Sync-Directory -Source $extracted[0].FullName -Destination $ManagedRoot `
-      -ExcludeName @('node_modules', '.managed-by-install-sh')
+      -ExcludeName @('node_modules', '.managed-by-install-sh', 'workspace', 'output', '.agents', '.codex')
   } finally {
     Remove-Item -LiteralPath $bootstrap -Recurse -Force -ErrorAction SilentlyContinue
   }
@@ -377,6 +377,24 @@ if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
 }
 
 $Root = Get-WorkspaceRoot
+if ($env:TANDIX_WINDOWS_BUILD_ONLY -ne '1') {
+  $wizardTemp = $null
+  try {
+    if ($Root) { $wizard = Join-Path $Root 'scripts\install-windows.ps1' }
+    else {
+      $wizardTemp = Join-Path ([IO.Path]::GetTempPath()) ('tandix-wizard-' + [guid]::NewGuid().ToString('N'))
+      New-Item -ItemType Directory -Path $wizardTemp | Out-Null
+      $wizard = Join-Path $wizardTemp 'install-windows.ps1'
+      [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+      Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/samchen2009/tandix/main/scripts/install-windows.ps1' -OutFile $wizard
+    }
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $wizard
+    $wizardCode = $LASTEXITCODE
+  } finally {
+    if ($wizardTemp) { Remove-Item -LiteralPath $wizardTemp -Recurse -Force -ErrorAction SilentlyContinue }
+  }
+  exit $wizardCode
+}
 if (-not $Root) { Install-RemoteWorkspace }
 
 $Ext = Join-Path $Root 'extensions\dsh-browser'
@@ -445,9 +463,9 @@ Invoke-Quiet -WorkingDirectory $WebProfileDir -Command 'pnpm' `
 
 # The direct pnpm registration above bypasses dsh's bundle-roster update.
 $ProfileManifest = Get-Content -LiteralPath $WebProfileManifest -Raw -Encoding UTF8 | ConvertFrom-Json
-$Bundles = @($ProfileManifest.dsh.profile.bundles) | Where-Object { $_ -ne $LegacyPlugin }
+$Bundles = @(@($ProfileManifest.dsh.profile.bundles) | Where-Object { $_ -and $_ -ne $LegacyPlugin })
 if ($Bundles -notcontains $BridgePlugin) { $Bundles += $BridgePlugin }
-$ProfileManifest.dsh.profile.bundles = $Bundles
+$ProfileManifest.dsh.profile.bundles = @($Bundles | Select-Object -Unique)
 $ProfileJson = ($ProfileManifest | ConvertTo-Json -Depth 20) + "`n"
 [System.IO.File]::WriteAllText(
   $WebProfileManifest,
@@ -485,6 +503,12 @@ $InstallInfoJson = ($InstallInfo | ConvertTo-Json -Depth 3) + "`n"
   (Join-Path $DistDir 'install-info.json'),
   $InstallInfoJson,
   (New-Object System.Text.UTF8Encoding $false))
+
+if ($env:TANDIX_WINDOWS_BUILD_ONLY -eq '1') {
+  Write-Host "Built extension: $DistDir"
+  Write-Host 'Continuing with agent runtime setup and connection checks...'
+  exit 0
+}
 
 $ClipboardReady = Set-ClipboardText $DistDir
 $ChromeOpened = Start-ExtensionsPage (Get-BrowserPath)

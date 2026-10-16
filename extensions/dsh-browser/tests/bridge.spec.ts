@@ -41,6 +41,30 @@ afterEach(() => {
 })
 
 describe('BridgeClient connection probe', () => {
+  it('reports an unresponsive hello handshake', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    const onError = vi.fn()
+    const client = new BridgeClient({ onError, onStateChange: () => {}, onFrame: () => {}, onHelloOk: () => {} })
+    client.start('ws://127.0.0.1:3080/ext/bridge', '')
+    await vi.advanceTimersByTimeAsync(0)
+    FakeWebSocket.instances[0]!.open()
+    await vi.advanceTimersByTimeAsync(5001)
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining('handshake within 5 seconds'))
+    client.stop()
+  })
+
+  it('reports malformed WebSocket addresses without an unhandled rejection', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('WebSocket', class { constructor() { throw new Error('invalid WebSocket URL') } })
+    const onError = vi.fn()
+    const client = new BridgeClient({ onError, onStateChange: () => {}, onFrame: () => {}, onHelloOk: () => {} })
+    client.start('not-a-url', '')
+    await vi.advanceTimersByTimeAsync(0)
+    expect(client.state).toBe('stopped')
+    expect(onError).toHaveBeenCalledWith('invalid WebSocket URL')
+  })
+
   it('waits without opening a WebSocket while the local bridge is unavailable', async () => {
     vi.useFakeTimers()
     vi.stubGlobal('WebSocket', FakeWebSocket)
