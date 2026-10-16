@@ -18,7 +18,7 @@ $npm = Get-Command npm.cmd -CommandType Application -ErrorAction SilentlyContinu
 if (-not $node -or -not $npm) {
   throw 'Install Node.js 22.19+ or 24+ with npm, reopen PowerShell, then retry: https://nodejs.org/en/download'
 }
-& $node.Source -e 'const [major,minor]=process.versions.node.split(".").map(Number);process.exit((major===22&&minor>=19)||major>=24?0:1)'
+& $node.Source -e "const [major,minor]=process.versions.node.split('.').map(Number);process.exit((major===22&&minor>=19)||major>=24?0:1)"
 if ($LASTEXITCODE -ne 0) { throw 'Node.js 22.19+ or 24+ is required.' }
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
