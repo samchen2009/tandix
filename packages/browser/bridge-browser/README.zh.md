@@ -24,18 +24,18 @@ dsh 的**浏览器操作桥**：在宿主 webserver 上挂载一个 **token 认�
 远程安装器会下载一个由脚本托管的 workspace，构建插件，并将它的官方 bundle 注册到本机 dsh 的 `web` profile。该方式无需 Git，也无需提前 clone：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install/source-unix.sh | bash
 cd ~/.dsh/dsh-browser && pnpm start
 ```
 
 Windows 请改用 PowerShell 安装器：
 
 ```powershell
-$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install/source-windows.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 cd $HOME\.dsh\dsh-browser; pnpm start
 ```
 
-开发者也可以 clone 仓库，在 checkout 中依次运行 `./scripts/install.sh` 和 `pnpm start`。本地模式直接使用当前分支，不会下载或覆盖源码。两种安装模式都会注册同一个 profile bundle；构建工具只从选定的 workspace 解析，绝不读取父 checkout 或父目录的 `node_modules`。
+开发者也可以 clone 仓库，在 checkout 中依次运行 `./scripts/install/source-unix.sh` 和 `pnpm start`。本地模式直接使用当前分支，不会下载或覆盖源码。两种安装模式都会注册同一个 profile bundle；构建工具只从选定的 workspace 解析，绝不读取父 checkout 或父目录的 `node_modules`。
 
 当前工作区固定使用 dsh 0.1.5-rc.2，也是最低支持版本；不再支持旧版 DSH：
 

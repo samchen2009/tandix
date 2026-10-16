@@ -82,6 +82,12 @@ Protected browser pages cannot host a content script. TraceForge still records b
 
 The current Chat → Run agent-skill path is separate from the deterministic TaskSpec compiler below. It uses the provider-neutral contracts and prompts in [agent-skills.md](agent-skills.md): an AI drafts semantic, parameterized instructions from selected chat/recording evidence, the user confirms the draft, and the connected agent executes a concrete task against a fresh browser snapshot. The same prompt files are exposed by the CLI. This path does not claim deterministic replay or verified selector generation.
 
+## Webpage file-task API
+
+The Chrome extension exposes a versioned external Port (`tandix-web-v1`) to HTTPS and loopback development pages. An extension-owned options page grants and revokes exact origins; web callers cannot edit grants or proxy arbitrary gateway methods. The SDK chunks PDF/image uploads, starts an isolated Codex session, and receives only that task's progress and terminal text/JSON result. These sessions have separate task workspaces, do not inherit the side panel's browser target or Tandix skill permissions, and are omitted from its saved session list. Local Agent tool approvals remain in the trusted side-panel UI. The task directory limits writes, not all filesystem reads; the local Agent's configuration still controls its tools.
+
+Active webpage tasks hold bridge leases alongside side-panel ports. A closed panel therefore does not stop startup or the established connection for an active webpage task. Navigation/disconnection, revocation, timeout, and connection loss fail or cancel the task instead of replaying it. See [the complete protocol, limits and SDK examples](web-api.md).
+
 ## Agent approvals
 
 Browser read/action approvals remain enforced by the extension's background service worker. Local operations have a separate path: the dsh bridge forwards extension-owned `approval/request` waterfalls to the panel, then returns `allowed-once` or `rejected` to the same event ID; unanswered requests expire without a grant. The Codex app-server adapter forwards command, file-change, and permission approval requests through the same panel event UI and replies to the original JSON-RPC request. Codex supports one-request or session-scoped grants; dsh sandbox escalation is one-call only. Pending requests are replayed when the side panel reopens, and connection loss clears the UI rather than implying consent. Browser-wide access never grants filesystem or network privileges.

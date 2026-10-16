@@ -60,13 +60,13 @@ The recommended zero-configuration command does not require Git or a local clone
 1. **Build and install the extension**:
 
    ```sh
-   curl -fsSL https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install.sh | bash
+   curl -fsSL https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install/source-unix.sh | bash
    ```
 
    On Windows, run this in PowerShell instead:
 
    ```powershell
-   $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+   $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install/source-windows.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
    ```
 
    The script downloads a managed workspace to `~/.dsh/dsh-browser`, builds the bridge plugin, registers its official bundle in the local dsh `web` profile, builds the extension, copies the output to the stable directory `~/.dsh/browser-extension`, and opens `chrome://extensions`. Enable Developer mode, choose Load unpacked, and select the extension directory. Running the command again updates the managed installation.
@@ -76,10 +76,10 @@ The recommended zero-configuration command does not require Git or a local clone
    ```sh
    git clone https://github.com/samchen2009/tandix.git
    cd dsh-browser
-   ./scripts/install.sh
+   ./scripts/install/source-unix.sh
    ```
 
-   Windows checkouts run `.\scripts\install.ps1` instead. Paths containing spaces are supported: the installer uses a profile-local directory junction instead of putting the absolute checkout path in pnpm's link spec.
+   Windows checkouts run `.\scripts\install\source-windows.ps1` instead. Paths containing spaces are supported: the installer uses a profile-local directory junction instead of putting the absolute checkout path in pnpm's link spec.
 
 2. **Start dsh with the bridge plugin mounted**. Use either the workspace-pinned runtime:
 

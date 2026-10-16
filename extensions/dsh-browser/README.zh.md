@@ -68,13 +68,13 @@ pnpm --filter dsh-browser-extension run test
 1. **构建并安装扩展**：
 
    ```sh
-   curl -fsSL https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install.sh | bash
+   curl -fsSL https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install/source-unix.sh | bash
    ```
 
    Windows 请改在 PowerShell 中运行：
 
    ```powershell
-   $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+   $s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install/source-windows.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
    ```
 
    脚本会把托管 workspace 下载到 `~/.dsh/dsh-browser`，构建桥插件，把它的官方 bundle 注册到本机 dsh 的 `web` profile，再构建扩展并把产物复制到稳定目录 `~/.dsh/browser-extension`，然后打开 `chrome://extensions`。开启开发者模式，选择「加载已解压的扩展程序」，加载扩展目录。再次运行该命令会更新托管安装。
@@ -84,10 +84,10 @@ pnpm --filter dsh-browser-extension run test
    ```sh
    git clone https://github.com/samchen2009/tandix.git
    cd dsh-browser
-   ./scripts/install.sh
+   ./scripts/install/source-unix.sh
    ```
 
-   Windows checkout 请运行 `.\scripts\install.ps1`。路径可以包含空格：安装器通过 profile 内的目录联接注册插件，不会把 checkout 的绝对路径写入 pnpm link 规格。
+   Windows checkout 请运行 `.\scripts\install\source-windows.ps1`。路径可以包含空格：安装器通过 profile 内的目录联接注册插件，不会把 checkout 的绝对路径写入 pnpm link 规格。
 
 2. **启动 dsh 并挂载桥插件**。可以使用 workspace 固定的运行时：
 

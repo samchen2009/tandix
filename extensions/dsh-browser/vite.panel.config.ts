@@ -10,9 +10,12 @@ export default defineConfig({
     outDir,
     emptyOutDir: false,
     rollupOptions: {
-      input: resolve(import.meta.dirname, 'panel/index.html'),
+      input: [resolve(import.meta.dirname, 'panel/index.html'), resolve(import.meta.dirname, 'web-access/index.html'),
+        resolve(import.meta.dirname, 'src/web-api/client.ts')],
+      preserveEntrySignatures: 'strict',
       output: {
-        entryFileNames: 'panel/assets/[name].js',
+        entryFileNames: (chunk) => chunk.facadeModuleId?.endsWith('/web-api/client.ts')
+          ? 'web-api/tandix.js' : 'panel/assets/[name].js',
         chunkFileNames: 'panel/assets/[name]-[hash].js',
         assetFileNames: 'panel/assets/[name][extname]',
       },

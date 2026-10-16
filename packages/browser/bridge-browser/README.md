@@ -24,18 +24,18 @@ Workspace grouping is best-effort. If the composition has no workspace domain, d
 The remote installer downloads an installer-managed workspace, builds the plugin, and registers its official bundle in the local dsh `web` profile. It requires neither Git nor a local clone:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install/source-unix.sh | bash
 cd ~/.dsh/dsh-browser && pnpm start
 ```
 
 On Windows, run the PowerShell installer instead:
 
 ```powershell
-$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
+$s="$env:TEMP\dsh-install.ps1"; irm https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install/source-windows.ps1 -OutFile $s; powershell -NoProfile -ExecutionPolicy Bypass -File $s
 cd $HOME\.dsh\dsh-browser; pnpm start
 ```
 
-Developers can instead clone the repository and run `./scripts/install.sh` followed by `pnpm start` from that checkout. The local mode uses the current branch without downloading or overwriting source files. Both installation modes register the same profile bundle; build tools resolve only from the selected workspace and never from a parent checkout or parent `node_modules` directory.
+Developers can instead clone the repository and run `./scripts/install/source-unix.sh` followed by `pnpm start` from that checkout. The local mode uses the current branch without downloading or overwriting source files. Both installation modes register the same profile bundle; build tools resolve only from the selected workspace and never from a parent checkout or parent `node_modules` directory.
 
 The workspace pins dsh 0.1.5-rc.2, the minimum supported runtime. Older DSH releases are not supported:
 

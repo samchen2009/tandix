@@ -17,12 +17,12 @@
 在仓库根目录执行：
 
 ```sh
-pnpm activity prompt --history scripts/fixtures/activity-long-history.json
-pnpm activity index --history scripts/fixtures/activity-long-history.json --offset 0 --limit 20
-pnpm activity index --history scripts/fixtures/activity-long-history.json --offset 20 --limit 20
-pnpm activity search --history scripts/fixtures/activity-long-history.json --query 'report.csv'
-pnpm activity events --history scripts/fixtures/activity-long-history.json --ids e09,e13,e22,e23,e25
-pnpm activity validate --history scripts/fixtures/activity-long-history.json --report scripts/fixtures/activity-long-history.inference.json
+pnpm activity prompt --history scripts/tests/fixtures/activity-long-history.json
+pnpm activity index --history scripts/tests/fixtures/activity-long-history.json --offset 0 --limit 20
+pnpm activity index --history scripts/tests/fixtures/activity-long-history.json --offset 20 --limit 20
+pnpm activity search --history scripts/tests/fixtures/activity-long-history.json --query 'report.csv'
+pnpm activity events --history scripts/tests/fixtures/activity-long-history.json --ids e09,e13,e22,e23,e25
+pnpm activity validate --history scripts/tests/fixtures/activity-long-history.json --report scripts/tests/fixtures/activity-long-history.inference.json
 pnpm test:activity
 ```
 
@@ -34,7 +34,7 @@ CLI 接受浏览器录制的 JSON / JSONL、`tandix.skill-extraction-evidence/v1
 
 ## 本次试验的推理
 
-输入为明确标注 `synthetic: true` 的 40 条合成事件，跨度 5 天，混有新闻、通知、报销、同名文件、失败重试和隔天修正。输入没有预设任务归属。当前 Agent 阅读索引、检索同名文件、回查关键事件后，写下示例报告 `scripts/fixtures/activity-long-history.inference.json`：
+输入为明确标注 `synthetic: true` 的 40 条合成事件，跨度 5 天，混有新闻、通知、报销、同名文件、失败重试和隔天修正。输入没有预设任务归属。当前 Agent 阅读索引、检索同名文件、回查关键事件后，写下示例报告 `scripts/tests/fixtures/activity-long-history.inference.json`：
 
 | 候选活动 | 关联依据 | 可确认结果与缺口 |
 | --- | --- | --- |

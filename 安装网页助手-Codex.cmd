@@ -13,25 +13,25 @@ if errorlevel 1 goto download_node
 set "NODE_EXE=node"
 goto have_node
 :download_node
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\ensure-tandix-node-win.ps1" -PackageRoot "%~dp0"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install\node-windows.ps1" -PackageRoot "%~dp0"
 if errorlevel 1 goto missing_node
 set "NODE_EXE=%~dp0runtime\node-win-x64\node.exe"
 if exist "%~dp0runtime\node-win-arm64\node.exe" set "NODE_EXE=%~dp0runtime\node-win-arm64\node.exe"
 :have_node
-"%NODE_EXE%" "%~dp0scripts\install-codex-only.mjs" prepare
+"%NODE_EXE%" "%~dp0scripts\install\codex.mjs" prepare
 if errorlevel 1 goto failed
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\open-tandix-chrome-win.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\install\open-chrome-windows.ps1"
 if errorlevel 1 echo Automatic Chrome launch failed. Follow the manual steps below.
 echo.
 echo Open Chrome at chrome://extensions, enable Developer mode, and click Load unpacked.
 echo Choose the Chrome extension folder printed above, then return here.
 pause
-"%NODE_EXE%" "%~dp0scripts\install-codex-only.mjs" register
+"%NODE_EXE%" "%~dp0scripts\install\codex.mjs" register
 if not errorlevel 1 goto done
 echo.
 echo Automatic extension ID detection failed. Copy the Tandix ID from chrome://extensions.
 set /p "EXT_ID=Extension ID: "
-"%NODE_EXE%" "%~dp0scripts\install-codex-only.mjs" register "%EXT_ID%"
+"%NODE_EXE%" "%~dp0scripts\install\codex.mjs" register "%EXT_ID%"
 if errorlevel 1 goto failed
 :done
 echo.

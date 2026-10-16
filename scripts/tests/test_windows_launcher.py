@@ -10,7 +10,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[2]
-WIZARD_URL = 'https://raw.githubusercontent.com/samchen2009/tandix/main/scripts/install-windows.ps1'
+WIZARD_URL = 'https://raw.githubusercontent.com/samchen2009/tandix/main/scripts/install/windows.ps1'
 FIXTURE = r'''param([switch]$Help, [string]$Agent, [string]$InstallHome)
 $PSBoundParameters | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:TEST_WORK 'arguments.json') -Encoding UTF8
 exit ([int]$env:TEST_EXIT_CODE)
@@ -44,9 +44,9 @@ class WindowsDoubleClickLauncher(unittest.TestCase):
                 source = source.replace(WIZARD_URL, f'http://127.0.0.1:{server.server_port}/wizard.ps1')
                 launcher.write_bytes(source.replace('\n', '\r\n').encode('ascii'))
                 if local:
-                    scripts = work / 'scripts'
-                    scripts.mkdir()
-                    (scripts / 'install-windows.ps1').write_text(FIXTURE)
+                    scripts = work / 'scripts/install'
+                    scripts.mkdir(parents=True)
+                    (scripts / 'windows.ps1').write_text(FIXTURE)
                 env = {**os.environ, 'TEMP': str(work), 'TEST_WORK': str(work),
                        'TEST_LAUNCHER': str(launcher), 'TEST_EXIT_CODE': str(child_status),
                        'TANDIX_INSTALL_NO_PAUSE': '1'}

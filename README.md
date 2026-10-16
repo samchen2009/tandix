@@ -15,6 +15,8 @@ Task inference from long, interleaved histories is currently an experimental CLI
 
 ## Command-line installation (from source)
 
+Scripts are grouped by purpose; see [scripts/README.md](scripts/README.md) for installers, runtime components, and release tools. For everyday installation, use the double-click launcher in the repository root.
+
 **Windows, without commands:** download [安装网页助手.cmd](https://raw.githubusercontent.com/samchen2009/tandix/main/%E5%AE%89%E8%A3%85%E7%BD%91%E9%A1%B5%E5%8A%A9%E6%89%8B.cmd), save it, and double-click. If your browser displays the script, right-click the link and choose **Save link as**, keeping the `.cmd` extension. This single file downloads the latest wizard, detects architecture and existing tools, installs missing dependencies, builds the extension, registers its companion, and checks connections. No source ZIP, Node, pnpm, or Git is needed beforehand. Inside a source checkout, the same launcher uses that checkout's local code.
 
 On macOS, install **Google Chrome** and **Node.js 22.19+ or 24+ with npm**. The Windows wizard automatically prepares Node.js, private pnpm 11.7.0, Chrome, dsh, WorkBuddy/CodeBuddy CLI and Codex CLI. No Git is required. Downloads require internet access. Compatible existing runtimes and sign-in settings are preserved.
@@ -22,18 +24,18 @@ On macOS, install **Google Chrome** and **Node.js 22.19+ or 24+ with npm**. The 
 **macOS**, in Terminal:
 
 ```bash
-curl -fL https://raw.githubusercontent.com/samchen2009/tandix/main/scripts/install-macos.sh -o install-macos.sh && bash ./install-macos.sh
+curl -fL https://raw.githubusercontent.com/samchen2009/tandix/main/scripts/install/macos.sh -o install-macos.sh && bash ./install-macos.sh
 ```
 
 **Windows**, in PowerShell 5.1 or newer:
 
 ```powershell
 $installer = Join-Path $env:TEMP 'tandix-install-windows.ps1'
-Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Uri 'https://raw.githubusercontent.com/samchen2009/tandix/main/scripts/install-windows.ps1' -OutFile $installer
+Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Uri 'https://raw.githubusercontent.com/samchen2009/tandix/main/scripts/install/windows.ps1' -OutFile $installer
 powershell -NoProfile -ExecutionPolicy Bypass -File $installer
 ```
 
-Alternatively, download the [macOS script](scripts/install-macos.sh) or [Windows script](scripts/install-windows.ps1) and run the saved file. The scripts do not change the global PowerShell execution policy.
+Alternatively, download the [macOS script](scripts/install/macos.sh) or [Windows script](scripts/install/windows.ps1) and run the saved file. The scripts do not change the global PowerShell execution policy.
 
 On the first install, enable **Developer mode** in `chrome://extensions`, choose **Load unpacked**, and select the printed folder (normally `~/.dsh/browser-extension`). Windows waits for extension loading, registers the native companion and checks native messaging, WebSocket authentication and session listing. WorkBuddy also gets an ACP session authentication check. If sign-in is needed, the wizard opens the CLI for you to complete it. It never supplies your account passwords or model credentials.
 
@@ -97,7 +99,7 @@ Google Chrome, Git, Node.js **22.19+ or 24+**, and pnpm are required. macOS also
 ```bash
 git clone https://github.com/samchen2009/tandix.git
 cd tandix
-bash scripts/install.sh
+bash scripts/install/source-unix.sh
 ```
 
 The installer builds the browser bridge and extension. Then:
@@ -116,7 +118,7 @@ Run in PowerShell:
 ```powershell
 git clone https://github.com/samchen2009/tandix.git
 cd tandix
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install\source-windows.ps1
 ```
 
 Alternatively, extract GitHub's source ZIP and double-click `安装网页助手.cmd`. Both entry points use the complete setup wizard: dependencies, source build, plugin registration, native companion registration and actual connection checks.
@@ -126,7 +128,7 @@ Follow the first-time Chrome extension-loading and sign-in prompts, then reload 
 To require a working WorkBuddy connection:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1 -Agent workbuddy
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install\windows.ps1 -Agent workbuddy
 ```
 
 If extension ID detection fails, the wizard prompts for the ID from Chrome's extension card.
@@ -150,7 +152,7 @@ pnpm test
 pnpm build
 ```
 
-The extension is built into `extensions/dsh-browser/dist`; load that directory directly during development. See [architecture](docs/architecture.md) and [skill format](docs/agent-skills.md).
+The extension is built into `extensions/dsh-browser/dist`; load that directory directly during development. See [architecture](docs/architecture.md), [skill format](docs/agent-skills.md), and the [webpage API](docs/web-api.md) (prompt + PDF/images → text or JSON, without an open side panel).
 
 ## Acknowledgements and license
 

@@ -15,6 +15,8 @@
 
 ## 命令行安装（源码方式）
 
+脚本已按用途分类，入口与打包工具见 [scripts/README.md](scripts/README.md)。普通安装使用根目录的中文双击入口即可。
+
 **Windows 免命令安装：**下载 [安装网页助手.cmd](https://raw.githubusercontent.com/samchen2009/tandix/main/%E5%AE%89%E8%A3%85%E7%BD%91%E9%A1%B5%E5%8A%A9%E6%89%8B.cmd)，保存后双击即可。如果浏览器显示脚本文本，右键链接选择「链接另存为」，保留 `.cmd` 后缀。只需这一个文件，无需下载整个源码或预装 Node、pnpm、Git。脚本会自动拉取最新安装向导，检测系统架构和已有组件，安装缺失依赖、构建扩展、注册本机伴随程序并检查连接。源码目录内的同名入口优先使用该目录的本地代码。
 
 macOS 先安装 **Google Chrome** 和 **Node.js 22.19+ 或 24+（含 npm）**。Windows 向导会自动准备 Node.js、私有 pnpm 11.7.0、Chrome、dsh、WorkBuddy/CodeBuddy CLI 和 Codex CLI。不需要 Git。安装与依赖下载需要联网；已有兼容运行时和登录配置会保留。
@@ -22,18 +24,18 @@ macOS 先安装 **Google Chrome** 和 **Node.js 22.19+ 或 24+（含 npm）**。
 **macOS**，在终端运行：
 
 ```bash
-curl -fL https://raw.githubusercontent.com/samchen2009/tandix/main/scripts/install-macos.sh -o install-macos.sh && bash ./install-macos.sh
+curl -fL https://raw.githubusercontent.com/samchen2009/tandix/main/scripts/install/macos.sh -o install-macos.sh && bash ./install-macos.sh
 ```
 
 **Windows**，在 PowerShell 5.1 或更高版本运行：
 
 ```powershell
 $installer = Join-Path $env:TEMP 'tandix-install-windows.ps1'
-Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Uri 'https://raw.githubusercontent.com/samchen2009/tandix/main/scripts/install-windows.ps1' -OutFile $installer
+Invoke-WebRequest -UseBasicParsing -ErrorAction Stop -Uri 'https://raw.githubusercontent.com/samchen2009/tandix/main/scripts/install/windows.ps1' -OutFile $installer
 powershell -NoProfile -ExecutionPolicy Bypass -File $installer
 ```
 
-也可以直接下载 [macOS 脚本](scripts/install-macos.sh)或 [Windows 脚本](scripts/install-windows.ps1)，保存后运行。脚本不会全局修改 PowerShell 执行策略。
+也可以直接下载 [macOS 脚本](scripts/install/macos.sh)或 [Windows 脚本](scripts/install/windows.ps1)，保存后运行。脚本不会全局修改 PowerShell 执行策略。
 
 首次安装时，在 `chrome://extensions` 开启「开发者模式」，选择「加载已解压的扩展程序」，加载脚本打印的目录（默认 `~/.dsh/browser-extension`）。Windows 向导会等待扩展加载、注册本机伴随程序，并实际检查本机消息、WebSocket 和会话列表；WorkBuddy 还会进行 ACP 会话认证检查。账号未登录时，向导会打开对应 CLI，让你完成登录。不会代替你输入账号密码或模型密钥。
 
@@ -97,7 +99,7 @@ bash ./install.sh
 ```bash
 git clone https://github.com/samchen2009/tandix.git
 cd tandix
-bash scripts/install.sh
+bash scripts/install/source-unix.sh
 ```
 
 安装器构建浏览器桥和扩展。随后：
@@ -116,7 +118,7 @@ bash scripts/install.sh
 ```powershell
 git clone https://github.com/samchen2009/tandix.git
 cd tandix
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install\source-windows.ps1
 ```
 
 也可以解压 GitHub 的源码 ZIP，双击根目录的 `安装网页助手.cmd`。上述两个入口都会进入同一完整向导，自动安装依赖、构建、注册插件、注册本机连接程序并检查连接。
@@ -126,7 +128,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install.ps1
 若要直接验证 WorkBuddy：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1 -Agent workbuddy
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install\windows.ps1 -Agent workbuddy
 ```
 
 自动识别扩展 ID 失败时，向导会提示从 Chrome 扩展卡片复制 ID，无需再执行其他注册命令。
@@ -150,7 +152,7 @@ pnpm test
 pnpm build
 ```
 
-构建产物在 `extensions/dsh-browser/dist`，可直接加载为 Chrome 扩展。另见[架构说明](docs/architecture.md)和 [Skill 格式](docs/agent-skills.md)。
+构建产物在 `extensions/dsh-browser/dist`，可直接加载为 Chrome 扩展。另见[架构说明](docs/architecture.md)、[Skill 格式](docs/agent-skills.md)及[网页调用接口](docs/web-api.md)（prompt + PDF / 多张图片 → 文本或 JSON，无需展开侧栏）。
 
 ## 致谢与许可
 

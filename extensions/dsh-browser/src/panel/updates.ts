@@ -10,7 +10,7 @@ export const UPDATE_MANIFEST_URL =
   'https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/extensions/dsh-browser/manifest.json'
 
 export const UPDATE_COMMAND =
-  'curl -fsSL https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install.sh | bash'
+  'curl -fsSL https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install/source-unix.sh | bash'
 
 /**
  * install.ps1 carries a UTF-8 BOM so Windows PowerShell renders its Chinese half, and a
@@ -18,7 +18,7 @@ export const UPDATE_COMMAND =
  */
 export const WINDOWS_UPDATE_COMMAND =
   '$s="$env:TEMP\\dsh-install.ps1"; '
-  + 'irm https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install.ps1 -OutFile $s; '
+  + 'irm https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install/source-windows.ps1 -OutFile $s; '
   + 'powershell -NoProfile -ExecutionPolicy Bypass -File $s'
 
 export interface ExtensionUpdateResult {
@@ -85,9 +85,9 @@ function powerShellQuote(value: string): string {
  */
 export function checkoutInstallCommand(sourceRoot: string): string {
   if (isWindowsPath(sourceRoot)) {
-    return `cd ${powerShellQuote(sourceRoot)}; .\\scripts\\install.ps1`
+    return `cd ${powerShellQuote(sourceRoot)}; .\\scripts\\install\\source-windows.ps1`
   }
-  return `cd ${shellQuote(sourceRoot)} && ./scripts/install.sh`
+  return `cd ${shellQuote(sourceRoot)} && ./scripts/install/source-unix.sh`
 }
 
 /**

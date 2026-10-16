@@ -4,7 +4,7 @@ chcp 65001 >nul
 title Tandix automatic setup
 set "TANDIX_SETUP_EXIT=1"
 set "TANDIX_SETUP_TEMP="
-set "TANDIX_SETUP_SCRIPT=%~dp0scripts\install-windows.ps1"
+set "TANDIX_SETUP_SCRIPT=%~dp0scripts\install\windows.ps1"
 set "TANDIX_SETUP_POWERSHELL=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
 if not exist "%TANDIX_SETUP_POWERSHELL%" (
   echo Windows PowerShell 5.1 is required. Run this file on Windows 10 or newer.
@@ -23,7 +23,7 @@ if errorlevel 1 (
 )
 set "TANDIX_SETUP_SCRIPT=%TANDIX_SETUP_TEMP%\install-windows.ps1"
 echo Downloading the latest Tandix setup wizard...
-"%TANDIX_SETUP_POWERSHELL%" -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/samchen2009/tandix/main/scripts/install-windows.ps1' -OutFile $env:TANDIX_SETUP_SCRIPT } catch { Write-Host ('Download failed: ' + $_.Exception.Message); exit 1 }"
+"%TANDIX_SETUP_POWERSHELL%" -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing -Uri 'https://raw.githubusercontent.com/samchen2009/tandix/main/scripts/install/windows.ps1' -OutFile $env:TANDIX_SETUP_SCRIPT } catch { Write-Host ('Download failed: ' + $_.Exception.Message); exit 1 }"
 if errorlevel 1 goto finish
 
 :run

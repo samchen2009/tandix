@@ -17,11 +17,11 @@ class BootstrapSelection(unittest.TestCase):
             with ZipFile(payload, 'w') as z:
                 z.writestr('网页助手_Tandix_Codex/安装网页助手-Mac.command', '#!/bin/bash\nexit 99\n')
             sha = hashlib.sha256(payload.read_bytes()).hexdigest()
-            template = (ROOT / 'scripts/install-tandix-mac.sh.in').read_text()
+            template = (ROOT / 'scripts/release/templates/bootstrap-macos.sh.in').read_text()
             for key in ('MAC_X64', 'MAC_ARM64', 'MAC_LITE'):
                 template = template.replace(f'__{key}_URL__', 'https://example.invalid/' + key)
                 template = template.replace(f'__{key}_SHA__', sha if not corrupt else '0' * 64)
-            installer = work / 'install.sh'
+            installer = work / 'source-unix.sh'
             installer.write_text(template)
             bin_dir = work / 'bin'
             bin_dir.mkdir()

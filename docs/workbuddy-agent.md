@@ -30,14 +30,14 @@ WORKBUDDY_AGENT_PATH=/absolute/path/to/agent pnpm native:install
 - 图片支持取决于 ACP 运行时声明的能力；视频、持久目标和会话删除尚未接入。
 - 指定沙箱目录时会拒绝连接，因为当前 ACP 适配器还不能保证该目录的访问边界。
 - 授权仅映射本次允许/拒绝，不授予永久权限。浏览器回调使用独立凭据及会话路由。
-- `node --test scripts/tests/traceforge-workbuddy.test.mjs` 使用协议测试替身，覆盖 ACP 子进程 → MCP → WebSocket 浏览器工具 → 回复链路，不能代替真实账号和真实浏览器验收。
+- `node --test scripts/tests/workbuddy.test.mjs` 使用协议测试替身，覆盖 ACP 子进程 → MCP → WebSocket 浏览器工具 → 回复链路，不能代替真实账号和真实浏览器验收。
 
 ## Windows 完整安装与修复
 
 更新源码后，在源码根目录运行下面的向导，或双击 `安装网页助手.cmd`：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1 -Agent workbuddy
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install\windows.ps1 -Agent workbuddy
 ```
 
 向导会自动准备 Node、私有 pnpm、dsh、CodeBuddy CLI、Codex CLI，构建扩展并注册本机伴随程序。Chrome 首次加载扩展和账号登录需要你按提示完成。默认连接 dsh；`-Agent workbuddy` 要求 WorkBuddy 的连接检查通过。
@@ -48,7 +48,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps
 
 ```powershell
 $env:WORKBUDDY_AGENT_PATH = 'C:\你的实际路径\codebuddy.exe'
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1 -Agent workbuddy
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install\windows.ps1 -Agent workbuddy
 ```
 
 CLI 的安装与登录依据[CodeBuddy 官方说明](https://www.codebuddy.cn/docs/cli/installation)、[登录说明](https://www.codebuddy.cn/docs/cli/quickstart)。Codex CLI 的可选安装依据 [OpenAI 官方说明](https://developers.openai.com/cookbook/examples/codex/using_goals_in_codex)。Windows CI 覆盖完整安装、实际代理程序与真实 dsh 连接；ACP 自动化链路使用测试运行时，真实第三方账号登录仍需要用户完成。

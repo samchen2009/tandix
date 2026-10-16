@@ -6,11 +6,11 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 import { promisify } from 'node:util'
-import { normalizeHistory, indexHistory, searchHistory, retrieveEvents, validateInference } from '../activity-inference.mjs'
+import { normalizeHistory, indexHistory, searchHistory, retrieveEvents, validateInference } from '../cli/activity-inference.mjs'
 
 const exec = promisify(execFile)
-const cli = fileURLToPath(new URL('../tandix-activity.mjs', import.meta.url))
-const fixture = fileURLToPath(new URL('../fixtures/activity-long-history.json', import.meta.url))
+const cli = fileURLToPath(new URL('../cli/activity.mjs', import.meta.url))
+const fixture = fileURLToPath(new URL('./fixtures/activity-long-history.json', import.meta.url))
 const event = (id, at = 1) => ({ id, capturedAt: at, kind: 'click', tab: { id: 1, title: 'Example', url: 'https://example.invalid/' }, target: { name: 'Save' } })
 function report() {
   return {

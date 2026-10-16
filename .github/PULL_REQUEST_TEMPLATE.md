@@ -35,6 +35,6 @@
 ## Checklist
 
 - [ ] 已在相关平台实测通过 / Tested on the relevant platforms
-- [ ] 已通过 `pnpm run build` / `bash -n scripts/install.sh` 等基础检查 / Passed basic checks
+- [ ] 已通过 `pnpm run build` / `bash -n scripts/install/source-unix.sh` 等基础检查 / Passed basic checks
 - [ ] 文档已同步更新（如需要）/ Docs updated if needed
 - [ ] 不包含无关改动 / No unrelated changes included

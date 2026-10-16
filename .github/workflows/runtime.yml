@@ -22,9 +22,8 @@ jobs:
         with:
           node-version: 24
       - run: npm exec --yes --package=pnpm@11.7.0 -- pnpm --version
-      - run: python scripts/tests/test_source_installers.py
-      - run: python scripts/tests/test_windows_launcher.py
-      - run: node --test scripts/tests/traceforge-native-registration.test.mjs
+      - run: python -B -m unittest discover -s scripts/tests -p 'test_*.py'
+      - run: node --test scripts/tests/native-registration.test.mjs
 
   clean-install:
     runs-on: ubuntu-latest
@@ -43,6 +42,7 @@ jobs:
       - run: pnpm run typecheck
       - run: pnpm run test
       - run: pnpm run build
+      - run: pnpm run test:scripts
       - run: pnpm run test:smoke
 
   windows-complete-install:
@@ -62,14 +62,14 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: python scripts/tests/test_source_installers.py
-      - run: node --test scripts/tests/tandix-connection-check.test.mjs scripts/tests/traceforge-native-registration.test.mjs scripts/tests/traceforge-workbuddy.test.mjs
+      - run: node --test scripts/tests/connection-check.test.mjs scripts/tests/native-registration.test.mjs scripts/tests/workbuddy.test.mjs
       - name: Use a checkout path containing spaces
         shell: powershell
         run: New-Item -ItemType Junction -Path (Join-Path $env:RUNNER_TEMP 'Tandix source') -Target $env:GITHUB_WORKSPACE | Out-Null
       - name: Complete setup, real Windows proxy and real dsh handshake
         shell: powershell
         run: >-
-          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\install\windows.ps1
           -SourceRoot "$env:RUNNER_TEMP\Tandix source" -InstallHome "$env:RUNNER_TEMP\TandixInstall"
           -Agents dsh -Agent dsh -NonInteractive -ExtensionId aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       - name: Show connection report

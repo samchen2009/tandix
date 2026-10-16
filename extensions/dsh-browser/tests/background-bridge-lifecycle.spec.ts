@@ -68,6 +68,7 @@ function mockChrome(options: {
   executeScript?: () => Promise<unknown>
 } = {}) {
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
+  const onConnectExternal = chromeEvent<[chrome.runtime.Port]>()
   const onAlarm = chromeEvent<[chrome.alarms.Alarm]>()
   const alarms = {
     create: vi.fn(),
@@ -85,6 +86,7 @@ function mockChrome(options: {
       id: 'test-extension',
       getURL: (path: string) => `chrome-extension://test/${path}`,
       onConnect,
+      onConnectExternal,
       onMessage: chromeEvent<[unknown, chrome.runtime.MessageSender, (response: unknown) => void]>(),
     },
     sidePanel: {
@@ -131,7 +133,7 @@ function mockChrome(options: {
       onRemoved: chromeEvent<[number]>(),
     },
   } as unknown as typeof chrome)
-  return { alarms, onConnect, tabs: chrome.tabs }
+  return { alarms, onConnect, onConnectExternal, tabs: chrome.tabs }
 }
 
 afterEach(() => {
@@ -141,6 +143,58 @@ afterEach(() => {
 })
 
 describe('background bridge lifecycle', () => {
+  it.each([1, undefined])('runs webpage jobs without a panel only with a compatible companion (version %s)', async (version) => {
+    const chromeMock = mockChrome({ localGet: async () => ({
+      dshSettings: { agentBackend: 'codex' }, tandixWebOrigins: ['https://example.com'],
+    }) })
+    const native = panelPort()
+    Object.assign(native.port, { disconnect: vi.fn() })
+    chrome.runtime.connectNative = vi.fn(() => native.port)
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ backend: 'codex', webTaskApiVersion: version, wsUrl: 'ws://127.0.0.1:3080/ext/bridge' }))))
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const webpage = panelPort()
+    Object.assign(webpage.port, { name: 'tandix-web-v1', sender: { url: 'https://example.com/input', tab: { id: 1 }, frameId: 0 }, disconnect: vi.fn() })
+    chromeMock.onConnectExternal.emit(webpage.port)
+    const taskId = crypto.randomUUID()
+    webpage.onMessage.emit({ id: 'run', method: 'tasks.run', params: { taskId, prompt: 'Summarize', fileIds: [], responseFormat: 'text' } })
+    await vi.waitFor(() => expect(native.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'ensure', backend: 'codex' })))
+    native.onMessage.emit({ type: 'ready', wsUrl: 'ws://127.0.0.1:3080/ext/bridge' })
+    await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    await Promise.resolve()
+    socket.receive({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60 } })
+    if (version === undefined) {
+      await vi.waitFor(() => expect(webpage.postMessage).toHaveBeenCalledWith(expect.objectContaining({ event: expect.objectContaining({ type: 'failed', error: expect.objectContaining({ code: 'unsupported-companion' }) }) })))
+      expect(socket.sent).not.toContainEqual(expect.objectContaining({ method: 'session.create' }))
+      webpage.onDisconnect.emit(); native.onDisconnect.emit()
+      await new Promise(resolve => setTimeout(resolve, 600))
+      return
+    }
+    await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'rpc', method: 'session.create', payload: { webTaskId: taskId } })))
+    const create = socket.sent.find((frame: any) => frame.method === 'session.create') as { id: string }
+    socket.receive({ t: 'rpc.result', id: create.id, ok: true, result: { sessionId: 'web-session' } })
+    await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'rpc', method: 'session.prompt' })))
+    const prompt = socket.sent.find((frame: any) => frame.method === 'session.prompt') as { id: string }
+    socket.receive({ t: 'rpc.result', id: prompt.id, ok: true, result: {} })
+    const panel = panelPort(); chromeMock.onConnect.emit(panel.port); panel.onDisconnect.emit()
+    await new Promise(resolve => setTimeout(resolve, 600))
+    expect(socket.readyState).toBe(FakeWebSocket.OPEN)
+    chromeMock.alarms.onAlarm.emit({ name: 'bridge-keepalive' } as chrome.alarms.Alarm)
+    expect(FakeWebSocket.instances).toHaveLength(1)
+    // File tasks cannot use a panel's controlled tab, even if the panel has been opened.
+    socket.receive({ t: 'tool.call', id: 'web-tool', sessionId: 'web-session', name: 'browser_snapshot', args: {}, expiresAt: Date.now() + 30_000 })
+    await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'web-tool', ok: false })))
+    socket.receive({ t: 'event', frame: { rpcId: '', method: 'session/event', payload: { sessionId: 'web-session', event: {
+      type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Done' }] } },
+    } } } })
+    socket.receive({ t: 'event', frame: { rpcId: '', method: 'session/event', payload: { sessionId: 'web-session', event: { type: 'turn/end', data: { status: 'completed' } } } } })
+    expect(webpage.postMessage).toHaveBeenCalledWith({ event: { taskId, type: 'completed', result: { taskId, text: 'Done' } } })
+    webpage.onDisconnect.emit(); native.onDisconnect.emit()
+    await new Promise(resolve => setTimeout(resolve, 600))
+  })
+
   it('shows dsh startup failures in status and in the connect action result', async () => {
     const chromeMock = mockChrome({ localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }) })
     const native = panelPort()

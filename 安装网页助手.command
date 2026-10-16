@@ -19,7 +19,7 @@ if [ "$(uname -s)" != "Darwin" ]; then
 fi
 
 printf '网页助手（Tandix）安装向导\n\n'
-if ! /bin/bash "$ROOT/scripts/install.sh"; then
+if ! /bin/bash "$ROOT/scripts/install/source-unix.sh"; then
   printf '\n安装未完成。请查看上面的错误信息。\n'
   finish
   exit 1

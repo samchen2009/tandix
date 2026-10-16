@@ -41,7 +41,7 @@ exec "$@"
                    'TMPDIR': str(work), 'TEST_WORK': str(work), 'TEST_PLATFORM': platform,
                    'TEST_NODE_STATUS': str(node), 'TEST_DOWNLOAD_STATUS': str(download),
                    'TEST_INSTALL_STATUS': str(install), 'DSH_HOME': str(work / "user's dsh")}
-            result = subprocess.run(['/bin/bash', str(ROOT / 'scripts/install-macos.sh')],
+            result = subprocess.run(['/bin/bash', str(ROOT / 'scripts/install/macos.sh')],
                                     env=env, text=True, capture_output=True)
             return (result, (work / 'downloaded').exists(), (work / 'installed').exists(),
                     (work / 'npm-args').read_text() if (work / 'npm-args').exists() else '',
@@ -104,7 +104,7 @@ function Test-AgentConnection {
 }
 try { Invoke-TandixSetup; exit 0 } catch { exit 1 }
 ''')
-            env = {**os.environ, 'TEST_WORK': str(work), 'TEST_ENTRY': str(ROOT / 'scripts/install-windows.ps1'),
+            env = {**os.environ, 'TEST_WORK': str(work), 'TEST_ENTRY': str(ROOT / 'scripts/install/windows.ps1'),
                    'TEST_FAIL_STAGE': stage, 'TEST_CONNECTION_STATUS': 'ready' if healthy else 'failed'}
             result = subprocess.run([shutil.which('powershell.exe'), '-NoProfile', '-ExecutionPolicy', 'Bypass',
                                      '-File', str(harness)], env=env, text=True, capture_output=True)
@@ -153,7 +153,7 @@ foreach ($json in @('{"dsh":{"profile":{"bundles":[]}}}', '{"dsh":{"profile":{"b
 }
 ''')
             result = subprocess.run([shutil.which('powershell.exe'), '-NoProfile', '-ExecutionPolicy', 'Bypass',
-                                     '-File', str(harness)], env={**os.environ, 'TEST_BUILDER': str(ROOT / 'scripts/install.ps1')},
+                                     '-File', str(harness)], env={**os.environ, 'TEST_BUILDER': str(ROOT / 'scripts/install/source-windows.ps1')},
                                     text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 

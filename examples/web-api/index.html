@@ -1,0 +1,17 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Tandix 文件处理接口演示</title>
+<style>body{font:16px/1.6 system-ui;max-width:800px;margin:40px auto;padding:20px;color:#182331}label{display:block;margin:16px 0}input[type=text],textarea{box-sizing:border-box;width:100%;padding:10px}button{padding:10px 18px;margin-right:8px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f5f8;padding:20px}textarea{min-height:100px}</style></head>
+<body><h1>Tandix 文件处理演示</h1><p>选择文件并描述处理要求，即可交给 Tandix。首次使用时确认站点授权，之后自动连接，执行时无需展开侧栏。</p>
+<label>PDF / 图片<input id="files" type="file" multiple accept="application/pdf,image/png,image/jpeg,image/webp,image/gif"></label>
+<label>提示词<textarea id="prompt">读取附件，提取日期、金额和币种。无法识别的字段用 null，返回 JSON 数组。</textarea></label>
+<label><input id="json" type="checkbox" checked>要求返回 JSON</label><button id="run" disabled>开始处理</button><button id="cancel" disabled>取消</button>
+<p id="status" role="status">正在连接 Tandix…</p><button id="retry" hidden>重新检测</button>
+<section id="local-help" hidden><p>请通过网站或本地预览打开此示例。</p><p><a href="http://127.0.0.1:8765/examples/web-api/">打开本地预览</a></p><details><summary>本地预览启动方式</summary><p>在项目根目录运行：</p><pre>python3 -m http.server 8765 --bind 127.0.0.1</pre></details></section>
+<pre id="result"></pre><script>
+if (location.protocol === 'file:') {
+  document.getElementById('status').textContent = '当前以本地文件方式打开，暂时无法连接 Tandix。';
+  document.getElementById('local-help').hidden = false;
+} else {
+  const script = document.createElement('script'); script.type = 'module'; script.src = './main.js';
+  document.body.append(script);
+}
+</script></body></html>

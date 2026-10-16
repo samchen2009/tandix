@@ -5,6 +5,10 @@
   "default_locale": "zh_CN",
   "version": "0.1.4",
   "minimum_chrome_version": "116",
+  "options_page": "web-access/index.html",
+  "externally_connectable": {
+    "matches": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"]
+  },
   "permissions": [
     "sidePanel",
     "storage",

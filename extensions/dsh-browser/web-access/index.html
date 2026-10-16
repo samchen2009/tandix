@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Tandix 网页调用授权</title></head>
+<body><main><h1>Tandix 网页调用授权</h1>
+<p>获准站点可自动提交提示词、PDF 和图片，并接收 Agent 的回答。文件会交给当前 Agent 及其模型服务处理；任务可能调用本机工具，敏感操作仍沿用 Agent 的确认流程。</p>
+<p>仅授权你信任的站点。授权以完整来源（协议、域名、端口）为单位，不包含其他站点的对话或浏览器控制权限。</p>
+<section id="request" hidden><h2>请求访问的站点</h2><p id="origin"></p><button id="allow">允许此站点</button> <button id="deny">拒绝</button></section>
+<p id="status" role="status"></p><h2>已授权站点</h2><ul id="origins"></ul></main>
+<script type="module" src="/src/web-api/access-page.ts"></script></body></html>

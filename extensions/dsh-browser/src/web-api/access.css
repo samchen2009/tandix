@@ -1,0 +1,5 @@
+body { margin: 0; background: #f6f7fb; color: #182331; font: 16px/1.7 system-ui, sans-serif; }
+main { max-width: 720px; margin: 48px auto; padding: 32px; background: white; border-radius: 16px; }
+h1 { font-size: 27px; } h2 { font-size: 20px; } #origin { font-weight: 700; overflow-wrap: anywhere; }
+button { padding: 8px 16px; border: 1px solid #bcc8d8; border-radius: 8px; cursor: pointer; background: #f2f6ff; color: inherit; }
+li { margin: 12px 0; overflow-wrap: anywhere; } li button { margin-left: 20px; } #status { color: #2859a8; }

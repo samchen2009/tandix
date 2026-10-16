@@ -88,6 +88,9 @@ import { InMemoryRecentRecordingStore } from '../recording/store.ts'
 import type { TeachState } from '../recording/state-machine.ts'
 import type { RecordingEventInput } from '../recording/schema.ts'
 import { SkillToolService } from './skill-tools.ts'
+import { WebApiServer } from './web-api.ts'
+import { WebAccess } from './web-access.ts'
+import { WebApiError } from '../web-api/protocol.ts'
 
 /** User settings persisted in chrome.storage.local. */
 export interface Settings {
@@ -184,10 +187,47 @@ let unrestrictedRevocation: Promise<void> | undefined
 let settingsPersistence = Promise.resolve()
 let caps: BridgeCaps | null = null
 let activeBackend: AgentBackend = 'dsh'
+let webTaskApiVersion: number | undefined
 let bridge: BridgeClient | null = null
 let connectionFailure: string | null = null
 let rpc: ReturnType<typeof createRpc> | null = null
 const panelPorts = new Set<chrome.runtime.Port>()
+let webBridgeLeases = 0
+let webBridgeStart: Promise<void> | undefined
+function hasBridgeConsumers(): boolean { return panelPorts.size > 0 || webBridgeLeases > 0 }
+function webBridgeReady(): boolean { return bridge?.state === 'connected' && bridge.connected }
+const webAccess = new WebAccess((origin) => webApi.revoke(origin))
+const webApi = new WebApiServer({
+  allowed: origin => webAccess.allowed(origin),
+  authorize: origin => webAccess.authorize(origin),
+  acquire: async () => {
+    webBridgeLeases++
+    nativePanelOpened()
+    armBridgeKeepalive()
+    await settingsReady
+    if (!webBridgeReady() && !webBridgeStart) {
+      webBridgeStart = (async () => {
+        const error = await startBridge()
+        if (error) throw new Error(error)
+        const deadline = Date.now() + 10_000
+        while (!webBridgeReady() && Date.now() < deadline) {
+          if (connectionFailure) throw new Error(connectionFailure)
+          await new Promise(resolve => setTimeout(resolve, 100))
+        }
+        if (!webBridgeReady()) throw new Error('Tandix agent connection timed out')
+      })().finally(() => { webBridgeStart = undefined })
+    }
+    await webBridgeStart
+    if (activeBackend === 'codex' && webTaskApiVersion !== 1) {
+      throw new WebApiError('unsupported-companion', 'Update the Tandix native companion before using webpage file tasks')
+    }
+    return activeBackend
+  },
+  release: () => { webBridgeLeases = Math.max(0, webBridgeLeases - 1); scheduleBridgeIdle() },
+  rpc: (method, payload) => gatewayRpc(method, payload),
+})
+webAccess.install()
+chrome.runtime.onConnectExternal?.addListener(port => webApi.connect(port))
 const recordingService = new RecordingService(new InMemoryRecentRecordingStore(), broadcastRecordingState, broadcastRecordingEvent)
 /** Chrome records one user-active page at a time; events only belong to that tab's panel. */
 let recordingOwnerTabId: number | undefined
@@ -1317,6 +1357,12 @@ async function pushBudgetToControlledTab(negotiated: BridgeCaps): Promise<void> 
 /** Route one tool.call frame to the browser or Tandix-owned skill storage. */
 function routeToolCall(call: ToolCall): void {
   if (bridge === null) return
+  // Web file jobs cannot inherit a panel's global tab, trusted origins or skill access.
+  if (webApi.isWebSession(call.sessionId)) {
+    bridge.send({ t: 'tool.result', id: call.id, ok: false,
+      error: { code: 'action-failed', message: 'Web attachment tasks have no browser or Tandix skill access' } })
+    return
+  }
   activeToolCalls.get(call.id)?.controller.abort()
   const controller = new AbortController()
   const unrestrictedAccess = unrestrictedAccessEnabled()
@@ -1490,7 +1536,7 @@ function cancelAllToolCalls(): void {
 async function startBridge(): Promise<string | undefined> {
   const revision = ++bridgeStartRevision
   connectionFailure = null
-  if (panelPorts.size === 0) return
+  if (!hasBridgeConsumers()) return
   let url = settings.bridgeUrl
   const explicitLocalAgent = settings.agentBackend === 'codex' || settings.agentBackend === 'workbuddy'
   let autoLocal = url === '' || explicitLocalAgent
@@ -1510,13 +1556,13 @@ async function startBridge(): Promise<string | undefined> {
       }
     }
     if (url === '' && settings.sandboxDirectory === '' && !explicitLocalAgent
-      && revision === bridgeStartRevision && panelPorts.size > 0) {
-      url = settings.bridgeUrl || await discoverBridge(() => revision === bridgeStartRevision && panelPorts.size > 0) || ''
+      && revision === bridgeStartRevision && hasBridgeConsumers()) {
+      url = settings.bridgeUrl || await discoverBridge(() => revision === bridgeStartRevision && hasBridgeConsumers()) || ''
     }
   }
   // Discovery is asynchronous. A panel may have closed or a newer settings
   // update may have started while its fetches were in flight.
-  if (revision !== bridgeStartRevision || panelPorts.size === 0) return
+  if (revision !== bridgeStartRevision || !hasBridgeConsumers()) return
   if (url === '') {
     bridge?.stop()
     bridge = null
@@ -1533,16 +1579,18 @@ async function startBridge(): Promise<string | undefined> {
     return
   }
   let detectedBackend: AgentBackend = 'dsh'
+  let detectedWebTaskApiVersion: number | undefined
   let verifiedBackend = false
   try {
     const target = new URL(url)
     target.protocol = target.protocol === 'wss:' ? 'https:' : 'http:'
     target.pathname = BRIDGE_CONFIG_PATH
-    const config = await fetch(target, { signal: AbortSignal.timeout(1_500) }).then(response => response.json()) as { backend?: unknown }
+    const config = await fetch(target, { signal: AbortSignal.timeout(1_500) }).then(response => response.json()) as { backend?: unknown; webTaskApiVersion?: unknown }
     detectedBackend = agentBackend(config.backend)
+    if (typeof config.webTaskApiVersion === 'number') detectedWebTaskApiVersion = config.webTaskApiVersion
     verifiedBackend = config.backend === settings.agentBackend
   } catch { /* Explicit local backends require a matching companion. */ }
-  if (revision !== bridgeStartRevision || panelPorts.size === 0) return
+  if (revision !== bridgeStartRevision || !hasBridgeConsumers()) return
   if ((explicitLocalAgent && !verifiedBackend) || (settings.agentBackend === 'dsh' && detectedBackend !== 'dsh')) {
     bridge?.stop()
     bridge = null
@@ -1554,6 +1602,7 @@ async function startBridge(): Promise<string | undefined> {
       : 'The native companion returned a different agent. Update the companion and reconnect.')
   }
   activeBackend = detectedBackend
+  webTaskApiVersion = detectedWebTaskApiVersion
   // 手动填的地址常只有主机部分（如 ws://127.0.0.1:3080）；桥路径是协议
   // 常量，缺省时自动补全，避免连到根路径失败。
   try {
@@ -1571,6 +1620,7 @@ async function startBridge(): Promise<string | undefined> {
       onStateChange: (state) => {
         if (state === 'connected') connectionFailure = null
         if (state !== 'connected') {
+          webApi.failDisconnected()
           for (const id of agentApprovalPending) clearAgentApprovalNotification(id)
           cancelAllToolCalls()
           interactionResponses.failAll(responseMessages().disconnected)
@@ -1578,9 +1628,10 @@ async function startBridge(): Promise<string | undefined> {
         }
         broadcastStatus()
         if (state === 'stopped') refreshPanelResumeHints()
-        if (state === 'stopped' && panelPorts.size === 0) disarmBridgeKeepalive()
+        if (state === 'stopped' && !hasBridgeConsumers()) disarmBridgeKeepalive()
       },
       onFrame: (frame) => {
+        webApi.ingest(frame)
         if (frame.t === 'event') {
           if (frame.frame.method === 'session/event') {
             const payload = frame.frame.payload as { sessionId?: unknown; event?: { type?: unknown } } | undefined
@@ -1607,7 +1658,7 @@ async function startBridge(): Promise<string | undefined> {
         broadcastStatus()
         void pushBudgetToControlledTab(negotiated)
       },
-    }, probeBridge, () => panelPorts.size > 0)
+    }, probeBridge, hasBridgeConsumers)
     bridge = client
     rpc = createRpc(client)
   }
@@ -2073,21 +2124,26 @@ chrome.runtime.onConnect.addListener((port) => {
       if (selections.clear(panelWindowId) && source !== null) resetSelectionDedupe([source])
     }
     syncSelectionWatch()
-    if (panelPorts.size === 0) {
-      panelShutdownTimer = setTimeout(() => {
-        panelShutdownTimer = undefined
-        if (panelPorts.size > 0) return
-        void recordingService.stop().catch(() => {})
-        nativePanelsClosed()
-        bridgeStartRevision += 1
-        bridge?.suspendReconnect()
-        sessionTrustedActionOrigins.clear()
-        approvals.notifyPending()
-        if (bridge?.state !== 'connected') disarmBridgeKeepalive()
-      }, PANEL_DISCONNECT_GRACE_MS)
-    }
+    scheduleBridgeIdle()
   })
 })
+
+/** Release the native host only after both panel and webpage jobs stop using it. */
+function scheduleBridgeIdle(): void {
+  if (hasBridgeConsumers()) return
+  if (panelShutdownTimer !== undefined) clearTimeout(panelShutdownTimer)
+  panelShutdownTimer = setTimeout(() => {
+    panelShutdownTimer = undefined
+    if (hasBridgeConsumers()) return
+    void recordingService.stop().catch(() => {})
+    nativePanelsClosed()
+    bridgeStartRevision += 1
+    bridge?.suspendReconnect()
+    sessionTrustedActionOrigins.clear()
+    approvals.notifyPending()
+    if (bridge?.state !== 'connected') disarmBridgeKeepalive()
+  }, PANEL_DISCONNECT_GRACE_MS)
+}
 
 chrome.notifications.onClicked.addListener((notificationId) => {
   if (notificationId.startsWith(AGENT_APPROVAL_NOTIFICATION_PREFIX)) {
@@ -2256,7 +2312,7 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== BRIDGE_KEEPALIVE_ALARM) return
-  if (panelPorts.size === 0) {
+  if (!hasBridgeConsumers()) {
     if (bridge === null || bridge.state !== 'connected') disarmBridgeKeepalive()
     return
   }

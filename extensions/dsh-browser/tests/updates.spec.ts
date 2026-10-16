@@ -97,18 +97,18 @@ describe('extension update checks', () => {
 
   it('builds a shell-safe command for the originating checkout', () => {
     expect(checkoutInstallCommand('/Users/example/My Checkout'))
-      .toBe("cd '/Users/example/My Checkout' && ./scripts/install.sh")
+      .toBe("cd '/Users/example/My Checkout' && ./scripts/install/source-unix.sh")
     expect(checkoutInstallCommand("/Users/example/dev's checkout"))
-      .toBe("cd '/Users/example/dev'\"'\"'s checkout' && ./scripts/install.sh")
+      .toBe("cd '/Users/example/dev'\"'\"'s checkout' && ./scripts/install/source-unix.sh")
   })
 
   it('builds a PowerShell command for a Windows checkout', () => {
     expect(checkoutInstallCommand('C:\\Users\\example\\My Checkout'))
-      .toBe("cd 'C:\\Users\\example\\My Checkout'; .\\scripts\\install.ps1")
+      .toBe("cd 'C:\\Users\\example\\My Checkout'; .\\scripts\\install\\source-windows.ps1")
     expect(checkoutInstallCommand("C:\\Users\\example\\dev's checkout"))
-      .toBe("cd 'C:\\Users\\example\\dev''s checkout'; .\\scripts\\install.ps1")
+      .toBe("cd 'C:\\Users\\example\\dev''s checkout'; .\\scripts\\install\\source-windows.ps1")
     expect(checkoutInstallCommand('\\\\build\\share\\dsh-browser'))
-      .toBe("cd '\\\\build\\share\\dsh-browser'; .\\scripts\\install.ps1")
+      .toBe("cd '\\\\build\\share\\dsh-browser'; .\\scripts\\install\\source-windows.ps1")
   })
 
   it('picks the managed installer that matches the running platform', () => {
@@ -124,7 +124,7 @@ describe('extension update checks', () => {
       version: string
       content_security_policy: { extension_pages: string }
     }
-    const installer = readFileSync(`${extensionRoot}/../../scripts/install.sh`, 'utf8')
+    const installer = readFileSync(`${extensionRoot}/../../scripts/install/source-unix.sh`, 'utf8')
 
     expect(packageManifest.version).toBe(chromeManifest.version)
     expect(chromeManifest.content_security_policy.extension_pages).toContain(new URL(UPDATE_MANIFEST_URL).origin)
@@ -135,7 +135,7 @@ describe('extension update checks', () => {
 
   it('keeps the Windows installer writing the same install provenance', () => {
     const extensionRoot = process.cwd()
-    const installerPath = `${extensionRoot}/../../scripts/install.ps1`
+    const installerPath = `${extensionRoot}/../../scripts/install/source-windows.ps1`
     const installer = readFileSync(installerPath, 'utf8')
 
     // Windows PowerShell decodes a BOM-less script with the machine's ANSI codepage, which
@@ -145,6 +145,6 @@ describe('extension update checks', () => {
     expect(installer).toContain("{ 'managed' } else { 'checkout' }")
     expect(installer).toContain("Join-Path $DistDir 'install-info.json'")
     expect(installer).toContain('schemaVersion = 1')
-    expect(WINDOWS_UPDATE_COMMAND).toContain('scripts/install.ps1')
+    expect(WINDOWS_UPDATE_COMMAND).toContain('scripts/install/source-windows.ps1')
   })
 })

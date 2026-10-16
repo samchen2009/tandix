@@ -9,14 +9,15 @@
   "scripts": {
     "build": "pnpm --filter @yuxianglin/dsh-bridge-browser run build && pnpm --filter dsh-browser-extension run build",
     "start": "dsh web",
-    "native:install": "node scripts/traceforge-native-host.mjs install",
+    "native:install": "node scripts/runtime/native-host.mjs install",
     "test": "pnpm --filter @yuxianglin/dsh-bridge-browser run test && pnpm --filter dsh-browser-extension run test",
     "typecheck": "pnpm --filter @yuxianglin/dsh-bridge-browser run typecheck && pnpm --filter dsh-browser-extension run typecheck",
-    "check:runtime": "node scripts/check-runtime.mjs",
-    "test:smoke": "node scripts/smoke-runtime.mjs",
-    "skill": "node scripts/tandix-skill.mjs",
-    "activity": "node scripts/tandix-activity.mjs",
-    "test:activity": "node --test scripts/tests/activity-inference.test.mjs"
+    "check:runtime": "node scripts/dev/check-runtime.mjs",
+    "test:smoke": "node scripts/dev/smoke-runtime.mjs",
+    "skill": "node scripts/cli/skill.mjs",
+    "activity": "node scripts/cli/activity.mjs",
+    "test:activity": "node --test scripts/tests/activity-inference.test.mjs",
+    "test:scripts": "node scripts/dev/test-scripts.mjs"
   },
   "dependencies": {
     "@deepseek-ai/cordis-plugin-group": "1.0.2",

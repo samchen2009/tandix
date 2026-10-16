@@ -16,6 +16,7 @@ import { ElementIds } from './ids.ts'
 import { SelectionWatcher } from './selection.ts'
 import type { SnapshotBudget } from './snapshot.ts'
 import { DomRecorder } from './recorder.ts'
+import { installWebDiscovery } from './web-discovery.ts'
 
 /** Negotiated snapshot budgets, patched in from the background via message. */
 let budget: SnapshotBudget = { maxItems: 60, maxForms: 30, maxChars: DEFAULT_SNAPSHOT_MAX_CHARS }
@@ -133,6 +134,7 @@ const contentGlobal = globalThis as typeof globalThis & {
   [CONTENT_SELECTION_WATCHER]?: { dispose: () => void }
   [CONTENT_RECORDER]?: { dispose: () => void }
   __traceForgeNetworkResponseListener__?: (event: MessageEvent) => void
+  __tandixWebDiscoveryDispose__?: () => void
 }
 const previousListener = contentGlobal[CONTENT_SCRIPT_LISTENER]
 if (previousListener !== undefined) {
@@ -142,6 +144,9 @@ if (previousListener !== undefined) {
 // releases them: `selectionchange` is a document listener, not an extension one.
 contentGlobal[CONTENT_SELECTION_WATCHER]?.dispose()
 contentGlobal[CONTENT_RECORDER]?.dispose()
+contentGlobal.__tandixWebDiscoveryDispose__?.()
+contentGlobal.__tandixWebDiscoveryDispose__ = import.meta.env.EXT_TARGET === 'firefox' ? undefined
+  : installWebDiscovery(window, () => ({ extensionId: chrome.runtime.id, extensionVersion: chrome.runtime.getManifest().version }))
 if (contentGlobal.__traceForgeNetworkResponseListener__ !== undefined) {
   window.removeEventListener('message', contentGlobal.__traceForgeNetworkResponseListener__)
 }
