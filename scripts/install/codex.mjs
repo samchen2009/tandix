@@ -15,9 +15,10 @@ const INSTALL_ROOT = process.platform === 'win32'
   : join(homedir(), '.tandix', 'codex-client')
 const SCRIPTS = [
   'install/codex.mjs',
-  'runtime/native-host.mjs', 'runtime/runtime-discovery.mjs',
+  'runtime/native-host.mjs', 'runtime/runtime-discovery.mjs', 'runtime/skills-store.mjs',
   'runtime/codex-bridge.mjs', 'runtime/codex-mcp.mjs',
   'runtime/workbuddy-bridge.mjs',
+  'runtime/web-task-store.mjs',
   'runtime/browser-guidance.mjs', 'runtime/lark-auth.mjs',
   'runtime/session-title.mjs',
   'runtime/portable-node.mjs',

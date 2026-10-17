@@ -22,9 +22,10 @@ FILES = {
     "scripts/install/source-unix.sh", "scripts/install/source-windows.ps1", "scripts/install/windows.ps1",
     "scripts/runtime/connection-check.mjs", "scripts/install/codex-windows-host.ps1", "scripts/runtime/native-proxy.cs",
     "scripts/install/start-dsh-windows.ps1", "scripts/install/run-dsh-windows.ps1",
-    "scripts/runtime/native-host.mjs", "scripts/runtime/runtime-discovery.mjs",
+    "scripts/runtime/native-host.mjs", "scripts/runtime/runtime-discovery.mjs", "scripts/runtime/skills-store.mjs",
     "scripts/runtime/codex-bridge.mjs", "scripts/runtime/codex-mcp.mjs",
     "scripts/runtime/workbuddy-bridge.mjs",
+    "scripts/runtime/web-task-store.mjs",
     "scripts/runtime/browser-guidance.mjs", "scripts/runtime/lark-auth.mjs",
     "scripts/runtime/session-title.mjs",
 }

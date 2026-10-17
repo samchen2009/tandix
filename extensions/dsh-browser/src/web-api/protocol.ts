@@ -19,10 +19,33 @@ export interface WebFileInfo { name: string; mediaType: WebMediaType; bytes: num
 export interface WebTaskResult { taskId: string; text: string; data?: unknown }
 export interface WebTaskEvent {
   taskId: string
-  type: 'started' | 'delta' | 'waiting-for-user' | 'completed' | 'failed' | 'cancelled'
+  seq?: number
+  type: 'accepted' | 'creating' | 'mapped' | 'starting' | 'resuming' | 'started' | 'delta' | 'waiting-for-user' | 'interrupted' | 'completed' | 'failed' | 'cancelled' | 'disconnected' | 'reconnected' | 'snapshot'
+  backend?: string
+  sessionId?: string
   text?: string
   result?: WebTaskResult
   error?: { code: string; message: string }
+}
+export interface WebTaskSnapshot {
+  taskId: string
+  backend: 'codex'
+  agentId: string
+  sessionId: string | null
+  turnId: string | null
+  status: 'accepted' | 'creating' | 'ready' | 'dispatching' | 'running' | 'interrupted' | 'completed' | 'failed' | 'cancelled'
+  attempt: number
+  createdAt: number
+  updatedAt: number
+  lastSeq: number
+  cursor: number
+  hasMore: boolean
+  reset: boolean
+  text: string
+  events: WebTaskEvent[]
+  result?: WebTaskResult
+  error?: { code: string; message: string }
+  resumable: boolean
 }
 export class WebApiError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = 'WebApiError' }

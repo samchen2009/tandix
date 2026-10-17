@@ -143,7 +143,8 @@ afterEach(() => {
 })
 
 describe('background bridge lifecycle', () => {
-  it.each([1, undefined])('runs webpage jobs without a panel only with a compatible companion (version %s)', async (version) => {
+  it.each([{ version: 2, businessOk: true }, { version: 1, businessOk: true }, { version: undefined, businessOk: true }, { version: 2, businessOk: false }])(
+    'handles real gateway responses for panel-free webpage jobs (%j)', async ({ version, businessOk }) => {
     const chromeMock = mockChrome({ localGet: async () => ({
       dshSettings: { agentBackend: 'codex' }, tandixWebOrigins: ['https://example.com'],
     }) })
@@ -165,19 +166,35 @@ describe('background bridge lifecycle', () => {
     socket.open()
     await Promise.resolve()
     socket.receive({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 32000, maxInteractiveItems: 60 } })
-    if (version === undefined) {
-      await vi.waitFor(() => expect(webpage.postMessage).toHaveBeenCalledWith(expect.objectContaining({ event: expect.objectContaining({ type: 'failed', error: expect.objectContaining({ code: 'unsupported-companion' }) }) })))
-      expect(socket.sent).not.toContainEqual(expect.objectContaining({ method: 'session.create' }))
+    if (version === undefined || version < 2) {
+      await vi.waitFor(() => expect(webpage.postMessage).toHaveBeenCalledWith(expect.objectContaining({ id: 'run', ok: false, error: expect.objectContaining({ code: 'unsupported-companion' }) })))
+      expect(socket.sent).not.toContainEqual(expect.objectContaining({ method: 'web.tasks.run' }))
       webpage.onDisconnect.emit(); native.onDisconnect.emit()
       await new Promise(resolve => setTimeout(resolve, 600))
       return
     }
-    await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'rpc', method: 'session.create', payload: { webTaskId: taskId } })))
-    const create = socket.sent.find((frame: any) => frame.method === 'session.create') as { id: string }
-    socket.receive({ t: 'rpc.result', id: create.id, ok: true, result: { sessionId: 'web-session' } })
-    await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'rpc', method: 'session.prompt' })))
-    const prompt = socket.sent.find((frame: any) => frame.method === 'session.prompt') as { id: string }
-    socket.receive({ t: 'rpc.result', id: prompt.id, ok: true, result: {} })
+    await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'rpc', method: 'web.tasks.run', payload: expect.objectContaining({ taskId, origin: 'https://example.com' }) })))
+    const create = socket.sent.find((frame: any) => frame.method === 'web.tasks.run') as { id: string }
+    if (!businessOk) {
+      socket.receive({ t: 'rpc.result', id: create.id, ok: true, result: { type: 'response', rpcId: create.id,
+        result: { ok: false, error: { code: 'session-unavailable', message: 'Session could not be created', details: {} } } } })
+      await vi.waitFor(() => expect(webpage.postMessage).toHaveBeenCalledWith(expect.objectContaining({ id: 'run', ok: false,
+        error: { code: 'session-unavailable', message: 'Session could not be created' },
+      })))
+      expect(socket.sent).not.toContainEqual(expect.objectContaining({ method: 'session.prompt' }))
+      webpage.onDisconnect.emit(); native.onDisconnect.emit()
+      await new Promise(resolve => setTimeout(resolve, 600))
+      return
+    }
+    const snapshot = { taskId, backend: 'codex', sessionId: 'web-session', status: 'running', attempt: 1,
+      lastSeq: 1, cursor: 1, events: [], hasMore: false, reset: false, text: '' }
+    socket.receive({ t: 'rpc.result', id: create.id, ok: true,
+      result: { type: 'response', rpcId: create.id, result: { ok: true, value: snapshot } } })
+    await vi.waitFor(() => expect(webpage.postMessage).toHaveBeenCalledWith(expect.objectContaining({ id: 'run', ok: true })))
+    webpage.onDisconnect.emit()
+    const observer = panelPort()
+    Object.assign(observer.port, { name: 'tandix-web-v1', sender: { url: 'https://example.com/input', tab: { id: 1 }, frameId: 0 }, disconnect: vi.fn() })
+    chromeMock.onConnectExternal.emit(observer.port)
     const panel = panelPort(); chromeMock.onConnect.emit(panel.port); panel.onDisconnect.emit()
     await new Promise(resolve => setTimeout(resolve, 600))
     expect(socket.readyState).toBe(FakeWebSocket.OPEN)
@@ -186,12 +203,18 @@ describe('background bridge lifecycle', () => {
     // File tasks cannot use a panel's controlled tab, even if the panel has been opened.
     socket.receive({ t: 'tool.call', id: 'web-tool', sessionId: 'web-session', name: 'browser_snapshot', args: {}, expiresAt: Date.now() + 30_000 })
     await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'web-tool', ok: false })))
-    socket.receive({ t: 'event', frame: { rpcId: '', method: 'session/event', payload: { sessionId: 'web-session', event: {
-      type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'Done' }] } },
-    } } } })
-    socket.receive({ t: 'event', frame: { rpcId: '', method: 'session/event', payload: { sessionId: 'web-session', event: { type: 'turn/end', data: { status: 'completed' } } } } })
-    expect(webpage.postMessage).toHaveBeenCalledWith({ event: { taskId, type: 'completed', result: { taskId, text: 'Done' } } })
-    webpage.onDisconnect.emit(); native.onDisconnect.emit()
+    observer.onMessage.emit({ id: 'get', method: 'tasks.get', params: { taskId } })
+    const answered = new Set<string>()
+    await vi.waitFor(() => {
+      for (const frame of socket.sent as any[]) if (frame.method === 'web.tasks.get' && !answered.has(frame.id)) {
+        answered.add(frame.id)
+        socket.receive({ t: 'rpc.result', id: frame.id, ok: true, result: { type: 'response', rpcId: frame.id,
+          result: { ok: true, value: { ...snapshot, status: 'completed', result: { taskId, text: 'Done' } } } } })
+      }
+      expect(observer.postMessage).toHaveBeenCalledWith(expect.objectContaining({ id: 'get', ok: true,
+        result: expect.objectContaining({ status: 'completed', result: { taskId, text: 'Done' } }) }))
+    })
+    observer.onDisconnect.emit(); native.onDisconnect.emit()
     await new Promise(resolve => setTimeout(resolve, 600))
   })
 

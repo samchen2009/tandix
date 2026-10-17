@@ -11,13 +11,14 @@ test('the companion advertises isolated webpage task support before accepting se
   const response = { status: 0, body: '', writeHead(status) { this.status = status }, end(body) { this.body = body } }
   await bridge.handleHttp({ method: 'GET', url: '/ext/bridge-config' }, response)
   assert.equal(response.status, 200)
-  assert.equal(JSON.parse(response.body).webTaskApiVersion, 1)
+  assert.equal(JSON.parse(response.body).webTaskApiVersion, 2)
 })
 
 test('web PDF tasks use private workspaces, disable Tandix browser MCP and preserve task sandbox at prompt time', async () => {
   const root = mkdtempSync(join(tmpdir(), 'tandix-web-test-'))
   try {
-    const bridge = new CodexBridge({ workspace: root, hostDir: root, extensionId: 'test', sandboxDirectory: '/unrelated-user-folder' })
+    const bridge = new CodexBridge({ workspace: root, hostDir: root, extensionId: 'test', nodePath: process.execPath,
+      sandboxDirectory: '/unrelated-user-folder', webTaskDirectory: join(root, 'durable-web-tasks') })
     const calls = []
     bridge.call = async (method, params) => {
       calls.push([method, params])
@@ -29,8 +30,9 @@ test('web PDF tasks use private workspaces, disable Tandix browser MCP and prese
     const firstDir = bridge.webTaskDirectories.get(first.sessionId)
     assert.notEqual(firstDir, bridge.webTaskDirectories.get(second.sessionId))
     assert.equal(calls[0][1].sandbox, 'workspace-write')
-    assert.equal(calls[0][1].ephemeral, true)
-    assert.deepEqual(calls[0][1].config, { mcp_servers: { tandix: { enabled: false } },
+    assert.equal(calls[0][1].ephemeral, false)
+    assert.deepEqual(calls[0][1].config, { mcp_servers: { tandix: { command: process.execPath,
+      args: [join(root, 'scripts', 'runtime', 'codex-mcp.mjs')], enabled: false } },
       sandbox_workspace_write: { writable_roots: [firstDir], network_access: false, exclude_tmpdir_env_var: true, exclude_slash_tmp: true } })
     assert.equal(calls[0][1].approvalPolicy, 'on-request')
     const pdf = Buffer.from('%PDF-1.7\nexample')

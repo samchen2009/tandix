@@ -1,30 +1,65 @@
 import { WEB_API_PORT, WEB_API_VERSION, WEB_DISCOVERY_REQUEST, WEB_DISCOVERY_RESPONSE, WEB_LIMITS, WebApiError, webRecord,
-  webpageOrigin, type WebTaskEvent, type WebTaskResult } from './protocol.ts'
+  webpageOrigin, type WebTaskEvent, type WebTaskResult, type WebTaskSnapshot } from './protocol.ts'
 
 export { WebApiError } from './protocol.ts'
-export type { WebTaskEvent, WebTaskResult } from './protocol.ts'
-export interface RunOptions { prompt: string; files?: readonly File[]; responseFormat?: 'text' | 'json'; timeoutMs?: number }
+export type { WebTaskEvent, WebTaskResult, WebTaskSnapshot } from './protocol.ts'
+export interface RunOptions { taskId?: string; prompt: string; files?: readonly File[]; responseFormat?: 'text' | 'json'; timeoutMs?: number }
 export interface WebHello { product: 'tandix'; version: number; origin: string; authorized: boolean; limits: typeof WEB_LIMITS;
-  mediaTypes: string[]; backends: string[]; resultFormats: string[] }
+  mediaTypes: string[]; backends: string[]; resultFormats: string[]; taskRecovery?: number }
 export interface DiscoverOptions { timeoutMs?: number }
 
+export interface ResumeOptions { requestId?: string; prompt?: string }
 export class TandixTask {
   private readonly listeners = new Set<(event: WebTaskEvent) => void>()
+  private readonly recent: WebTaskEvent[] = []
   private readonly completion: Promise<WebTaskResult>
+  private snapshotThrough = 0
   private resolve!: (result: WebTaskResult) => void
   private reject!: (error: Error) => void
-  constructor(readonly id: string, private readonly cancelTask: () => Promise<void>) {
+  cursor = 0
+  snapshot?: WebTaskSnapshot
+  done = false
+  constructor(readonly id: string, private readonly cancelTask: () => Promise<void>,
+    private readonly resumeTask: (options?: ResumeOptions) => Promise<void>) {
     this.completion = new Promise((resolve, reject) => { this.resolve = resolve; this.reject = reject })
     void this.completion.catch(() => {})
   }
-  onProgress(listener: (event: WebTaskEvent) => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
+  onProgress(listener: (event: WebTaskEvent) => void): () => void {
+    this.listeners.add(listener)
+    for (const event of this.recent) { try { listener(event) } catch { /* Consumer callback. */ } }
+    return () => { this.listeners.delete(listener) }
+  }
   result(): Promise<WebTaskResult> { return this.completion }
   cancel(): Promise<void> { return this.cancelTask() }
+  resume(options?: ResumeOptions): Promise<void> { return this.resumeTask(options) }
+  /** @internal */
+  apply(snapshot: WebTaskSnapshot): void {
+    if (this.snapshot && snapshot.lastSeq < this.snapshot.lastSeq) return
+    this.snapshot = snapshot
+    if (snapshot.reset) {
+      this.snapshotThrough = snapshot.lastSeq
+      this.recent.splice(0)
+      this.accept({ taskId: this.id, type: 'snapshot', text: snapshot.text })
+    }
+    for (const event of snapshot.events) {
+      if (event.type === 'delta' && event.seq !== undefined && event.seq <= this.snapshotThrough) this.cursor = Math.max(this.cursor, event.seq)
+      else this.accept(event)
+    }
+    this.cursor = Math.max(this.cursor, snapshot.cursor)
+    if (!snapshot.hasMore && !this.done && ['completed', 'failed', 'cancelled'].includes(snapshot.status)) {
+      this.accept({ taskId: this.id, type: snapshot.status as 'completed' | 'failed' | 'cancelled',
+        ...(snapshot.result ? { result: snapshot.result } : {}), ...(snapshot.error ? { error: snapshot.error } : {}) })
+    }
+  }
   /** @internal */
   accept(event: WebTaskEvent): void {
-    if (event.type === 'completed' && event.result) this.resolve(event.result)
-    else if (['failed', 'cancelled'].includes(event.type)) this.reject(new WebApiError(event.error?.code ?? event.type, event.error?.message ?? event.type))
-    for (const listener of this.listeners) { try { listener(event) } catch { /* Consumer exceptions must not break result delivery. */ } }
+    if (event.seq !== undefined) { if (event.seq <= this.cursor) return; this.cursor = event.seq }
+    if (event.type === 'completed' && event.result) { this.done = true; this.resolve(event.result) }
+    else if (['failed', 'cancelled'].includes(event.type)) {
+      this.done = true; this.reject(new WebApiError(event.error?.code ?? event.type, event.error?.message ?? event.type))
+    }
+    this.recent.push(event); if (this.recent.length > 500) this.recent.shift()
+    for (const listener of this.listeners) { try { listener(event) } catch { /* Consumer callback. */ } }
   }
 }
 
@@ -75,18 +110,17 @@ export class TandixClient {
     })
   }
 
-  private readonly port: chrome.runtime.Port
+  private port: chrome.runtime.Port | null = null
+  private readonly polls = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly requests = new Map<string, { resolve(value: unknown): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>()
   private readonly tasks = new Map<string, TandixTask>()
   private queue: Promise<unknown> = Promise.resolve()
   private closed = false
   private running = false
   private readonly heartbeat: ReturnType<typeof setInterval>
-  constructor(extensionId: string) {
+  constructor(private readonly extensionId: string) {
     if (typeof chrome === 'undefined' || !chrome.runtime?.connect) throw new WebApiError('unavailable', 'Tandix is unavailable; use Chrome/Edge and enable the extension')
-    this.port = chrome.runtime.connect(extensionId, { name: WEB_API_PORT })
-    this.port.onMessage.addListener((message: unknown) => this.receive(message))
-    this.port.onDisconnect.addListener(() => this.disconnect(chrome.runtime.lastError?.message ?? 'Tandix connection closed'))
+    this.connectPort()
     // Actual messages, rather than an idle port alone, keep the MV3 worker active.
     this.heartbeat = setInterval(() => { void this.hello().catch(() => {}) }, 20_000)
   }
@@ -103,6 +137,7 @@ export class TandixClient {
     try {
       const hello = await this.hello()
       if (!hello.authorized) throw new WebApiError('authorization-required', 'Call authorize() after a user action first')
+      if (hello.taskRecovery !== 1) throw new WebApiError('unsupported-companion', 'Update Tandix before submitting recoverable tasks')
       const files = options.files ?? []
       if (typeof options.prompt !== 'string' || !options.prompt.trim() || options.prompt.length > hello.limits.maxPromptChars
         || files.length > hello.limits.maxFiles || files.reduce((sum, file) => sum + file.size, 0) > hello.limits.maxTotalBytes) {
@@ -120,14 +155,18 @@ export class TandixClient {
           await this.rpc('files.chunk', { fileId, offset, data: btoa(binary) })
         }
       }
-      const id = crypto.randomUUID()
-      task = new TandixTask(id, async () => { await this.rpc('tasks.cancel', { taskId: id }) })
-      this.tasks.set(id, task)
-      void task.result().finally(() => { this.tasks.delete(id); this.running = false }).catch(() => {})
-      await this.rpc('tasks.run', { taskId: id, prompt: options.prompt, fileIds: uploaded,
-        responseFormat: options.responseFormat ?? 'text', ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }) })
+      const id = options.taskId ?? crypto.randomUUID()
+      task = this.task(id)
+      const snapshot = await this.rpc('tasks.run', { taskId: id, prompt: options.prompt, fileIds: uploaded,
+        responseFormat: options.responseFormat ?? 'text', ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }) }) as WebTaskSnapshot
+      task.apply(snapshot); this.watch(task)
       return task
     } catch (error) {
+      if (task && error instanceof WebApiError && ['disconnected', 'request-timeout'].includes(error.code)) {
+        // The acceptance reply may be lost. Query this ID; never repeat tasks.run.
+        this.watch(task)
+        return task
+      }
       if (task) { this.tasks.delete(task.id); task.accept({ taskId: task.id, type: 'failed', error: {
         code: error instanceof WebApiError ? error.code : 'upload-failed', message: error instanceof Error ? error.message : 'Upload failed' } }) }
       for (const fileId of uploaded) { try { await this.rpc('files.remove', { fileId }) } catch { /* A disconnected worker already discarded uploads. */ } }
@@ -135,25 +174,94 @@ export class TandixClient {
       throw error
     }
   }
-  close(): void { this.disconnect('Client closed'); this.port.disconnect() }
-  private disconnect(message: string): void {
+  getTask(taskId: string, afterSeq = 0): Promise<WebTaskSnapshot> {
+    return this.rpc('tasks.get', { taskId, afterSeq }) as Promise<WebTaskSnapshot>
+  }
+  async attach(taskId: string, options: { afterSeq?: number } = {}): Promise<TandixTask> {
+    const task = this.tasks.get(taskId) ?? this.task(taskId)
+    if (options.afterSeq !== undefined) task.cursor = Math.max(task.cursor, options.afterSeq)
+    try {
+      const snapshot = await this.rpc('tasks.attach', { taskId, afterSeq: task.cursor }) as WebTaskSnapshot
+      task.apply(snapshot); this.watch(task)
+    } catch (error) {
+      if (error instanceof WebApiError && ['disconnected', 'request-timeout', 'task-busy'].includes(error.code)) this.watch(task)
+      else {
+        task.accept({ taskId, type: 'failed', error: { code: error instanceof WebApiError ? error.code : 'request-failed',
+          message: error instanceof Error ? error.message : 'Could not attach to task' } })
+        throw error
+      }
+    }
+    return task
+  }
+  private task(id: string): TandixTask {
+    let pendingResume: { requestId: string; prompt?: string } | undefined
+    const task = new TandixTask(id,
+      async () => { task.apply(await this.rpc('tasks.cancel', { taskId: id }) as WebTaskSnapshot) },
+      async (options: ResumeOptions = {}) => {
+        if (!pendingResume || pendingResume.prompt !== options.prompt || options.requestId) {
+          pendingResume = { ...options, requestId: options.requestId ?? crypto.randomUUID() }
+        }
+        const snapshot = await this.rpc('tasks.resume', { taskId: id, ...pendingResume }) as WebTaskSnapshot
+        pendingResume = undefined; task.apply(snapshot); this.watch(task)
+      })
+    this.tasks.set(id, task)
+    void task.result().finally(() => {
+      clearTimeout(this.polls.get(id)); this.polls.delete(id); this.tasks.delete(id); this.running = false
+    }).catch(() => {})
+    return task
+  }
+  private watch(task: TandixTask, delay = 1000): void {
+    clearTimeout(this.polls.get(task.id))
+    if (this.closed || task.done) return
+    this.polls.set(task.id, setTimeout(() => {
+      void this.getTask(task.id, task.cursor).then(snapshot => {
+        task.apply(snapshot); this.watch(task, snapshot.hasMore ? 0 : 1000)
+      }, (error: unknown) => {
+        if (error instanceof WebApiError && !['disconnected', 'request-timeout', 'agent-error', 'codex-error', 'task-busy', 'busy'].includes(error.code)) {
+          task.accept({ taskId: task.id, type: 'failed', error: { code: error.code, message: error.message } }); return
+        }
+        task.accept({ taskId: task.id, type: 'disconnected', text: 'Connection interrupted; reconnecting to the same task.' })
+        this.watch(task, Math.min(delay * 2, 10000))
+      })
+    }, delay))
+  }
+  private connectPort(): chrome.runtime.Port {
+    if (this.port) return this.port
+    const port = chrome.runtime.connect(this.extensionId, { name: WEB_API_PORT })
+    this.port = port
+    port.onMessage.addListener((message: unknown) => { if (this.port === port) this.receive(message) })
+    port.onDisconnect.addListener(() => {
+      if (this.port === port) this.disconnect(chrome.runtime.lastError?.message ?? 'Tandix connection closed')
+    })
+    return port
+  }
+  close(): void {
     if (this.closed) return
     this.closed = true; clearInterval(this.heartbeat)
+    const port = this.port
+    this.disconnect('Client detached; the task remains available by ID')
+    port?.disconnect()
+    for (const timer of this.polls.values()) clearTimeout(timer)
+    for (const task of this.tasks.values()) task.accept({ taskId: task.id, type: 'failed',
+      error: { code: 'disconnected', message: 'Client detached. Attach to this task ID to recover it.' } })
+    this.tasks.clear()
+  }
+  private disconnect(message: string): void {
+    this.port = null
     const error = new WebApiError('disconnected', message)
     for (const request of this.requests.values()) { clearTimeout(request.timer); request.reject(error) }
     this.requests.clear()
-    for (const task of this.tasks.values()) task.accept({ taskId: task.id, type: 'failed', error: { code: error.code, message } })
-    this.tasks.clear()
+    if (!this.closed) for (const task of this.tasks.values()) task.accept({ taskId: task.id, type: 'disconnected', text: message })
   }
   private rpc(method: string, params: unknown): Promise<unknown> {
     const dispatch = () => {
       if (this.closed) throw new WebApiError('disconnected', 'Tandix connection closed')
       const id = crypto.randomUUID()
       return new Promise<unknown>((resolve, reject) => {
-        const timer = setTimeout(() => { this.requests.delete(id); reject(new WebApiError('request-timeout', `Tandix ${method} timed out`)); this.close() }, 125_000)
+        const timer = setTimeout(() => { const port = this.port; this.disconnect(`Tandix ${method} timed out`); port?.disconnect(); reject(new WebApiError('request-timeout', `Tandix ${method} timed out`)) }, 125_000)
         this.requests.set(id, { resolve, reject, timer })
-        try { this.port.postMessage({ id, method, params }) } catch (error) {
-          clearTimeout(timer); this.requests.delete(id); reject(error); this.close()
+        try { this.connectPort().postMessage({ id, method, params }) } catch (error) {
+          clearTimeout(timer); this.requests.delete(id); reject(error); this.disconnect('Connection interrupted')
         }
       })
     }

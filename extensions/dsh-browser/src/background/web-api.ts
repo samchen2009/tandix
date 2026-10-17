@@ -1,16 +1,14 @@
 import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import { WEB_API_PORT, WEB_API_VERSION, WEB_LIMITS, WEB_MEDIA_TYPES, WebApiError, webRecord, webpageOrigin,
-  type WebFileInfo, type WebTaskEvent } from '../web-api/protocol.ts'
+  type WebFileInfo, type WebTaskSnapshot } from '../web-api/protocol.ts'
 
 interface Upload extends WebFileInfo { chunks: string[]; received: number }
 interface Client {
   port: chrome.runtime.Port; origin: string; closed: boolean; busy: boolean
-  uploads: Map<string, Upload>; bytes: number; task: Job | null; expiry: ReturnType<typeof setTimeout>
+  uploads: Map<string, Upload>; bytes: number; task: string | null; expiry: ReturnType<typeof setTimeout>
+  receipts: Map<string, string>
 }
-interface Job {
-  id: string; client: Client; sessionId?: string; done: boolean; leased: boolean
-  text: string; format: 'text' | 'json'; timer: ReturnType<typeof setTimeout>
-}
+interface Job { id: string; origin: string; sessionId?: string; timer?: ReturnType<typeof setTimeout> }
 export interface WebApiDeps {
   allowed(origin: string): Promise<boolean>
   authorize(origin: string): Promise<boolean>
@@ -22,9 +20,9 @@ export interface WebApiDeps {
 /** Only explicit methods are exposed: webpage callers never get a gateway RPC proxy. */
 export class WebApiServer {
   private readonly clients = new Set<Client>()
-  private readonly sessions = new Map<string, Job>()
+  private readonly jobs = new Map<string, Job>()
+  private readonly taskRequests = new Map<string, Promise<WebTaskSnapshot>>()
   private readonly webSessions = new Set<string>()
-  private active = 0
   constructor(private readonly deps: WebApiDeps) {}
 
   isWebSession(sessionId: string | undefined): boolean { return sessionId !== undefined && this.webSessions.has(sessionId) }
@@ -34,7 +32,7 @@ export class WebApiServer {
     const origin = webpageOrigin(sender?.url ?? '')
     if (port.name !== WEB_API_PORT || !origin || sender?.id || sender?.tab?.id === undefined || sender.frameId !== 0
       || this.clients.size >= 8) { port.disconnect(); return }
-    const client: Client = { port, origin, closed: false, busy: false, uploads: new Map(), bytes: 0, task: null,
+    const client: Client = { port, origin, closed: false, busy: false, uploads: new Map(), receipts: new Map(), bytes: 0, task: null,
       expiry: setTimeout(() => this.close(client), WEB_LIMITS.maxTaskMs) }
     this.clients.add(client)
     port.onDisconnect.addListener(() => this.close(client))
@@ -63,19 +61,16 @@ export class WebApiServer {
   }
   private reply(client: Client, id: string, result?: unknown, error?: unknown): void {
     this.send(client, error === undefined ? { id, ok: true, result } : { id, ok: false, error: {
-      code: error instanceof WebApiError ? error.code : 'agent-error',
+      code: error instanceof WebApiError ? error.code : webRecord(error) && typeof error.code === 'string' ? error.code : 'agent-error',
       message: error instanceof Error ? error.message : 'Request failed',
     } })
-  }
-  private event(job: Job, event: Omit<WebTaskEvent, 'taskId'>): void {
-    this.send(job.client, { event: { taskId: job.id, ...event } })
   }
   private async request(client: Client, method: unknown, params: unknown): Promise<unknown> {
     clearTimeout(client.expiry)
     client.expiry = setTimeout(() => this.close(client), WEB_LIMITS.maxTaskMs)
     if (method === 'hello') return { product: 'tandix', version: WEB_API_VERSION, origin: client.origin,
       authorized: await this.deps.allowed(client.origin), limits: WEB_LIMITS,
-      mediaTypes: WEB_MEDIA_TYPES, backends: ['codex'], resultFormats: ['text', 'json'] }
+      mediaTypes: WEB_MEDIA_TYPES, backends: ['codex'], resultFormats: ['text', 'json'], taskRecovery: 1 }
     if (method === 'permissions.request') return { authorized: await this.deps.authorize(client.origin) }
     if (!await this.deps.allowed(client.origin)) throw new WebApiError('authorization-required', 'Authorize this site in Tandix first')
     if (client.closed) throw new WebApiError('disconnected', 'Page disconnected')
@@ -110,14 +105,15 @@ export class WebApiServer {
       if (upload) { client.bytes -= upload.bytes; client.uploads.delete(String(params.fileId)) }
       return { removed: !!upload }
     }
-    if (method === 'tasks.cancel') {
-      const job = client.task
-      if (!job || job.id !== params.taskId) throw new WebApiError('unknown-task', 'Task does not belong to this connection')
-      await this.cancel(job, 'cancelled', 'Cancelled by webpage')
-      return { cancelled: true }
+    if (['tasks.get', 'tasks.attach', 'tasks.resume', 'tasks.cancel'].includes(String(method))) {
+      if (typeof params.taskId !== 'string' || !/^[a-f0-9-]{36}$/u.test(params.taskId)) throw new WebApiError('invalid-request', 'Invalid task ID')
+      return this.proxy(client.origin, String(method) === 'tasks.attach' ? 'get' : String(method).slice(6), params)
     }
     if (method !== 'tasks.run') throw new WebApiError('unknown-method', 'Unknown Tandix webpage method')
-    if (client.task !== null || this.active >= 4) throw new WebApiError('busy', 'Too many active tasks')
+    const signature = JSON.stringify({ taskId: params.taskId, prompt: params.prompt, fileIds: params.fileIds,
+      responseFormat: params.responseFormat, timeoutMs: params.timeoutMs ?? WEB_LIMITS.maxTaskMs })
+    if (client.receipts.get(String(params.taskId)) === signature) return this.proxy(client.origin, 'get', { taskId: params.taskId })
+    if ((client.task !== null && client.task !== params.taskId) || (this.jobs.size >= 4 && !this.jobs.has(String(params.taskId)))) throw new WebApiError('busy', 'Too many active tasks; attach to an existing task')
     if (typeof params.taskId !== 'string' || !/^[a-f0-9-]{36}$/u.test(params.taskId)
       || typeof params.prompt !== 'string' || params.prompt.trim() === '' || params.prompt.length > WEB_LIMITS.maxPromptChars
       || !Array.isArray(params.fileIds) || params.fileIds.length > WEB_LIMITS.maxFiles
@@ -150,109 +146,70 @@ export class WebApiServer {
       }
     }
     if (client.closed || !await this.deps.allowed(client.origin)) throw new WebApiError('authorization-revoked', 'Site authorization was revoked')
-    const job: Job = { id: params.taskId, client, done: false, leased: false, text: '', format: params.responseFormat as 'text' | 'json',
-      timer: setTimeout(() => { void this.cancel(job, 'timeout', 'Task timed out') }, params.timeoutMs as number ?? WEB_LIMITS.maxTaskMs) }
-    client.task = job
-    this.active++
-    const content = [{ type: 'text', text: params.prompt + (job.format === 'json' ? '\nReturn the final answer as valid JSON, without Markdown fences.' : '') },
-      ...files.map(file => ({ type: file.mediaType === 'application/pdf' ? 'file' : 'image',
-        mediaType: file.mediaType, name: file.name, data: file.chunks.join('') }))]
+    const result = await this.proxy(client.origin, 'run', { ...params,
+      files: files.map(file => ({ name: file.name, mediaType: file.mediaType, data: file.chunks.join('') })) })
+    client.receipts.set(result.taskId, signature)
+    if (client.receipts.size > 20) client.receipts.delete(client.receipts.keys().next().value!)
     client.uploads.clear(); client.bytes = 0
-    void this.start(job, content)
-    return { taskId: job.id }
+    client.task = ['completed', 'failed', 'cancelled', 'interrupted'].includes(result.status) ? null : result.taskId
+    return result
   }
 
-  private async start(job: Job, content: unknown[]): Promise<void> {
+  private proxy(origin: string, action: string, params: Record<string, unknown>): Promise<WebTaskSnapshot> {
+    const id = String(params.taskId)
+    const previous = this.taskRequests.get(id) ?? Promise.resolve()
+    const operation = previous.catch(() => {}).then(() => this.dispatch(origin, action, params))
+    this.taskRequests.set(id, operation)
+    void operation.finally(() => { if (this.taskRequests.get(id) === operation) this.taskRequests.delete(id) }).catch(() => {})
+    return operation
+  }
+  private async dispatch(origin: string, action: string, params: Record<string, unknown>): Promise<WebTaskSnapshot> {
+    const id = String(params.taskId)
+    const tracked = this.jobs.get(id)
+    if (tracked && tracked.origin !== origin) throw new WebApiError('unknown-task', 'Task not found')
+    let temporaryLease = !tracked
     try {
-      // acquire() claims the lease synchronously, before asynchronous startup.
-      job.leased = true
-      const backend = await this.deps.acquire()
-      if (job.done) return
-      if (backend !== 'codex') throw new WebApiError('unsupported-backend', 'Web file tasks currently require the Codex backend; select Codex in Tandix settings')
-      if (!await this.deps.allowed(job.client.origin) || job.client.closed || job.done) throw new WebApiError('authorization-revoked', 'Site authorization was revoked')
-      const created = await this.deps.rpc('session.create', { webTaskId: job.id })
-      if (!webRecord(created) || typeof created.sessionId !== 'string') throw new Error('Agent did not return a session ID')
-      job.sessionId = created.sessionId
-      this.webSessions.add(job.sessionId)
-      if (job.done) { await this.deps.rpc('session.cancel', { sessionId: job.sessionId }); return }
-      this.sessions.set(job.sessionId, job)
-      this.event(job, { type: 'started' })
-      await this.deps.rpc('session.prompt', { sessionId: job.sessionId, mode: 'queue', content })
-      if (job.done) await this.deps.rpc('session.cancel', { sessionId: job.sessionId })
-    } catch (error) {
-      this.finish(job, { type: 'failed', error: { code: error instanceof WebApiError ? error.code : 'agent-error',
-        message: error instanceof Error ? error.message : 'Agent failed' } })
-    } finally {
-      if (job.done) this.release(job)
-    }
+      if (temporaryLease) {
+        const backend = await this.deps.acquire()
+        if (backend !== 'codex') throw new WebApiError('unsupported-backend', 'This webpage task belongs to Codex. Select Codex and attach to the same task ID.')
+      }
+      // Origin always comes from Chrome's validated sender, never webpage params.
+      const snapshot = await this.deps.rpc(`web.tasks.${action}`, { ...params, origin }) as WebTaskSnapshot
+      if (!webRecord(snapshot) || snapshot.taskId !== id || snapshot.backend !== 'codex' || typeof snapshot.status !== 'string') {
+        throw new WebApiError('agent-error', 'Companion returned an invalid task snapshot')
+      }
+      if (snapshot.sessionId) this.webSessions.add(snapshot.sessionId)
+      if (['completed', 'failed', 'cancelled', 'interrupted'].includes(snapshot.status)) {
+        if (tracked) { clearTimeout(tracked.timer); this.jobs.delete(id); this.deps.release() }
+        for (const client of this.clients) if (client.task === id) client.task = null
+      } else if (!tracked) {
+        const job: Job = { id, origin, sessionId: snapshot.sessionId ?? undefined }
+        this.jobs.set(id, job); temporaryLease = false
+        this.poll(job)
+      }
+      return snapshot
+    } finally { if (temporaryLease) this.deps.release() }
   }
-
-  ingest(frame: ServerFrame): void {
-    if (frame.t !== 'event' || !webRecord(frame.frame.payload)) return
-    const payload = frame.frame.payload
-    const job = this.sessions.get(String(payload.sessionId))
-    if (!job || job.done) return
-    if (frame.frame.method === 'question/requested') {
-      const questions = Array.isArray(payload.questions) ? payload.questions.filter(webRecord)
-        .filter(question => question.secret !== true && typeof question.question === 'string')
-        .map(question => String(question.question).slice(0, 500)).slice(0, 4).join('\n') : ''
-      void this.cancel(job, 'user-input-required', `Agent needs additional input. Update the prompt and submit a new task.${questions ? `\n${questions}` : ''}`)
-      return
-    }
-    if (frame.frame.method === 'agent-approval/requested') {
-      this.event(job, { type: 'waiting-for-user' }); return
-    }
-    if (frame.frame.method === 'session/assistant-stream' && webRecord(payload.frame) && webRecord(payload.frame.chunk)
-      && payload.frame.chunk.type === 'text-delta' && typeof payload.frame.chunk.text === 'string') {
-      this.event(job, { type: 'delta', text: payload.frame.chunk.text.slice(0, WEB_LIMITS.maxResultChars) }); return
-    }
-    if (frame.frame.method !== 'session/event' || !webRecord(payload.event)) return
-    const event = payload.event
-    const data = webRecord(event.data) ? event.data : {}
-    if (event.type === 'assistant/message' && webRecord(data.message) && Array.isArray(data.message.content)) {
-      const text = data.message.content.filter(webRecord).filter(part => part.type === 'text').map(part => typeof part.text === 'string' ? part.text : '').join('')
-      if (text.length > WEB_LIMITS.maxResultChars) { void this.cancel(job, 'result-too-large', 'Agent result exceeds the limit'); return }
-      job.text = text
-    }
-    if (event.type !== 'turn/end') return
-    if (data.status !== 'completed') {
-      this.finish(job, { type: data.status === 'interrupted' ? 'cancelled' : 'failed',
-        error: { code: 'agent-failed', message: typeof data.error === 'string' ? data.error : 'Agent did not complete the task' } }); return
-    }
-    try {
-      if (!job.text.trim()) throw new WebApiError('empty-result', 'Agent returned no final text')
-      const result = { taskId: job.id, text: job.text, ...(job.format === 'json' ? { data: JSON.parse(job.text) as unknown } : {}) }
-      this.finish(job, { type: 'completed', result })
-    } catch (error) {
-      this.finish(job, { type: 'failed', error: { code: error instanceof WebApiError ? error.code : 'invalid-json',
-        message: error instanceof WebApiError ? error.message : 'Final answer is not valid JSON' } })
-    }
-  }
-
-  private release(job: Job): void {
-    if (job.leased) { job.leased = false; this.deps.release() }
-  }
-  private finish(job: Job, event: Omit<WebTaskEvent, 'taskId'>): void {
-    if (job.done) return
-    job.done = true
+  private poll(job: Job): void {
     clearTimeout(job.timer)
-    if (job.sessionId) this.sessions.delete(job.sessionId)
-    this.event(job, event)
-    job.client.task = null
-    this.active--
-    this.release(job)
+    job.timer = setTimeout(() => {
+      if (!this.jobs.has(job.id)) return
+      void this.proxy(job.origin, 'get', { taskId: job.id }).catch(() => {
+        // Retain the lease while the bridge reconnects. Never resubmit a prompt.
+      }).finally(() => { if (this.jobs.has(job.id)) this.poll(job) })
+    }, 5000)
   }
-  private async cancel(job: Job, code: string, message: string): Promise<void> {
-    if (job.done) return
-    // Stop returning data immediately; a failed cancellation never implies success.
-    this.finish(job, { type: code === 'cancelled' ? 'cancelled' : 'failed', error: { code, message } })
-    if (job.sessionId) { try { await this.deps.rpc('session.cancel', { sessionId: job.sessionId }) } catch { /* Connection loss is already terminal. */ } }
-  }
-  failDisconnected(): void {
-    for (const job of this.sessions.values()) this.finish(job, { type: 'failed',
-      error: { code: 'agent-disconnected', message: 'Agent connection lost; task was not retried' } })
+  ingest(_frame: ServerFrame): void { /* Progress is replayed by sequence through tasks.get. */ }
+  failDisconnected(): void { /* Durable tasks stay in the companion and reconcile on reconnect. */ }
+  dispose(): void {
+    for (const job of this.jobs.values()) { clearTimeout(job.timer); this.deps.release() }
+    this.jobs.clear()
+    for (const client of this.clients) this.close(client)
   }
   revoke(origin: string): void {
+    for (const job of this.jobs.values()) if (job.origin === origin) {
+      void this.proxy(origin, 'cancel', { taskId: job.id }).catch(() => {})
+    }
     for (const client of this.clients) if (client.origin === origin) this.close(client)
   }
   private close(client: Client): void {
@@ -261,7 +218,7 @@ export class WebApiServer {
     clearTimeout(client.expiry)
     client.uploads.clear(); client.bytes = 0
     this.clients.delete(client)
-    if (client.task) void this.cancel(client.task, 'cancelled', 'Webpage connection closed')
+    // A page/Port disconnect only detaches its observer; accepted tasks keep their lease.
     try { client.port.disconnect() } catch { /* Already disconnected. */ }
   }
 }

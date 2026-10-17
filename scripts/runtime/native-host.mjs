@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
  * macOS/Windows Chrome Native Messaging host for on-demand TraceForge bridge startup.
- * Only the fixed "ensure" request is accepted; it never executes browser-supplied
- * commands or paths. Chrome's host manifest restricts callers to one extension ID.
+ * Accepts fixed bridge-start and skill-storage operations; it never executes
+ * browser-supplied commands or paths. The manifest restricts callers to one extension ID.
  */
 
 import { spawn, spawnSync } from 'node:child_process'
@@ -13,6 +13,7 @@ import { homedir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, parse, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { findCodex, nativeHostWrapper, stopAgentProcess } from './runtime-discovery.mjs'
+import { handleSkillsRequest } from './skills-store.mjs'
 
 const HOST_NAME = 'io.traceforge.bridge'
 const HOST_DIR = join(homedir(), '.dsh', 'traceforge-native-host')
@@ -157,6 +158,7 @@ async function installCodex() {
   mkdirSync(HOST_DIR, { recursive: true, mode: 0o700 })
   copyFileSync(SOURCE_PATH, HOST_PATH)
   copyFileSync(DISCOVERY_SOURCE_PATH, join(HOST_DIR, 'runtime-discovery.mjs'))
+  copyFileSync(join(dirname(SOURCE_PATH), 'skills-store.mjs'), join(HOST_DIR, 'skills-store.mjs'))
   writeFileSync(CONFIG_PATH, JSON.stringify({ mode: 'codex-only', runtimePath, workspace,
     codexHome: process.env.CODEX_HOME ?? null,
     searchPath: process.env.PATH ?? '', dshHome: process.env.DSH_HOME ?? null,
@@ -225,6 +227,7 @@ function install() {
   mkdirSync(HOST_DIR, { recursive: true, mode: 0o700 })
   copyFileSync(SOURCE_PATH, HOST_PATH)
   copyFileSync(DISCOVERY_SOURCE_PATH, join(HOST_DIR, 'runtime-discovery.mjs'))
+  copyFileSync(join(dirname(SOURCE_PATH), 'skills-store.mjs'), join(HOST_DIR, 'skills-store.mjs'))
   writeFileSync(CONFIG_PATH, JSON.stringify({ cliPath, workspace,
     reuseExternalDsh: false,
     codexHome: process.env.CODEX_HOME ?? null,
@@ -440,6 +443,12 @@ function runHost() {
       buffer = buffer.subarray(4 + length)
       let message
       try { message = JSON.parse(payload.toString('utf8')) } catch { send({ type: 'error', message: 'Invalid native message.' }); continue }
+      if (message?.type === 'skills') {
+        void handleSkillsRequest(message).then(send).catch(error => {
+          send({ type: 'skills.result', ok: false, message: error instanceof Error ? error.message : String(error) })
+        })
+        continue
+      }
       if (message?.type !== 'ensure' || !['auto', 'codex', 'workbuddy', 'dsh'].includes(message.backend ?? 'auto')) {
         send({ type: 'error', message: 'Unsupported native request.' }); continue
       }

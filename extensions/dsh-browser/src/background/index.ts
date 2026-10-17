@@ -90,7 +90,7 @@ import type { RecordingEventInput } from '../recording/schema.ts'
 import { SkillToolService } from './skill-tools.ts'
 import { WebApiServer } from './web-api.ts'
 import { WebAccess } from './web-access.ts'
-import { WebApiError } from '../web-api/protocol.ts'
+import { WebApiError, webRecord } from '../web-api/protocol.ts'
 
 /** User settings persisted in chrome.storage.local. */
 export interface Settings {
@@ -218,13 +218,25 @@ const webApi = new WebApiServer({
       })().finally(() => { webBridgeStart = undefined })
     }
     await webBridgeStart
-    if (activeBackend === 'codex' && webTaskApiVersion !== 1) {
+    if (activeBackend === 'codex' && (webTaskApiVersion ?? 0) < 2) {
       throw new WebApiError('unsupported-companion', 'Update the Tandix native companion before using webpage file tasks')
     }
     return activeBackend
   },
   release: () => { webBridgeLeases = Math.max(0, webBridgeLeases - 1); scheduleBridgeIdle() },
-  rpc: (method, payload) => gatewayRpc(method, payload),
+  rpc: async (method, payload) => {
+    const envelope = await gatewayRpc(method, payload)
+    if (!webRecord(envelope) || !webRecord(envelope.result) || typeof envelope.result.ok !== 'boolean') {
+      throw new WebApiError('agent-error', 'Agent returned an invalid RPC response')
+    }
+    const result = envelope.result
+    if (!result.ok) {
+      const error = webRecord(result.error) ? result.error : {}
+      throw new WebApiError(typeof error.code === 'string' ? error.code : 'agent-error',
+        typeof error.message === 'string' ? error.message : 'Agent request failed')
+    }
+    return result.value
+  },
 })
 webAccess.install()
 chrome.runtime.onConnectExternal?.addListener(port => webApi.connect(port))

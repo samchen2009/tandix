@@ -3,6 +3,7 @@ import type { UiLocale } from '../i18n.ts'
 import chatInstructions from '../../../../prompts/agent-skill-chat.md?raw'
 import runInstructions from '../../../../prompts/agent-skill-run.md?raw'
 import type { SkillExtractionEvidence } from './extraction-evidence.ts'
+import { loadPersistentSkills, persistSkill, removePersistentSkill } from './persistent-store.ts'
 
 export const CHAT_SKILLS_STORAGE_KEY = 'tandix.chat-skills.v1'
 export const CHAT_SKILL_DRAFT_STORAGE_KEY = 'tandix.pending-skill-draft.v1'
@@ -525,14 +526,17 @@ function migrateLegacySkill(value: unknown): ChatSkill | null {
 export async function loadChatSkills(): Promise<ChatSkill[]> {
   const stored = await chrome.storage.local.get(CHAT_SKILLS_STORAGE_KEY)
   const value: unknown = stored[CHAT_SKILLS_STORAGE_KEY]
-  return Array.isArray(value) ? value.map((entry) => isChatSkill(entry) ? entry : migrateLegacySkill(entry))
+  const legacy = Array.isArray(value) ? value.map((entry) => isChatSkill(entry) ? entry : migrateLegacySkill(entry))
     .filter((entry): entry is ChatSkill => entry !== null).slice(0, MAX_SKILLS) : []
+  return (await loadPersistentSkills<ChatSkill>('chat', CHAT_SKILLS_STORAGE_KEY, legacy)).filter(isChatSkill)
 }
 
 export async function saveChatSkill(skill: ChatSkill): Promise<ChatSkill[]> {
+  if (!isChatSkill(skill)) throw new Error('Invalid skill content')
   const current = await loadChatSkills()
+  if (!current.some((entry) => entry.id === skill.id) && current.length >= MAX_SKILLS) throw new Error('Tandix skill limit reached')
   const next = [skill, ...current.filter((entry) => entry.id !== skill.id)].slice(0, MAX_SKILLS)
-  await chrome.storage.local.set({ [CHAT_SKILLS_STORAGE_KEY]: next })
+  await persistSkill('chat', CHAT_SKILLS_STORAGE_KEY, skill, next)
   const persisted = await loadChatSkills()
   if (!persisted.some((entry) => entry.id === skill.id)) {
     throw new Error('Skill storage verification failed')
@@ -542,8 +546,7 @@ export async function saveChatSkill(skill: ChatSkill): Promise<ChatSkill[]> {
 
 export async function deleteChatSkill(id: string): Promise<ChatSkill[]> {
   const next = (await loadChatSkills()).filter((entry) => entry.id !== id)
-  await chrome.storage.local.set({ [CHAT_SKILLS_STORAGE_KEY]: next })
-  return next
+  return removePersistentSkill('chat', CHAT_SKILLS_STORAGE_KEY, id, next)
 }
 
 export function buildChatSkillPrompt(skill: ChatSkill, values: Record<string, string>, locale: UiLocale): string {

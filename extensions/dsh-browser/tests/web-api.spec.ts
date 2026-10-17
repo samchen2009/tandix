@@ -6,6 +6,11 @@ import { TandixClient } from '../src/web-api/client.ts'
 import { WEB_API_PORT, WEB_DISCOVERY_REQUEST, WEB_DISCOVERY_RESPONSE, WEB_LIMITS } from '../src/web-api/protocol.ts'
 import { installWebDiscovery } from '../src/content/web-discovery.ts'
 import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+// @ts-expect-error The real companion is a JavaScript runtime module.
+import { WebTaskStore } from '../../../scripts/runtime/web-task-store.mjs'
 
 function channel<T extends unknown[]>() {
   const listeners: Array<(...args: T) => void> = []
@@ -23,24 +28,38 @@ function harness(options: { allowed?: boolean; backend?: string; sender?: object
     onMessage: incoming, onDisconnect: disconnected, postMessage: vi.fn((value: unknown) => outgoing.emit(value)), disconnect: close } as unknown as chrome.runtime.Port
   const page = { onMessage: outgoing, onDisconnect: disconnected, postMessage: (value: unknown) => incoming.emit(value), disconnect: close } as unknown as chrome.runtime.Port
   let sequence = 0
+  const directory = mkdtempSync(join(tmpdir(), 'tandix-web-wire-'))
+  let store: any
   const deps: WebApiDeps = {
     allowed: vi.fn(async () => options.allowed ?? true), authorize: vi.fn(async () => true),
     acquire: vi.fn(async () => options.backend ?? 'codex'), release: vi.fn(),
-    rpc: vi.fn(async method => method === 'session.create' ? { sessionId: `session-${++sequence}` } : {}),
+    rpc: vi.fn(async (method, payload: any) => {
+      if (method === 'web.tasks.run') return store.run(payload)
+      if (method === 'web.tasks.get') return store.get(payload.origin, payload.taskId, payload.afterSeq)
+      if (method === 'web.tasks.resume') return store.resume(payload)
+      if (method === 'web.tasks.cancel') return store.cancel(payload.origin, payload.taskId)
+      return method === 'session.create' ? { sessionId: `session-${++sequence}` } : {}
+    }),
   }
+  store = new WebTaskStore({ directory,
+    createSession: (job: any) => deps.rpc('session.create', { webTaskId: job.taskId }), adoptSession: () => {},
+    inspectSession: async () => ({ id: 'turn-1', status: 'interrupted' }),
+    startTurn: (job: any, content: any) => deps.rpc('session.prompt', { sessionId: job.sessionId, content }),
+    cancelSession: (job: any) => deps.rpc('session.cancel', { sessionId: job.sessionId }),
+  })
   const server = new WebApiServer(deps)
   server.connect(port)
-  cleanup.push(close)
+  cleanup.push(() => { server.dispose(); store.close(); rmSync(directory, { recursive: true, force: true }) })
   let id = 0
   const request = (method: string, params: unknown = {}) => new Promise<any>((resolve) => {
     const requestId = String(++id)
     outgoing.addListener((message: any) => { if (message.id === requestId) resolve(message) })
     incoming.emit({ id: requestId, method, params })
   })
-  const emit = (sessionId: string, type: string, data: unknown) => server.ingest({ t: 'event',
+  const emit = (sessionId: string, type: string, data: unknown) => store.ingest({ t: 'event',
     frame: { rpcId: '', method: 'session/event', payload: { sessionId, event: { type, data } } } } as ServerFrame)
   const taskParams = () => ({ taskId: crypto.randomUUID(), prompt: 'Read the files', fileIds: [], responseFormat: 'text' })
-  return { server, deps, port, page, request, emit, taskParams, close }
+  return { server, store, deps, port, page, request, emit, taskParams, close }
 }
 afterEach(() => { cleanup.splice(0).forEach(close => close()); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
@@ -129,6 +148,42 @@ describe('automatic Tandix discovery', () => {
 })
 
 describe('webpage task boundary', () => {
+  it('returns the same accepted task when the same uploaded submission is acknowledged twice', async () => {
+    const h = harness(); const data = btoa('%PDF-1.7\n')
+    const { fileId } = (await h.request('files.begin', { name: 'exam.pdf', mediaType: 'application/pdf', bytes: atob(data).length })).result
+    await h.request('files.chunk', { fileId, offset: 0, data })
+    const job = { ...h.taskParams(), fileIds: [fileId] }
+    expect(await h.request('tasks.run', job)).toMatchObject({ ok: true })
+    const repeated = await h.request('tasks.run', job)
+    expect(repeated).toMatchObject({ ok: true, result: { taskId: job.taskId } })
+    await vi.waitFor(() => expect(h.deps.rpc).toHaveBeenCalledWith('session.prompt', expect.anything()))
+    expect(vi.mocked(h.deps.rpc).mock.calls.filter(([method]) => method === 'session.prompt')).toHaveLength(1)
+  })
+  it('keeps accepted work alive across page disconnect and allows a new same-origin observer', async () => {
+    const first = harness(); const job = first.taskParams()
+    await first.request('tasks.run', job)
+    await vi.waitFor(() => expect(first.deps.rpc).toHaveBeenCalledWith('session.prompt', expect.anything()))
+    first.close()
+    expect(first.deps.rpc).not.toHaveBeenCalledWith('session.cancel', expect.anything())
+    first.emit('session-1', 'assistant/message', { message: { content: [{ type: 'text', text: 'Already graded' }] } })
+    first.emit('session-1', 'turn/end', { status: 'completed' })
+    const replacement = harness()
+    vi.mocked(replacement.deps.rpc).mockImplementation(first.deps.rpc)
+    const recovered = (await replacement.request('tasks.attach', { taskId: job.taskId })).result
+    expect(recovered).toMatchObject({ taskId: job.taskId, backend: 'codex', sessionId: 'session-1', result: { text: 'Already graded' } })
+    expect(vi.mocked(first.deps.rpc).mock.calls.filter(([method]) => method === 'session.create')).toHaveLength(1)
+    expect(vi.mocked(first.deps.rpc).mock.calls.filter(([method]) => method === 'session.prompt')).toHaveLength(1)
+  })
+  it('does not allow another origin to query, cancel or resume a task by guessing its ID', async () => {
+    const first = harness(); const job = first.taskParams(); await first.request('tasks.run', job)
+    const other = harness({ sender: { url: 'https://other.example/task' } })
+    vi.mocked(other.deps.rpc).mockImplementation(first.deps.rpc)
+    for (const method of ['tasks.get', 'tasks.attach', 'tasks.cancel', 'tasks.resume']) {
+      const reply = await other.request(method, { taskId: job.taskId, origin: 'https://app.example', requestId: crypto.randomUUID() })
+      expect(reply.error.code).toBe('unknown-task')
+      expect(JSON.stringify(reply)).not.toContain('session-1')
+    }
+  })
   it.each([{ frameId: 1 }, { url: 'http://untrusted.example' }, { id: 'another-extension' }])('rejects non-page/iframe senders %j', sender => {
     const h = harness({ sender }); expect(h.close).toHaveBeenCalled(); expect(h.deps.acquire).not.toHaveBeenCalled()
   })
@@ -161,57 +216,111 @@ describe('webpage task boundary', () => {
     h.emit('unrelated-session', 'assistant/message', { message: { content: [{ type: 'text', text: 'secret' }] } })
     h.emit('session-1', 'assistant/message', { message: { content: [{ type: 'text', text: '{"count":2}' }] } })
     h.emit('session-1', 'turn/end', { status: 'completed' })
-    expect(h.port.postMessage).toHaveBeenCalledWith({ event: { taskId: job.taskId, type: 'completed', result: { taskId: job.taskId, text: '{"count":2}', data: { count: 2 } } } })
+    expect((await h.request('tasks.get', { taskId: job.taskId })).result).toMatchObject({ status: 'completed', result: { taskId: job.taskId, text: '{"count":2}', data: { count: 2 } } })
     expect(JSON.stringify(vi.mocked(h.port.postMessage).mock.calls)).not.toContain('secret')
     expect(h.deps.release).toHaveBeenCalledTimes(1)
     const second = h.taskParams()
     await h.request('tasks.run', second)
     await vi.waitFor(() => expect(h.deps.rpc).toHaveBeenCalledWith('session.prompt', expect.objectContaining({ sessionId: 'session-2' })))
     h.emit('session-2', 'turn/end', { status: 'failed', error: 'Model failed' })
-    expect(h.port.postMessage).toHaveBeenCalledWith({ event: { taskId: second.taskId, type: 'failed', error: { code: 'agent-failed', message: 'Model failed' } } })
+    expect((await h.request('tasks.get', { taskId: second.taskId })).result).toMatchObject({ status: 'interrupted', error: { code: 'interrupted', message: 'Model failed' } })
   })
-  it('cancels owned tasks on explicit cancellation, disconnect, and grant revocation', async () => {
-    for (const action of ['cancel', 'disconnect', 'revoke']) {
+  it('cancels owned tasks on explicit cancellation and grant revocation', async () => {
+    for (const action of ['cancel', 'revoke']) {
       const h = harness(); const job = h.taskParams()
       await h.request('tasks.run', job)
       await vi.waitFor(() => expect(h.deps.rpc).toHaveBeenCalledWith('session.prompt', expect.anything()))
       if (action === 'cancel') await h.request('tasks.cancel', { taskId: job.taskId })
-      else if (action === 'disconnect') h.close()
       else h.server.revoke('https://app.example')
       await vi.waitFor(() => expect(h.deps.rpc).toHaveBeenCalledWith('session.cancel', { sessionId: 'session-1' }))
-      expect(h.deps.release).toHaveBeenCalledTimes(1)
+      await vi.waitFor(() => expect(h.deps.release).toHaveBeenCalledTimes(1))
     }
   })
   it('fails unsupported backends and malformed JSON without reporting success', async () => {
     const h = harness({ backend: 'workbuddy' }); await h.request('tasks.run', h.taskParams())
-    await vi.waitFor(() => expect(h.port.postMessage).toHaveBeenCalledWith(expect.objectContaining({ event: expect.objectContaining({ type: 'failed', error: expect.objectContaining({ code: 'unsupported-backend' }) }) })))
+    expect((await h.request('tasks.run', h.taskParams())).error.code).toBe('unsupported-backend')
     expect(h.deps.rpc).not.toHaveBeenCalled()
     const second = harness(); await second.request('tasks.run', { ...second.taskParams(), responseFormat: 'json' })
     await vi.waitFor(() => expect(second.deps.rpc).toHaveBeenCalledWith('session.prompt', expect.anything()))
     second.emit('session-1', 'assistant/message', { message: { content: [{ type: 'text', text: 'not json' }] } })
     second.emit('session-1', 'turn/end', { status: 'completed' })
-    expect(second.port.postMessage).toHaveBeenCalledWith(expect.objectContaining({ event: expect.objectContaining({ type: 'failed', error: expect.objectContaining({ code: 'invalid-json' }) }) }))
+    expect((await second.request('tasks.get', { taskId: [...second.store.jobs.keys()][0] })).result).toMatchObject({ status: 'failed', error: { code: 'invalid-json' } })
   })
   it('times out without retrying the agent task', async () => {
     vi.useFakeTimers()
-    const h = harness(); await h.request('tasks.run', { ...h.taskParams(), timeoutMs: 1000 })
+    const h = harness(); const job = h.taskParams(); await h.request('tasks.run', { ...job, timeoutMs: 1000 })
     await vi.advanceTimersByTimeAsync(1001)
-    expect(h.port.postMessage).toHaveBeenCalledWith(expect.objectContaining({ event: expect.objectContaining({ type: 'failed', error: expect.objectContaining({ code: 'timeout' }) }) }))
+    expect((await h.request('tasks.get', { taskId: job.taskId })).result).toMatchObject({ status: 'interrupted', resumable: true, error: { code: 'timeout' } })
     expect(h.deps.acquire).toHaveBeenCalledTimes(1)
   })
   it('returns clarification as an explicit failure instead of leaving an invisible question pending', async () => {
-    const h = harness(); await h.request('tasks.run', h.taskParams())
+    const h = harness(); const job = h.taskParams(); await h.request('tasks.run', job)
     await vi.waitFor(() => expect(h.deps.rpc).toHaveBeenCalledWith('session.prompt', expect.anything()))
-    h.server.ingest({ t: 'event', frame: { rpcId: 'question-id', method: 'question/requested', payload: {
+    h.store.ingest({ t: 'event', frame: { rpcId: 'question-id', method: 'question/requested', payload: {
       sessionId: 'session-1', questions: [{ question: 'Which date range?' }],
     } } })
-    expect(h.port.postMessage).toHaveBeenCalledWith(expect.objectContaining({ event: expect.objectContaining({ type: 'failed',
-      error: expect.objectContaining({ code: 'user-input-required', message: expect.stringContaining('Which date range?') }) }) }))
+    expect((await h.request('tasks.get', { taskId: job.taskId })).result).toMatchObject({ status: 'interrupted', resumable: true })
     await vi.waitFor(() => expect(h.deps.rpc).toHaveBeenCalledWith('session.cancel', { sessionId: 'session-1' }))
   })
 })
 
 describe('SDK to extension wire', () => {
+  it('automatically reconnects and fetches the original result without another run or prompt', async () => {
+    vi.useFakeTimers()
+    const first = harness(); const replacement = harness()
+    vi.mocked(replacement.deps.rpc).mockImplementation(first.deps.rpc)
+    const connect = vi.fn().mockReturnValueOnce(first.page).mockReturnValue(replacement.page)
+    vi.stubGlobal('chrome', { runtime: { connect } })
+    const client = new TandixClient('test-extension'); cleanup.push(() => client.close())
+    const task = await client.run({ taskId: crypto.randomUUID(), prompt: 'Grade once' })
+    await vi.advanceTimersByTimeAsync(1)
+    first.close()
+    first.emit('session-1', 'assistant/message', { message: { content: [{ type: 'text', text: 'Score: 95' }] } })
+    first.emit('session-1', 'turn/end', { status: 'completed' })
+    await vi.advanceTimersByTimeAsync(1100)
+    await expect(task.result()).resolves.toMatchObject({ taskId: task.id, text: 'Score: 95' })
+    expect(task.snapshot).toMatchObject({ backend: 'codex', sessionId: 'session-1', attempt: 1 })
+    expect(vi.mocked(first.deps.rpc).mock.calls.filter(([method]) => method === 'web.tasks.run')).toHaveLength(1)
+    expect(vi.mocked(first.deps.rpc).mock.calls.filter(([method]) => method === 'session.prompt')).toHaveLength(1)
+    expect(connect).toHaveBeenCalledTimes(2)
+  })
+  it('recovers a lost acceptance response by task ID instead of submitting twice', async () => {
+    vi.useFakeTimers()
+    const first = harness(); const replacement = harness()
+    vi.mocked(replacement.deps.rpc).mockImplementation(first.deps.rpc)
+    const original = vi.mocked(first.port.postMessage).getMockImplementation()!
+    vi.mocked(first.port.postMessage).mockImplementation((message: any) => {
+      if (message.result?.taskId && message.ok) { first.close(); return }
+      original(message)
+    })
+    vi.stubGlobal('chrome', { runtime: { connect: vi.fn().mockReturnValueOnce(first.page).mockReturnValue(replacement.page) } })
+    const client = new TandixClient('test-extension'); cleanup.push(() => client.close())
+    const id = crypto.randomUUID()
+    const task = await client.run({ taskId: id, prompt: 'Grade once' })
+    await vi.advanceTimersByTimeAsync(1)
+    first.emit('session-1', 'assistant/message', { message: { content: [{ type: 'text', text: 'Done once' }] } })
+    first.emit('session-1', 'turn/end', { status: 'completed' })
+    await vi.advanceTimersByTimeAsync(1100)
+    await expect(task.result()).resolves.toMatchObject({ taskId: id, text: 'Done once' })
+    expect(vi.mocked(first.deps.rpc).mock.calls.filter(([method]) => method === 'web.tasks.run')).toHaveLength(1)
+    expect(vi.mocked(first.deps.rpc).mock.calls.filter(([method]) => method === 'session.create')).toHaveLength(1)
+  })
+  it('attaches after a page reload and replays sequenced progress without rerunning the agent', async () => {
+    const first = harness(); const job = first.taskParams(); await first.request('tasks.run', job)
+    await vi.waitFor(() => expect(first.deps.rpc).toHaveBeenCalledWith('session.prompt', expect.anything()))
+    first.store.event(first.store.jobs.get(job.taskId), 'delta', { text: 'Page 1 graded' })
+    first.emit('session-1', 'assistant/message', { message: { content: [{ type: 'text', text: 'Completed grading' }] } })
+    first.emit('session-1', 'turn/end', { status: 'completed' })
+    const second = harness(); vi.mocked(second.deps.rpc).mockImplementation(first.deps.rpc)
+    vi.stubGlobal('chrome', { runtime: { connect: () => second.page } })
+    const client = new TandixClient('test-extension'); cleanup.push(() => client.close())
+    const task = await client.attach(job.taskId)
+    const events: any[] = []; task.onProgress(event => events.push(event))
+    await expect(task.result()).resolves.toMatchObject({ text: 'Completed grading' })
+    expect(events.some(event => event.type === 'delta' && event.text === 'Page 1 graded')).toBe(true)
+    expect(new Set(events.map(event => event.seq)).size).toBe(events.length)
+    expect(vi.mocked(first.deps.rpc).mock.calls.filter(([method]) => method === 'session.prompt')).toHaveLength(1)
+  })
   it('keeps heartbeats flowing while the user reviews a pending authorization', async () => {
     vi.useFakeTimers()
     const h = harness({ allowed: false })

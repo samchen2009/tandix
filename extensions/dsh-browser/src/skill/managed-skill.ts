@@ -1,4 +1,5 @@
 /** Tandix-owned, instruction-only skills. Unlike browser recordings, these need no tab. */
+import { loadPersistentSkills, persistSkill } from './persistent-store.ts'
 
 export const MANAGED_SKILLS_STORAGE_KEY = 'tandix.managed-skills.v1'
 const MAX_SKILLS = 100
@@ -61,8 +62,9 @@ function isManagedSkill(value: unknown): value is ManagedSkill {
 export async function loadManagedSkills(): Promise<ManagedSkill[]> {
   const stored = await chrome.storage.local.get(MANAGED_SKILLS_STORAGE_KEY)
   const value: unknown = stored[MANAGED_SKILLS_STORAGE_KEY]
-  return Array.isArray(value) ? value.filter(isManagedSkill)
-    .sort((left, right) => right.updatedAt - left.updatedAt) : []
+  const legacy = Array.isArray(value) ? value.filter(isManagedSkill) : []
+  return (await loadPersistentSkills<ManagedSkill>('managed', MANAGED_SKILLS_STORAGE_KEY, legacy))
+    .filter(isManagedSkill).sort((left, right) => right.updatedAt - left.updatedAt)
 }
 
 export async function saveManagedSkill(value: unknown, sourceSessionId: string): Promise<ManagedSkill> {
@@ -83,9 +85,8 @@ export async function saveManagedSkill(value: unknown, sourceSessionId: string):
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
     }
-    await chrome.storage.local.set({ [MANAGED_SKILLS_STORAGE_KEY]: [saved,
-      ...skills.filter((item) => item.id !== existing?.id)] })
-    return saved
+    return await persistSkill('managed', MANAGED_SKILLS_STORAGE_KEY, saved, [saved,
+      ...skills.filter((item) => item.id !== existing?.id)])
   } finally { release() }
 }
 

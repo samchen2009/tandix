@@ -141,6 +141,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install\windows.ps
 
 打开要操作的网页，在侧栏描述任务。需要授权时核对操作并确认。完成后检查页面中的实际结果；需要复用时点击「提炼技能」，检查流程并保存到 Skills。
 
+Chrome 中已保存的技能统一存放在 `~/.tandix/skills`，独立于安装目录和扩展 ID；升级后会自动迁移当前扩展中仍可读取的旧技能。更换目录、重装和备份说明见[技能存储](docs/agent-skills.md#persistent-skill-library-chrome)。
+
 Codex 和 dsh 支持目标卡；WorkBuddy 的目标、视频及指定沙箱目录暂未接入。浏览器授权与本机文件权限分别管理。
 
 ## 开发

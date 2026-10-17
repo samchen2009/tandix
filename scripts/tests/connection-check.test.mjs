@@ -82,6 +82,7 @@ test('real dsh starts on demand through the native protocol and accepts hello pl
   const host = join(hostDir, 'host.mjs')
   copyFileSync(join(root, 'scripts', 'runtime', 'native-host.mjs'), host)
   copyFileSync(join(root, 'scripts', 'runtime', 'runtime-discovery.mjs'), join(hostDir, 'runtime-discovery.mjs'))
+  copyFileSync(join(root, 'scripts', 'runtime', 'skills-store.mjs'), join(hostDir, 'skills-store.mjs'))
   const result = await checkConnection({ executable: process.execPath, args: [host], backend: 'dsh',
     runtimePath: realpathSync(cli), extensionId, env, timeoutMs: 90_000 }).catch(error => {
       let detail = ''
@@ -110,6 +111,7 @@ test('WorkBuddy native connection checks reach a real ACP process and verify a s
   const host = join(hostDir, 'host.mjs')
   copyFileSync(join(root, 'scripts', 'runtime', 'native-host.mjs'), host)
   copyFileSync(join(root, 'scripts', 'runtime', 'runtime-discovery.mjs'), join(hostDir, 'runtime-discovery.mjs'))
+  copyFileSync(join(root, 'scripts', 'runtime', 'skills-store.mjs'), join(hostDir, 'skills-store.mjs'))
   const result = await checkConnection({ executable: process.execPath, args: [host], backend: 'workbuddy',
     runtimePath: realpathSync(cli), extensionId, env: { ...process.env, HOME: home, USERPROFILE: home }, timeoutMs: 15_000 })
   assert.equal(result.status, 'ready')

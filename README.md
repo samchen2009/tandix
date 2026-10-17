@@ -152,7 +152,7 @@ pnpm test
 pnpm build
 ```
 
-The extension is built into `extensions/dsh-browser/dist`; load that directory directly during development. See [architecture](docs/architecture.md), [skill format](docs/agent-skills.md), and the [webpage API](docs/web-api.md) (prompt + PDF/images → text or JSON, without an open side panel).
+The extension is built into `extensions/dsh-browser/dist`; load that directory directly during development. Chrome saves skills in `~/.tandix/skills`, independently of the installation path and extension ID, and automatically migrates accessible legacy skills. See [architecture](docs/architecture.md), [skill storage and format](docs/agent-skills.md), and the [webpage API](docs/web-api.md) (prompt + PDF/images → text or JSON, without an open side panel).
 
 ## Acknowledgements and license
 

@@ -6,6 +6,25 @@ This contract is separate from `traceforge.task/v1`, the planned deterministic b
 
 The portable artifact is one UTF-8 JSON file conforming to `schemas/agent-skill.schema.json`. It contains an ID, name, goal, ordered semantic steps, success criterion, typed input parameters, provenance, an origin policy, and optionally a reviewed `startUrl`. Steps describe *what* to do (for example “find the feedback record by phone number”), not historical snapshot indices. Credentials, typed secret values, cookies, signed URL parameters, and record-specific start URLs must never be embedded. `allowedOrigins: []` means only the currently controlled origin; broader origins require review. A `startUrl` must belong to `allowedOrigins` and does not bypass the browser's existing approvals.
 
+## Persistent skill library (Chrome)
+
+Saved instruction skills and workflow skills share a user-owned library at `~/.tandix/skills/library.json` (`%USERPROFILE%\.tandix\skills\library.json` on Windows). It is independent of `~/.tandix/codex-client`, the source checkout, `dist`, the extension ID, and the selected Agent. Moving or replacing the installation directory does not move or delete this library. Chrome profiles under the same OS user share it. Draft checkpoints remain browser-local; Codex's own `SKILL.md` directories are separate.
+
+The installed Native Messaging companion handles skill storage without starting Codex, DSH, or a model request. The extension invokes `io.traceforge.bridge` with fixed `type: "skills"` operations: `list` (revision-checked pages), `import` (fill missing records), `upsert`, and `delete`, for the `managed` or `chat` collection. Callers cannot choose a filesystem path. These operations are available to trusted extension pages/service workers, not the external webpage API. Pages receive only their own task results.
+
+On first use, Tandix automatically imports the current extension's existing `tandix.managed-skills.v1` and `tandix.chat-skills.v1` entries, then refreshes them as browser caches. Native records take precedence over old caches; deletion tombstones prevent stale caches from restoring deleted skills. Failed native writes are reported as failures. Files are written atomically with a cross-process lock and owner-only permissions; `library.json.bak` holds the previous complete version. Up to 100 skills per collection are retained, with bounded native-message pages for large libraries. A record must fit within 256 KiB and the library within 16 MiB; quota errors preserve the existing data.
+
+For source development, build the extension and update the companion once:
+
+```sh
+pnpm --filter dsh-browser-extension build
+pnpm native:install
+```
+
+Reload Tandix in `chrome://extensions`, then open Skills. Migration runs automatically. For an older installation that still has skills, upgrade/reload it once before changing its extension ID or uninstalling it; Chrome can erase the old ID's local storage on uninstall. A new extension cannot import data that Chrome has already deleted. Previously exported skill JSON or the JSON inside a downloaded skill ZIP can be imported through Skills. Future moves require only access to the same user library and a companion registered for the active extension.
+
+To back up or move to another computer, close Tandix's panels, wait for active saves to finish, and copy `~/.tandix/skills/`. To recover from a damaged primary file, first preserve a copy of it, then restore a verified `library.json.bak` as `library.json`; Tandix never silently overwrites a corrupt library. Firefox currently retains its browser-local skill library because its native companion is not supported.
+
 The AI may propose a draft, but Tandix validates its shape and the user must review it before the skill is trusted. When evidence is insufficient, the AI must return questions instead of inventing selectors, download URLs, or success conditions. The skill revision changes when its behavior changes.
 
 Run can download a saved skill as a ZIP containing `SKILL.md`, `references/execution-modes.md`, and `references/tandix-skill.json` for re-import. Runtime input values are not included. A skill is command-line capable only when its reviewed JSON contains `desktopAdapter`; those archives additionally contain an executable `scripts/run.mjs` that calls the declared HTTP requests and reads authentication from an environment variable. Without an adapter, the archive explicitly identifies itself as browser-only and contains no runner. A browser demonstration does not prove that a browser-free API exists, so Tandix never fabricates private endpoints or turns historical selectors into a replay script.
