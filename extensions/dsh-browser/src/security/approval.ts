@@ -15,7 +15,7 @@ export interface ApprovalPrompt {
   canTrust: boolean
 }
 
-/** Correlated request delivered to every open side-panel view. */
+/** Correlated request delivered to the side-panel view that owns its session. */
 export interface ApprovalRequest extends ApprovalPrompt {
   id: string
   /** Agent session that requested the browser operation, when known. */

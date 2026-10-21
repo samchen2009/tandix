@@ -7,7 +7,7 @@
 ## 功能
 
 - 在 Chrome 侧栏对话，读取网页、填写表单、切换标签页并完成跨网站操作。
-- 连接本地 Codex、DeepSeek Harness（dsh）或兼容 ACP 的 WorkBuddy/CodeBuddy 运行时。
+- 连接本地 Codex、Cursor CLI、DeepSeek Harness（dsh）或兼容 ACP 的 WorkBuddy/CodeBuddy 运行时。
 - 记录网页操作，与 Agent 讨论流程，再保存、查看和运行 Tandix Skill。
 - 查看工具调用、处理授权请求、停止任务和恢复历史。
 
@@ -71,7 +71,7 @@ bash ./install.sh
 2. 双击 `安装网页助手-Mac.command`，按窗口提示操作。若首次被 macOS 拦截，在「系统设置 → 隐私与安全性」中确认仍要打开。
 3. 在 `chrome://extensions` 开启「开发者模式」，点击「加载已解压的扩展程序」，选择安装窗口打印的目录。
 4. 返回安装窗口继续，完成本机伴随程序注册；重新加载扩展。
-5. 打开普通网页，点击 Tandix 图标，在顶部 Agent 菜单选择 **Codex**。
+5. 打开普通网页，点击 Tandix 图标，在输入框下方的 Agent 菜单选择 **Codex**。
 
 ### Windows 安装包
 
@@ -91,8 +91,19 @@ bash ./install.sh
 | Agent | 准备事项 |
 | --- | --- |
 | Codex | 本机安装可运行的 Codex CLI，并完成登录；通过 Tandix 本机伴随程序连接 |
+| Cursor | 安装支持 `agent acp` 的 Cursor CLI，并运行 `agent login`；在侧栏手动选择 Cursor |
 | dsh | 在 Tandix 设置中配置模型和凭据，或使用已有的 dsh 配置 |
 | WorkBuddy | 安装并登录兼容 ACP 的运行时；不会自动继承 WorkBuddy 桌面账号，见[接入说明](docs/workbuddy-agent.md) |
+
+### 本地 Cursor Agent
+
+使用 [Cursor 官方 ACP 接口](https://cursor.com/docs/cli/acp)连接本地 CLI。先安装 Cursor CLI；已有旧版本可运行 `agent update`，再运行 `agent login` 完成登录。CLI 必须支持 `agent acp`。
+
+在源码目录运行 `pnpm build` 和 `pnpm native:install`，然后在 Chrome 重新加载 `extensions/dsh-browser/dist` 并在侧栏 Agent 菜单选择 **Cursor**。单独刷新扩展不能更新已复制的本机伴随程序。现有 Windows 安装向导不会自动安装 Cursor CLI，需先自行安装，再更新源码伴随程序。
+
+默认查找 `cursor-agent` 和 `agent`，包括 `~/.local/bin`。路径不在标准位置时，注册时运行 `CURSOR_AGENT_PATH=/absolute/path/to/agent pnpm native:install`（PowerShell 使用 `$env:CURSOR_AGENT_PATH`）。连接失败会显示升级或登录提示，不会回退到其他 Agent。
+
+支持流式回复、独立历史、恢复会话、停止任务、工具授权及 Tandix 网页/Skill 工具；恢复和图片能力取决于运行时声明。会话历史保存在 `cursor-sessions.json`，与其他 Agent 分开。当前未接入 Cursor 专用问答卡和计划审批，收到这类请求会返回取消。自动化测试使用 ACP 替身，真实账号和浏览器仍需验收。
 
 ### macOS
 
@@ -107,7 +118,7 @@ bash scripts/install/source-unix.sh
 1. 在 Chrome 打开 `chrome://extensions`，开启「开发者模式」。
 2. 点击「加载已解压的扩展程序」，选择安装器打印的目录，默认是 `~/.dsh/browser-extension`。目录选择器中可按 `Cmd+Shift+G` 粘贴路径。
 3. 回到工程目录运行 `pnpm native:install`，注册本机伴随程序；再重新加载扩展，并接受本机通信权限。
-4. 打开一个普通网页，点击 Tandix 图标，在侧栏顶部选择 Agent。自动选择优先尝试 Codex，再尝试 dsh；WorkBuddy 需手动选择。
+4. 打开一个普通网页，点击 Tandix 图标，在侧栏输入框下方选择 Agent。自动选择优先尝试 Codex，再尝试 dsh；Cursor 和 WorkBuddy 需手动选择。
 
 也可在克隆后的工程里运行 `bash ./安装网页助手.command`，按提示完成加载和注册。
 
@@ -143,7 +154,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install\windows.ps
 
 Chrome 中已保存的技能统一存放在 `~/.tandix/skills`，独立于安装目录和扩展 ID；升级后会自动迁移当前扩展中仍可读取的旧技能。更换目录、重装和备份说明见[技能存储](docs/agent-skills.md#persistent-skill-library-chrome)。
 
-Codex 和 dsh 支持目标卡；WorkBuddy 的目标、视频及指定沙箱目录暂未接入。浏览器授权与本机文件权限分别管理。
+Codex 和 dsh 支持目标卡；Cursor 和 WorkBuddy 的目标、视频及指定沙箱目录暂未接入。浏览器授权与本机文件权限分别管理。
 
 ## 开发
 

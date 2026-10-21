@@ -688,6 +688,7 @@ function broadcastApprovalResolved(id: string): void {
 
 const APPROVAL_NOTIFICATION_PREFIX = 'dsh-browser-approval:'
 const AGENT_APPROVAL_NOTIFICATION_PREFIX = 'tandix-agent-approval:'
+const approvalNotificationTabs = new Map<string, number>()
 const agentApprovalWindows = new Map<string, number>()
 const agentApprovalPending = new Set<string>()
 
@@ -717,19 +718,43 @@ function approvalNotificationId(id: string): string {
   return `${APPROVAL_NOTIFICATION_PREFIX}${id}`
 }
 
+function approvalBelongsToPanel(port: chrome.runtime.Port, request: ApprovalRequest): boolean {
+  if (import.meta.env.EXT_TARGET === 'firefox') return true
+  const ownedTabId = panelTabs.get(port)
+  if (ownedTabId === undefined) return true // Older, window-wide panels.
+  if (request.sessionId !== undefined) {
+    if (panelActiveSessions.get(port) === request.sessionId) return true
+    // A session may intentionally operate another tab. Its existing panel owns
+    // the approval; the target tab's independent conversation must not switch.
+    if ([...panelPorts].some(candidate => panelActiveSessions.get(candidate) === request.sessionId)) return false
+    // Reopening the original panel may replay approvals before session restore.
+    return tabAffinity.getSessionTab(request.sessionId)?.tabId === ownedTabId
+  }
+  return tabAffinity.snapshot().controlled?.tabId === ownedTabId
+}
+
+function deliverApprovalToPanel(port: chrome.runtime.Port, request: ApprovalRequest): boolean {
+  if (!approvalBelongsToPanel(port, request)) return false
+  try {
+    port.postMessage({ type: 'approval.request', request })
+    return true
+  } catch { return false /* port already closed */ }
+}
+
 function deliverApproval(request: ApprovalRequest): boolean {
   let delivered = false
   for (const port of panelPorts) {
-    try {
-      port.postMessage({ type: 'approval.request', request })
-      delivered = true
-    } catch { /* port already closed */ }
+    if (deliverApprovalToPanel(port, request)) delivered = true
   }
   return delivered
 }
 
 function notifyApproval(request: ApprovalRequest, _windowId: number): void {
   if (!settings.approvalNotifications) return
+  const tab = request.sessionId === undefined
+    ? tabAffinity.snapshot().controlled
+    : tabAffinity.getSessionTab(request.sessionId)
+  if (tab !== undefined && tab !== null) approvalNotificationTabs.set(request.id, tab.tabId)
   const copy = getUiLocale() === 'zh'
     ? {
         title: '浏览器操作等待确认',
@@ -749,6 +774,7 @@ function notifyApproval(request: ApprovalRequest, _windowId: number): void {
 }
 
 function clearApprovalNotification(id: string): void {
+  approvalNotificationTabs.delete(id)
   void Promise.resolve(chrome.notifications.clear(approvalNotificationId(id))).catch(() => {})
 }
 
@@ -837,10 +863,12 @@ function observeActiveSummary(summary: AffinityTab): void {
   }
   if (previousStatus !== 'handoff' && tabAffinity.snapshot().status === 'handoff') {
     const focused = tabAffinity.focusedSession()
-    if (focused !== null) {
+    // Chrome's session-scoped tools keep their own tab when browser focus moves.
+    // Only the window-wide Firefox flow requires a new handoff decision.
+    if (focused !== null && import.meta.env.EXT_TARGET === 'firefox') {
       activeFollowRefreshes.get(focused)?.controller.abort()
       cancelPendingApprovals(focused)
-    } else {
+    } else if (focused === null) {
       cancelPendingApprovals()
     }
   }
@@ -1223,12 +1251,12 @@ async function resolveTabAffinityResponse(response: {
   revision: number
   decision: TabAffinityDecision
   sessionId: unknown
-}): Promise<void> {
+}, port: chrome.runtime.Port): Promise<void> {
   await affinityReady
   const sid = typeof response.sessionId === 'string' ? response.sessionId : undefined
 
   if (response.decision === 'show-controlled') {
-    const state = tabAffinity.snapshot()
+    const state = tabAffinityForPanel(port)
     if (response.revision !== state.revision || state.controlled === null) {
       broadcastTabAffinity()
       return
@@ -1252,6 +1280,16 @@ async function resolveTabAffinityResponse(response: {
       return
     }
     if (sid !== undefined) await refreshFollowedPage(sid, controlled.tabId).catch(() => {})
+    return
+  }
+
+  if (import.meta.env.EXT_TARGET !== 'firefox' && panelTabs.has(port) && response.decision === 'follow') {
+    if (response.revision !== tabAffinityForPanel(port).revision) {
+      sendTabAffinity(port)
+      return
+    }
+    await rebindTabAffinityToPanel(port, new AbortController().signal, sid)
+    if (sid !== undefined) await refreshSessionSnapshot(sid)
     return
   }
 
@@ -1406,15 +1444,16 @@ function routeToolCall(call: ToolCall): void {
   const managementDispatch = async (): Promise<ToolAnswer> => {
     await affinityReady
     const affinity = tabAffinity.snapshot()
-    let windowId = affinity.active?.windowId ?? affinity.controlled?.windowId
+    const sessionTab = call.sessionId === undefined
+      ? affinity.controlled
+      : tabAffinity.getSessionTab(call.sessionId)
+    let windowId = sessionTab?.windowId ?? affinity.active?.windowId
     if (windowId === undefined) {
       try {
         windowId = (await chrome.windows.getLastFocused()).id
       } catch { /* approvals can still report unavailable without a focused window */ }
     }
-    const controlledTabId = call.sessionId === undefined
-      ? affinity.controlled?.tabId
-      : tabAffinity.getSessionTab(call.sessionId)?.tabId
+    const controlledTabId = sessionTab?.tabId
     return dispatchToolCall(
       call,
       sharePageContent,
@@ -1549,132 +1588,157 @@ async function startBridge(): Promise<string | undefined> {
   const revision = ++bridgeStartRevision
   connectionFailure = null
   if (!hasBridgeConsumers()) return
-  let url = settings.bridgeUrl
-  const explicitLocalAgent = settings.agentBackend === 'codex' || settings.agentBackend === 'workbuddy'
-  let autoLocal = url === '' || explicitLocalAgent
-  if (!autoLocal) {
-    try { autoLocal = new URL(url).hostname === '127.0.0.1' } catch { /* Preserve invalid manual URL for the existing error path. */ }
-  }
-  if (autoLocal) {
-    if (explicitLocalAgent) url = ''
-    nativeStartRevision = revision
-    broadcastStatus()
-    try {
+  // Retire the previous generation before the companion replaces its process.
+  // Its old socket must not retry or publish errors during the new startup.
+  const previous = bridge
+  previous?.stop()
+  bridge = null
+  rpc = null
+  caps = null
+  nativeStartRevision = revision
+  broadcastStatus()
+  try {
+    let url = settings.bridgeUrl
+    const explicitLocalAgent = settings.agentBackend === 'codex' || settings.agentBackend === 'cursor' || settings.agentBackend === 'workbuddy'
+    let autoLocal = url === '' || explicitLocalAgent
+    if (!autoLocal) {
+      try { autoLocal = new URL(url).hostname === '127.0.0.1' } catch { /* Preserve invalid manual URL for the existing error path. */ }
+    }
+    if (autoLocal) {
+      if (explicitLocalAgent) url = ''
       url = await ensureNativeBridge(settings.agentBackend, settings.sandboxDirectory) ?? ''
-    } finally {
-      if (nativeStartRevision === revision) {
-        nativeStartRevision = null
-        broadcastStatus()
+      if (url === '' && settings.sandboxDirectory === '' && !explicitLocalAgent
+        && revision === bridgeStartRevision && hasBridgeConsumers()) {
+        url = settings.bridgeUrl || await discoverBridge(() => revision === bridgeStartRevision && hasBridgeConsumers()) || ''
       }
     }
-    if (url === '' && settings.sandboxDirectory === '' && !explicitLocalAgent
-      && revision === bridgeStartRevision && hasBridgeConsumers()) {
-      url = settings.bridgeUrl || await discoverBridge(() => revision === bridgeStartRevision && hasBridgeConsumers()) || ''
+    // Discovery is asynchronous. A panel may have closed or a newer settings
+    // update may have started while its fetches were in flight.
+    if (revision !== bridgeStartRevision || !hasBridgeConsumers()) return
+    if (url === '') {
+      bridge = null
+      rpc = null
+      if (settings.agentBackend === 'codex' || settings.agentBackend === 'cursor' || settings.agentBackend === 'workbuddy') activeBackend = settings.agentBackend
+      broadcastStatus()
+      if (settings.agentBackend !== 'auto') {
+        const label = settings.agentBackend === 'cursor' ? 'Cursor' : settings.agentBackend === 'workbuddy' ? 'WorkBuddy' : settings.agentBackend === 'codex' ? 'Codex' : 'dsh'
+        const detail = nativeBridgeError() ?? 'The native companion is unavailable.'
+        return connectionFailed(getUiLocale() === 'zh'
+          ? `${label} 连接失败。请重新运行 Tandix 安装向导完成依赖安装和本机连接检查，再重新加载扩展。详细原因：${detail}`
+          : `${label} connection failed. Rerun the Tandix installer to finish runtime setup and connection checks, then reload the extension. Details: ${detail}`)
+      }
+      return
     }
-  }
-  // Discovery is asynchronous. A panel may have closed or a newer settings
-  // update may have started while its fetches were in flight.
-  if (revision !== bridgeStartRevision || !hasBridgeConsumers()) return
-  if (url === '') {
-    bridge?.stop()
-    bridge = null
-    rpc = null
-    if (settings.agentBackend === 'codex' || settings.agentBackend === 'workbuddy') activeBackend = settings.agentBackend
-    broadcastStatus()
-    if (settings.agentBackend !== 'auto') {
-      const label = settings.agentBackend === 'workbuddy' ? 'WorkBuddy' : settings.agentBackend === 'codex' ? 'Codex' : 'dsh'
-      const detail = nativeBridgeError() ?? 'The native companion is unavailable.'
+    let detectedBackend: AgentBackend = 'dsh'
+    let detectedWebTaskApiVersion: number | undefined
+    let verifiedBackend = false
+    let identityRead = false
+    const identityDeadline = Date.now() + 30_000
+    do {
+      try {
+        const target = new URL(url)
+        target.protocol = target.protocol === 'wss:' ? 'https:' : 'http:'
+        target.pathname = BRIDGE_CONFIG_PATH
+        const response = await fetch(target, { signal: AbortSignal.timeout(1_500) })
+        if (!response.ok) throw new Error('Bridge is starting')
+        const config = await response.json() as { backend?: unknown; webTaskApiVersion?: unknown }
+        detectedBackend = agentBackend(config.backend)
+        if (typeof config.webTaskApiVersion === 'number') detectedWebTaskApiVersion = config.webTaskApiVersion
+        verifiedBackend = config.backend === settings.agentBackend
+        identityRead = true
+        break
+      } catch {
+        if (!explicitLocalAgent || Date.now() >= identityDeadline) break
+        await new Promise(resolve => setTimeout(resolve, 500))
+      }
+      if (revision !== bridgeStartRevision || !hasBridgeConsumers()) return
+    } while (Date.now() < identityDeadline)
+    if (revision !== bridgeStartRevision || !hasBridgeConsumers()) return
+    if (explicitLocalAgent && !identityRead) return connectionFailed(getUiLocale() === 'zh'
+      ? 'Agent 连接等待已超时，请重试连接；若持续失败，再查看安装向导的连接报告。'
+      : 'Timed out waiting for the agent connection. Retry, then check the connection report if it keeps failing.')
+    if ((explicitLocalAgent && !verifiedBackend) || (settings.agentBackend === 'dsh' && detectedBackend !== 'dsh')) {
+      bridge = null
+      rpc = null
+      activeBackend = agentBackend(settings.agentBackend)
+      broadcastStatus()
       return connectionFailed(getUiLocale() === 'zh'
-        ? `${label} 连接失败。请重新运行 Tandix 安装向导完成依赖安装和本机连接检查，再重新加载扩展。详细原因：${detail}`
-        : `${label} connection failed. Rerun the Tandix installer to finish runtime setup and connection checks, then reload the extension. Details: ${detail}`)
+        ? '本机伴随程序返回了其他 Agent，请更新伴随程序后重新连接。'
+        : 'The native companion returned a different agent. Update the companion and reconnect.')
     }
-    return
-  }
-  let detectedBackend: AgentBackend = 'dsh'
-  let detectedWebTaskApiVersion: number | undefined
-  let verifiedBackend = false
-  try {
-    const target = new URL(url)
-    target.protocol = target.protocol === 'wss:' ? 'https:' : 'http:'
-    target.pathname = BRIDGE_CONFIG_PATH
-    const config = await fetch(target, { signal: AbortSignal.timeout(1_500) }).then(response => response.json()) as { backend?: unknown; webTaskApiVersion?: unknown }
-    detectedBackend = agentBackend(config.backend)
-    if (typeof config.webTaskApiVersion === 'number') detectedWebTaskApiVersion = config.webTaskApiVersion
-    verifiedBackend = config.backend === settings.agentBackend
-  } catch { /* Explicit local backends require a matching companion. */ }
-  if (revision !== bridgeStartRevision || !hasBridgeConsumers()) return
-  if ((explicitLocalAgent && !verifiedBackend) || (settings.agentBackend === 'dsh' && detectedBackend !== 'dsh')) {
-    bridge?.stop()
-    bridge = null
-    rpc = null
-    activeBackend = agentBackend(settings.agentBackend)
-    broadcastStatus()
-    return connectionFailed(getUiLocale() === 'zh'
-      ? '本机伴随程序返回了其他 Agent，请更新伴随程序后重新连接。'
-      : 'The native companion returned a different agent. Update the companion and reconnect.')
-  }
-  activeBackend = detectedBackend
-  webTaskApiVersion = detectedWebTaskApiVersion
-  // 手动填的地址常只有主机部分（如 ws://127.0.0.1:3080）；桥路径是协议
-  // 常量，缺省时自动补全，避免连到根路径失败。
-  try {
-    const parsed = new URL(url)
-    if (parsed.pathname === '' || parsed.pathname === '/') parsed.pathname = BRIDGE_PATH
-    url = parsed.toString()
-  } catch {
-    // 非法 URL 原样交给 WebSocket 构造函数报错。
-  }
-  if (bridge === null) {
-    const client = new BridgeClient({
-      onError: (message) => {
-        connectionFailed(getUiLocale() === 'zh' ? `Agent 连接失败，请查看安装向导的连接报告。详细原因：${message}` : message)
-      },
-      onStateChange: (state) => {
-        if (state === 'connected') connectionFailure = null
-        if (state !== 'connected') {
-          webApi.failDisconnected()
-          for (const id of agentApprovalPending) clearAgentApprovalNotification(id)
-          cancelAllToolCalls()
-          interactionResponses.failAll(responseMessages().disconnected)
-          transientEvents.clear()
-        }
-        broadcastStatus()
-        if (state === 'stopped') refreshPanelResumeHints()
-        if (state === 'stopped' && !hasBridgeConsumers()) disarmBridgeKeepalive()
-      },
-      onFrame: (frame) => {
-        webApi.ingest(frame)
-        if (frame.t === 'event') {
-          if (frame.frame.method === 'session/event') {
-            const payload = frame.frame.payload as { sessionId?: unknown; event?: { type?: unknown } } | undefined
-            if (payload?.event?.type === 'turn/end' && typeof payload.sessionId === 'string') {
-              skillTools.revokeSave(payload.sessionId)
+    activeBackend = detectedBackend
+    webTaskApiVersion = detectedWebTaskApiVersion
+    // 手动填的地址常只有主机部分（如 ws://127.0.0.1:3080）；桥路径是协议
+    // 常量，缺省时自动补全，避免连到根路径失败。
+    try {
+      const parsed = new URL(url)
+      if (parsed.pathname === '' || parsed.pathname === '/') parsed.pathname = BRIDGE_PATH
+      url = parsed.toString()
+    } catch {
+      // 非法 URL 原样交给 WebSocket 构造函数报错。
+    }
+    if (bridge === null) {
+      const client = new BridgeClient({
+        onError: (message) => {
+          if (bridge !== client) return
+          connectionFailed(getUiLocale() === 'zh' ? `Agent 连接失败，请查看安装向导的连接报告。详细原因：${message}` : message)
+        },
+        onStateChange: (state) => {
+          if (bridge !== client) return
+          if (state === 'connected') connectionFailure = null
+          if (state !== 'connected') {
+            webApi.failDisconnected()
+            for (const id of agentApprovalPending) clearAgentApprovalNotification(id)
+            cancelAllToolCalls()
+            interactionResponses.failAll(responseMessages().disconnected)
+            transientEvents.clear()
+          }
+          broadcastStatus()
+          if (state === 'stopped') refreshPanelResumeHints()
+          if (state === 'stopped' && !hasBridgeConsumers()) disarmBridgeKeepalive()
+        },
+        onFrame: (frame) => {
+          if (bridge !== client) return
+          webApi.ingest(frame)
+          if (frame.t === 'event') {
+            if (frame.frame.method === 'session/event') {
+              const payload = frame.frame.payload as { sessionId?: unknown; event?: { type?: unknown } } | undefined
+              if (payload?.event?.type === 'turn/end' && typeof payload.sessionId === 'string') {
+                skillTools.revokeSave(payload.sessionId)
+              }
+            }
+            transientEvents.ingest(frame)
+            broadcastEvent(frame)
+            if (frame.frame.method === 'agent-approval/requested' && panelPorts.size === 0) {
+              void notifyAgentApproval(frame.frame.rpcId)
+            } else if (frame.frame.method === 'agent-approval/resolved'
+              && typeof (frame.frame.payload as { approvalRpcId?: unknown } | null)?.approvalRpcId === 'string') {
+              clearAgentApprovalNotification((frame.frame.payload as { approvalRpcId: string }).approvalRpcId)
             }
           }
-          transientEvents.ingest(frame)
-          broadcastEvent(frame)
-          if (frame.frame.method === 'agent-approval/requested' && panelPorts.size === 0) {
-            void notifyAgentApproval(frame.frame.rpcId)
-          } else if (frame.frame.method === 'agent-approval/resolved'
-            && typeof (frame.frame.payload as { approvalRpcId?: unknown } | null)?.approvalRpcId === 'string') {
-            clearAgentApprovalNotification((frame.frame.payload as { approvalRpcId: string }).approvalRpcId)
-          }
-        }
-        else if (frame.t === 'tool.call') routeToolCall(frame)
-        else if (frame.t === 'tool.cancel') cancelToolCall(frame.id)
-        else if (frame.t === 'respond.result') interactionResponses.route(frame)
-        // rpc.result is settled by the rpc facade (wrapped below).
-      },
-      onHelloOk: (negotiated) => {
-        caps = negotiated
-        broadcastStatus()
-        void pushBudgetToControlledTab(negotiated)
-      },
-    }, probeBridge, hasBridgeConsumers)
-    bridge = client
-    rpc = createRpc(client)
+          else if (frame.t === 'tool.call') routeToolCall(frame)
+          else if (frame.t === 'tool.cancel') cancelToolCall(frame.id)
+          else if (frame.t === 'respond.result') interactionResponses.route(frame)
+          // rpc.result is settled by the rpc facade (wrapped below).
+        },
+        onHelloOk: (negotiated) => {
+          if (bridge !== client) return
+          caps = negotiated
+          broadcastStatus()
+          void pushBudgetToControlledTab(negotiated)
+        },
+      }, probeBridge, hasBridgeConsumers)
+      bridge = client
+      rpc = createRpc(client)
+    }
+    if (nativeStartRevision === revision) nativeStartRevision = null
+    bridge.start(url, settings.token)
+  } finally {
+    if (nativeStartRevision === revision) {
+      nativeStartRevision = null
+      broadcastStatus()
+    }
   }
-  bridge.start(url, settings.token)
 }
 
 /** Gateway RPC with a helpful error when the bridge is down. */
@@ -2029,6 +2093,7 @@ chrome.runtime.onConnect.addListener((port) => {
             persistTabAffinity()
             broadcastTabAffinity()
           }
+          approvals.replay(request => deliverApprovalToPanel(port, request))
         }
         break
       }
@@ -2047,7 +2112,7 @@ chrome.runtime.onConnect.addListener((port) => {
           revision: response.revision,
           decision: response.decision,
           sessionId: response.sessionId,
-        }).catch(() => {})
+        }, port).catch(() => {})
         if ((response.decision === 'follow' || response.decision === 'show-controlled') && sid !== undefined) {
           sessionSnapshotRefreshes.set(sid, decision)
           void decision.finally(() => {
@@ -2107,10 +2172,7 @@ chrome.runtime.onConnect.addListener((port) => {
             port.postMessage({ type: 'selection', selection: selections.current(statusWindowId) })
           }
           for (const frame of transientEvents.replay()) port.postMessage({ type: 'event', frame })
-          approvals.replay((request) => {
-            port.postMessage({ type: 'approval.request', request })
-            return true
-          })
+          approvals.replay(request => deliverApprovalToPanel(port, request))
           const resumeWindowId = panelWindows.get(port)
           if (resumeWindowId !== undefined) void postResumeHint(port, resumeWindowId)
         } catch { /* port closed */ }
@@ -2129,6 +2191,7 @@ chrome.runtime.onConnect.addListener((port) => {
     const panelSessionId = panelActiveSessions.get(port)
     panelActiveSessions.delete(port)
     panelPorts.delete(port)
+    approvals.notifyPending(request => [...panelPorts].some(candidate => approvalBelongsToPanel(candidate, request)))
     if (panelSessionId !== undefined) void checkpointSessionPage(panelSessionId)
     interactionResponses.removePort(port)
     if (panelWindowId !== undefined && !hasPanelInWindow(panelWindowId)) {
@@ -2171,10 +2234,11 @@ chrome.notifications.onClicked.addListener((notificationId) => {
   const id = notificationId.slice(APPROVAL_NOTIFICATION_PREFIX.length)
   const windowId = approvals.windowId(id)
   if (windowId === undefined) return
+  const tabId = approvalNotificationTabs.get(id)
   clearApprovalNotification(id)
   // Notification clicks are extension user gestures; both panel APIs require
   // the call to remain inside this handler.
-  openAssistantPanel(windowId)
+  openAssistantPanel(windowId, tabId)
 })
 
 // ---- Tab affinity ----
@@ -2342,11 +2406,17 @@ interface FirefoxSidebarAction {
   open(): Promise<void> | void
 }
 
-function openAssistantPanel(windowId?: number): void {
+function openAssistantPanel(windowId?: number, tabId?: number): void {
   if (import.meta.env.EXT_TARGET === 'firefox') {
     const sidebar = (chrome as unknown as { sidebarAction?: FirefoxSidebarAction }).sidebarAction
     if (sidebar === undefined) return
     void Promise.resolve(sidebar.open()).catch(() => {})
+    return
+  }
+  if (tabId !== undefined) {
+    void chrome.sidePanel.open({ tabId }).catch(() => {})
+    void chrome.tabs.update(tabId, { active: true }).catch(() => {})
+    if (windowId !== undefined) void chrome.windows.update(windowId, { focused: true }).catch(() => {})
     return
   }
   const active = tabAffinity.snapshot().active

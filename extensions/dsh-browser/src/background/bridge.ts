@@ -33,6 +33,7 @@ type BridgeProbe = (url: string) => Promise<boolean>
 const BACKOFF_BASE_MS = 500
 const BACKOFF_MAX_MS = 10_000
 const HELLO_ACK_TIMEOUT_MS = 5_000
+const CONNECTION_GRACE_MS = 30_000
 
 /**
  * Owns one WebSocket connection generation and the reconnect loop.
@@ -46,6 +47,8 @@ export class BridgeClient {
   private url = ''
   private token = ''
   private ackTimer: ReturnType<typeof setTimeout> | undefined
+  private failureTimer: ReturnType<typeof setTimeout> | undefined
+  private transientFailure = ''
 
   constructor(
     readonly sinks: BridgeSinks,
@@ -70,13 +73,17 @@ export class BridgeClient {
     this.running = true
     this.attempt = 0
     this.generation += 1
+    this.emitState('connecting')
+    this.deferFailure('The agent bridge is still unavailable after 30 seconds. Check the local companion and retry.', this.generation)
     void this.loop(this.generation)
   }
 
   /** Stop the loop and close the current socket. */
   stop(): void {
     this.running = false
+    this.generation += 1
     this.clearAckTimer()
+    this.clearFailureTimer()
     this.ws?.close()
     this.ws = null
     this.emitState('stopped')
@@ -116,7 +123,7 @@ export class BridgeClient {
       if (!this.running || generation !== this.generation) return
       if (!this.retryAllowed()) return
       if (!reachable) {
-        this.sinks.onError?.('The agent bridge is not reachable. Rerun the Tandix installer and check its connection report.')
+        this.deferFailure('The agent bridge is still unavailable after 30 seconds. Check the local companion and retry.', generation)
         this.emitState('reconnecting')
         await this.waitBeforeRetry()
         continue
@@ -125,6 +132,7 @@ export class BridgeClient {
       let socket: WebSocket
       try { socket = new WebSocket(this.url) }
       catch (error) {
+        this.clearFailureTimer()
         this.sinks.onError?.(error instanceof Error ? error.message : String(error))
         this.running = false
         this.emitState('stopped')
@@ -138,6 +146,7 @@ export class BridgeClient {
         if (event.code !== 4000 || this.ws !== socket || !this.running) return
         this.running = false
         this.clearAckTimer()
+        this.clearFailureTimer()
         this.ws = null
         this.emitState('stopped')
       }, { once: true })
@@ -153,8 +162,8 @@ export class BridgeClient {
         return
       }
       if (socket.readyState !== WebSocket.OPEN) {
-        this.sinks.onError?.('The WebSocket connection to the agent failed. Check the Tandix install log.')
-        await this.fail(socket)
+        this.deferFailure('The WebSocket connection to the agent could not be established within 30 seconds.', generation)
+        await this.fail(socket, generation)
         continue
       }
 
@@ -168,6 +177,7 @@ export class BridgeClient {
       let authed = false
       const accepted = await new Promise<boolean>((resolve) => {
         const onMessage = (event: MessageEvent): void => {
+          if (!this.running || generation !== this.generation || this.ws !== socket) return
           const frame = parseBridgeFrame(String(event.data))
           if (frame === undefined) return
           if (!authed) {
@@ -190,20 +200,21 @@ export class BridgeClient {
         }
         socket.addEventListener('message', onMessage)
         socket.addEventListener('close', () => {
-          this.clearAckTimer()
+          if (generation === this.generation && this.ws === socket) this.clearAckTimer()
           resolve(false)
         }, { once: true })
         this.ackTimer = setTimeout(() => {
-          this.sinks.onError?.('The agent did not accept the WebSocket handshake within 5 seconds.')
+          this.deferFailure('The agent WebSocket handshake could not be completed within 30 seconds.', generation)
           resolve(false)
         }, HELLO_ACK_TIMEOUT_MS)
       })
       if (!accepted || !this.running || generation !== this.generation) {
-        await this.fail(socket)
+        await this.fail(socket, generation)
         continue
       }
 
       this.attempt = 0
+      this.clearFailureTimer()
       this.emitState('connected')
 
       await new Promise<void>((resolve) => {
@@ -214,17 +225,19 @@ export class BridgeClient {
         socket.close()
         return
       }
-      await this.fail(socket)
+      await this.fail(socket, generation)
     }
   }
 
-  private async fail(socket: WebSocket): Promise<void> {
+  private async fail(socket: WebSocket, generation: number): Promise<void> {
+    if (!this.running || generation !== this.generation) return
     if (this.ws === socket) this.ws = null
     if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
       socket.close()
     }
     if (!this.running) return
     if (!this.retryAllowed()) return
+    this.deferFailure('The agent connection has not recovered within 30 seconds. Check the local companion and retry.', generation)
     this.emitState('reconnecting')
     await this.waitBeforeRetry()
   }
@@ -232,6 +245,7 @@ export class BridgeClient {
   private retryAllowed(): boolean {
     if (this.shouldReconnect()) return true
     this.running = false
+    this.clearFailureTimer()
     this.emitState('stopped')
     return false
   }
@@ -248,6 +262,22 @@ export class BridgeClient {
       clearTimeout(this.ackTimer)
       this.ackTimer = undefined
     }
+  }
+
+  /** Report an outage once, after allowing startup and transient failures to recover. */
+  private deferFailure(message: string, generation: number): void {
+    this.transientFailure = message
+    if (this.failureTimer !== undefined) return
+    this.failureTimer = setTimeout(() => {
+      if (this.running && generation === this.generation && this.state !== 'connected' && this.shouldReconnect()) {
+        this.sinks.onError?.(this.transientFailure)
+      }
+    }, CONNECTION_GRACE_MS)
+  }
+
+  private clearFailureTimer(): void {
+    if (this.failureTimer !== undefined) clearTimeout(this.failureTimer)
+    this.failureTimer = undefined
   }
 
   private emitState(state: BridgeState): void {

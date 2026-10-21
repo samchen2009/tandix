@@ -1,15 +1,21 @@
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import test, { describe } from 'node:test'
 import { chmod, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { findWorkBuddyAgent, WorkBuddyBridge } from '../runtime/workbuddy-bridge.mjs'
+import { CursorBridge, findCursorAgent } from '../runtime/cursor-bridge.mjs'
+
+for (const [backend, Bridge, findAgent, envKey, executable] of [
+  ['workbuddy', WorkBuddyBridge, findWorkBuddyAgent, 'WORKBUDDY_AGENT_PATH', 'codebuddy'],
+  ['cursor', CursorBridge, findCursorAgent, 'CURSOR_AGENT_PATH', 'cursor-agent'],
+]) describe(backend, () => {
 
 function bridge() {
-  const b = new WorkBuddyBridge({ agentPath: '/agent', workspace: '/tmp', runtimePath: new URL('../../package.json', import.meta.url).pathname,
-    hostDir: '/tmp/tandix-unpersisted-workbuddy-unit', extensionId: 'a'.repeat(32) })
+  const b = new Bridge({ agentPath: '/agent', workspace: '/tmp', runtimePath: new URL('../../package.json', import.meta.url).pathname,
+    hostDir: `/tmp/tandix-unpersisted-${backend}-unit`, extensionId: 'a'.repeat(32) })
   b.sessions.clear()
   b.sessions.set('s1', { id: 's1', events: [], updatedAt: 1, title: null })
   b.sessions.set('s2', { id: 's2', events: [], updatedAt: 1, title: null })
@@ -24,7 +30,7 @@ test('ACP permission routing preserves session ownership and never grants persis
   const { b, sent, written } = bridge()
   b.requestPermission({ id: 71, params: { sessionId: 's2', toolCall: { title: 'Edit', rawInput: { path: '/tmp/example' } },
     options: [{ optionId: 'once', kind: 'allow_once' }, { optionId: 'forever', kind: 'allow_always' }, { optionId: 'deny', kind: 'reject_once' }] } })
-  assert.equal(sent[0].frame.payload.backend, 'workbuddy')
+  assert.equal(sent[0].frame.payload.backend, backend)
   assert.equal(sent[0].frame.payload.sessionId, 's2')
   assert.equal(written.length, 0)
   b.settlePermission(sent[0].frame.rpcId, 'accept')
@@ -120,12 +126,12 @@ test('session loading blocks duplicate prompts and does not append replayed hist
 test('agent discovery checks configured path and local installation; directories are not agents', async () => {
   const root = await mkdtemp(join(tmpdir(), 'tandix-wb-discovery-'))
   try {
-    const path = join(root, 'codebuddy'); await writeFile(path, '#!/bin/sh\nexit 0\n'); await chmod(path, 0o700)
-    assert.equal(findWorkBuddyAgent({ env: { PATH: root }, home: root, platform: 'darwin' }), await realpath(path))
-    assert.equal(findWorkBuddyAgent({ env: { WORKBUDDY_AGENT_PATH: path, PATH: '' }, home: root }), await realpath(path))
-    assert.throws(() => findWorkBuddyAgent({ env: { WORKBUDDY_AGENT_PATH: 'relative' } }), /absolute/u)
-    assert.throws(() => findWorkBuddyAgent({ env: { WORKBUDDY_AGENT_PATH: join(root, 'missing') } }), /executable/u)
-    assert.throws(() => findWorkBuddyAgent({ env: { WORKBUDDY_AGENT_PATH: root } }), /executable/u)
+    const path = join(root, executable); await writeFile(path, '#!/bin/sh\nexit 0\n'); await chmod(path, 0o700)
+    assert.equal(findAgent({ env: { PATH: root }, home: root, platform: 'darwin' }), await realpath(path))
+    assert.equal(findAgent({ env: { [envKey]: path, PATH: '' }, home: root }), await realpath(path))
+    assert.throws(() => findAgent({ env: { [envKey]: 'relative' } }), /absolute/u)
+    assert.throws(() => findAgent({ env: { [envKey]: join(root, 'missing') } }), /executable/u)
+    assert.throws(() => findAgent({ env: { [envKey]: root } }), /executable/u)
   } finally { await rm(root, { recursive: true, force: true }) }
 })
 
@@ -144,9 +150,9 @@ test('local ACP process reaches the browser through the real MCP transport and r
   let b; let socket
   try {
     await chmod(fixture, 0o700)
-    b = await WorkBuddyBridge.open({ agentPath: fixture, workspace, runtimePath, hostDir: root, extensionId: 'a'.repeat(32) })
+    b = await Bridge.open({ agentPath: fixture, workspace, runtimePath, hostDir: root, extensionId: 'a'.repeat(32) })
     const config = await fetch(`http://127.0.0.1:${b.port}/ext/bridge-config`).then(response => response.json())
-    assert.equal(config.backend, 'workbuddy')
+    assert.equal(config.backend, backend)
     assert.equal((await fetch(`http://127.0.0.1:${b.port}/tool/${'0'.repeat(32)}`, { method: 'POST' })).status, 403)
     const frames = []
     socket = new WebSocket(b.wsUrl, { origin: `chrome-extension://${'a'.repeat(32)}` })
@@ -172,4 +178,6 @@ test('local ACP process reaches the browser through the real MCP transport and r
     const reply = b.sessions.get(sessionId).events.find(item => item.event.type === 'assistant/message')
     assert.equal(reply.event.data.message.content[0].text, 'Demo page read')
   } finally { socket?.terminate(); b?.close(); await rm(root, { recursive: true, force: true }) }
+})
+
 })

@@ -163,7 +163,8 @@ async function installCodex() {
     codexHome: process.env.CODEX_HOME ?? null,
     searchPath: process.env.PATH ?? '', dshHome: process.env.DSH_HOME ?? null,
     codexPath: findCodex(),
-    workbuddyAgentPath: process.env.WORKBUDDY_AGENT_PATH ?? null, extensionId }, null, 2) + '\n', { mode: 0o600 })
+    workbuddyAgentPath: process.env.WORKBUDDY_AGENT_PATH ?? null,
+    cursorAgentPath: process.env.CURSOR_AGENT_PATH ?? null, extensionId }, null, 2) + '\n', { mode: 0o600 })
 
   registerChromeNativeHost({ workspace, extensionId })
   process.stdout.write(`Registered ${HOST_NAME} for Chrome extension ${extensionId}. Reload Tandix in chrome://extensions.\n`)
@@ -233,7 +234,8 @@ function install() {
     codexHome: process.env.CODEX_HOME ?? null,
     searchPath: process.env.PATH ?? '', dshHome: process.env.DSH_HOME ?? null,
     codexPath: findCodex(),
-    workbuddyAgentPath: process.env.WORKBUDDY_AGENT_PATH ?? null, extensionId }, null, 2) + '\n', { mode: 0o600 })
+    workbuddyAgentPath: process.env.WORKBUDDY_AGENT_PATH ?? null,
+    cursorAgentPath: process.env.CURSOR_AGENT_PATH ?? null, extensionId }, null, 2) + '\n', { mode: 0o600 })
   registerChromeNativeHost({ workspace, extensionId })
   process.stdout.write(`Registered ${HOST_NAME} for extension ${extensionId}. Reload Tandix in chrome://extensions.\n`)
 }
@@ -243,6 +245,7 @@ let ownedBridgeUrl = null
 let ownedChildSandboxDirectory = ''
 let codexBridge = null
 let workbuddyBridge = null
+let cursorBridge = null
 let stopping = false
 let ensureQueue = Promise.resolve()
 
@@ -278,6 +281,7 @@ function shutdown(code = 0) {
   stopOwnedChild()
   codexBridge?.close()
   workbuddyBridge?.close()
+  cursorBridge?.close()
   process.exit(code)
 }
 
@@ -306,6 +310,23 @@ function send(message) {
 
 async function ensureBridge(preference = 'auto', requestedSandboxDirectory = '') {
   const sandboxDirectory = normalizeSandboxDirectory(requestedSandboxDirectory)
+  if (preference === 'cursor' && cursorBridge?.isReady && cursorBridge.sandboxDirectory === sandboxDirectory) return cursorBridge.wsUrl
+  if (preference !== 'cursor') { cursorBridge?.close(); cursorBridge = null }
+  if (preference === 'cursor') {
+    codexBridge?.close(); codexBridge = null
+    workbuddyBridge?.close(); workbuddyBridge = null
+    cursorBridge?.close(); cursorBridge = null
+    stopOwnedChild()
+    const config = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'))
+    const { CursorBridge, findCursorAgent } = await import(pathToFileURL(join(config.workspace, 'scripts', 'runtime', 'cursor-bridge.mjs')).href)
+    const agentPath = findCursorAgent({ env: { ...process.env,
+      ...(typeof config.cursorAgentPath === 'string' ? { CURSOR_AGENT_PATH: config.cursorAgentPath } : {}) } })
+    if (!agentPath) throw new Error('Cursor CLI was not found. Install Cursor CLI and run "agent login", or set CURSOR_AGENT_PATH and reinstall the companion.')
+    cursorBridge = await CursorBridge.open({ agentPath, nodePath: process.execPath,
+      runtimePath: config.runtimePath ?? config.cliPath, workspace: config.workspace, hostDir: HOST_DIR,
+      extensionId: config.extensionId, sandboxDirectory })
+    return cursorBridge.wsUrl
+  }
   if (preference === 'workbuddy' && workbuddyBridge?.isReady && workbuddyBridge.sandboxDirectory === sandboxDirectory) return workbuddyBridge.wsUrl
   if (preference !== 'workbuddy') { workbuddyBridge?.close(); workbuddyBridge = null }
   if (preference === 'workbuddy') {
@@ -449,7 +470,7 @@ function runHost() {
         })
         continue
       }
-      if (message?.type !== 'ensure' || !['auto', 'codex', 'workbuddy', 'dsh'].includes(message.backend ?? 'auto')) {
+      if (message?.type !== 'ensure' || !['auto', 'codex', 'cursor', 'workbuddy', 'dsh'].includes(message.backend ?? 'auto')) {
         send({ type: 'error', message: 'Unsupported native request.' }); continue
       }
       ensureQueue = ensureQueue.then(() => ensureBridge(message.backend ?? 'auto', message.sandboxDirectory)).then(url => {

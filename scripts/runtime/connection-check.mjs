@@ -90,11 +90,11 @@ export async function checkConnection({ executable, args = [], backend, extensio
         throw new Error(result.error?.message || result.result?.result?.error?.message || 'Agent session-list check failed')
       }
       const checks = ['native-messaging', 'backend-identity', 'websocket-hello', 'session-list']
-      if (backend === 'workbuddy') {
+      if (backend === 'workbuddy' || backend === 'cursor') {
         socket.send(JSON.stringify({ t: 'rpc', id: 'tandix-install-auth', method: 'connection.check', payload: {} }))
         const auth = await next(value => value.t === 'rpc.result' && value.id === 'tandix-install-auth')
         if (auth.ok !== true || auth.result?.result?.ok !== true || auth.result?.result?.value?.authenticated !== true) {
-          throw new Error(auth.error?.message || auth.result?.result?.error?.message || 'WorkBuddy CLI authentication check failed')
+          throw new Error(auth.error?.message || auth.result?.result?.error?.message || `${backend} CLI authentication check failed`)
         }
         checks.push('acp-session-authentication')
       }

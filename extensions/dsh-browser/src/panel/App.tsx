@@ -31,6 +31,8 @@ import {
 } from './ui-scale.ts'
 import { QuestionCard } from './QuestionCard.tsx'
 import { UpdateCard } from './UpdateCard.tsx'
+import { SkillCaptureButton } from './SkillCaptureButton.tsx'
+import { AgentConfiguration } from './AgentConfiguration.tsx'
 import { CodexCapabilities } from './CodexCapabilities.tsx'
 import { buildGoalContinuePrompt, buildGoalDraftPrompt, buildGoalObjective, buildGoalStartPrompt, parseGoalDraft, type GoalState } from './goal.ts'
 import { MessageImages } from './MessageImages.tsx'
@@ -712,7 +714,7 @@ const ToolActivity = memo(function ToolActivity({ row, copy }: { row: Row; copy:
       <summary aria-label={`${category}: ${row.text}. ${copy.tool.details}`}>
         <span className="tool-icon"><ToolIcon /></span>
         <span className="tool-copy">
-          <span className="tool-label">{category}</span>
+          <span className="tool-label">{tools.length > 0 ? `${tools.length} · ` : ''}{category}</span>
           <span className="tool-summary">{row.text}</span>
         </span>
         <span className="tool-state" aria-label={running ? copy.tool.inProgress : copy.tool.completed}>{state}</span>
@@ -748,6 +750,8 @@ export function App(): React.JSX.Element {
   const [proposedSkill, setProposedSkill] = useState<ChatSkillDraft | null>(null)
   const [skillQuestionAnswers, setSkillQuestionAnswers] = useState<Record<number, string>>({})
   const [skillExtracting, setSkillExtracting] = useState(false)
+  const skillExtractingRef = useRef(false)
+  const [recordingState, setRecordingState] = useState<TeachState>({ phase: 'idle' })
   const recordingIdRef = useRef<string | null>(null)
   const recentActionsRef = useRef<RecordingEventInput[]>([])
   const [state, setState] = useState<BridgeState>('stopped')
@@ -755,6 +759,11 @@ export function App(): React.JSX.Element {
   const [backend, setBackend] = useState<AgentBackend>('dsh')
   const backendRef = useRef<AgentBackend>('dsh')
   const [showBackendPicker, setShowBackendPicker] = useState(false)
+  const [configurationBusy, setConfigurationBusy] = useState(false)
+  const [configurationRevision, setConfigurationRevision] = useState(0)
+  const [showMore, setShowMore] = useState(false)
+  const [showAttachments, setShowAttachments] = useState(false)
+  const [modelSelection, setModelSelection] = useState<{ sessionId: string; value: unknown } | null>(null)
   const [switchingBackend, setSwitchingBackend] = useState(false)
   const [settings, setSettings] = useState<PanelSettings | null>(null)
   const [rows, setRows] = useState<Row[]>([])
@@ -868,7 +877,7 @@ export function App(): React.JSX.Element {
   const nextSeq = (): number => { seqRef.current += 1; return seqRef.current }
   const question = questions[0] ?? null
   const questionSubmitting = question !== null && hasPendingQuestion(questionSubmissions, question)
-  const sessionSwitchBlocked = sessionChanging || busy || addingImages || stopping || goalBusy || goalDrafting
+  const sessionSwitchBlocked = configurationBusy || sessionChanging || busy || addingImages || stopping || goalBusy || goalDrafting
     || questions.length > 0 || approvalQueue.length > 0
   const sessionReady = sessionAcceptsPrompts(
     state === 'connected',
@@ -955,7 +964,9 @@ export function App(): React.JSX.Element {
   }, [])
 
   useEffect(() => {
+    let receivedState = false
     const offState = api.onRecordingState((next) => {
+      receivedState = true
       rememberRecordingState(next)
     })
     const offEvent = api.onRecordingEvent((recordingId, event) => {
@@ -965,12 +976,13 @@ export function App(): React.JSX.Element {
         .filter((item) => item.capturedAt >= cutoff).slice(-200)
     })
     void api.getRecordingState().then((next) => {
-      rememberRecordingState(next)
+      if (!receivedState) rememberRecordingState(next)
     }).catch(() => {})
     return () => { offState(); offEvent() }
   }, [api])
 
   function rememberRecordingState(next: TeachState): void {
+    setRecordingState(previous => previous.phase === next.phase && previous.recordingId === next.recordingId ? previous : next)
     // Chrome pauses one tab's recorder while the user works in another tab.
     // Keep this panel's already-routed events so returning to the page still
     // represents its own complete recent-ten-minute activity window.
@@ -987,9 +999,10 @@ export function App(): React.JSX.Element {
       setConnectionError(failure ?? null)
       setState(next)
       setCaps(nextCaps)
+      if (backendRef.current !== nextBackend) setModelSelection(null)
       setBackend(nextBackend)
       backendRef.current = nextBackend
-      if (next !== 'connected') setAgentApprovals([])
+      if (next !== 'connected') { setAgentApprovals([]); setSkillExtractionBusy(false) }
       const previous = lastStateRef.current
       lastStateRef.current = next
       if (previous !== null && next !== previous && next === 'stopped') {
@@ -1009,6 +1022,7 @@ export function App(): React.JSX.Element {
         setImageLimits(null)
         imageProjectionRef.current = { sessionId: null, seq: Number.NEGATIVE_INFINITY, limits: null }
         setSessionTitle(null)
+        setModelSelection(null)
         setGoal(null)
         setGoalStartError(null)
         setGoalFormOpen(false)
@@ -1070,6 +1084,11 @@ export function App(): React.JSX.Element {
     if (sessionId !== undefined && queuedApproval !== undefined) void focusApprovalSession(queuedApproval)
   }, [queuedApproval?.id, queuedApproval?.sessionId, sessionChanging, state])
 
+  useEffect(() => {
+    const textarea = document.querySelector<HTMLTextAreaElement>('.composer textarea')
+    if (textarea) { textarea.style.height = 'auto'; textarea.style.height = `${Math.min(textarea.scrollHeight, 180)}px` }
+  }, [input, workspaceMode, showSettings])
+
   // Auto-scroll to the newest row.
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
@@ -1100,6 +1119,11 @@ export function App(): React.JSX.Element {
   /** Live frame handling: session events append rows; turn/end reconciles with history. */
   async function onFrame(frame: ServerFrame): Promise<void> {
     if (frame.t !== 'event') return
+    if (frame.frame.method === 'agent/configuration-changed') {
+      const payload = frame.frame.payload as { sessionId?: unknown } | undefined
+      if (payload?.sessionId === sessionRef.current) setConfigurationRevision(value => value + 1)
+      return
+    }
     if (frame.frame.method === 'goal/refresh') {
       const payload = frame.frame.payload as { sessionId?: unknown } | undefined
       if (payload?.sessionId === sessionRef.current) void refreshGoal(payload.sessionId as string)
@@ -1197,6 +1221,9 @@ export function App(): React.JSX.Element {
         && typeof projection.seq === 'number') {
         applyImageProjection(projection.sessionId, projection.seq, projection.value)
       }
+      if (typeof projection.sessionId === 'string' && projection.sessionId === sessionRef.current && projection.key === 'modelSelection') {
+        setModelSelection({ sessionId: projection.sessionId, value: projection.value })
+      }
       return
     }
     const payload = frame.frame.payload as { sessionId?: string; event?: SessionEventView } | undefined
@@ -1238,11 +1265,9 @@ export function App(): React.JSX.Element {
       stoppingRef.current = false
       setStopping(false)
       setWorking(false)
-      if (pendingSkillExtractionRef.current === payload.sessionId) {
-        setSkillExtracting(false)
-      }
       clearQuestions()
       await refreshHistory(payload.sessionId)
+      if (pendingSkillExtractionRef.current === payload.sessionId) setSkillExtractionBusy(false)
       void refreshGoal(payload.sessionId)
       const saveRequest = pendingManagedSkillSaveRef.current
       if (saveRequest?.sessionId === payload.sessionId) {
@@ -1428,6 +1453,7 @@ export function App(): React.JSX.Element {
       }
     }
     applyHistoryImageProjection(id, history.projections)
+    setModelSelection({ sessionId: id, value: history.projections?.values?.modelSelection })
     const historyTitle = latestSessionTitle(events)
     const contentTitle = latestSessionContentTitle(events)
     sessionContentTitlesRef.current.set(id, historyTitle ?? contentTitle ?? null)
@@ -1955,6 +1981,7 @@ export function App(): React.JSX.Element {
   }
 
   async function send(textOverride?: string): Promise<boolean> {
+    if (configurationBusy) return false
     const text = (textOverride ?? input).trim()
     const saveSkillIntent = textOverride === undefined && requestsSkillSave(text)
     const submittedImages = textOverride === undefined ? draftImages : []
@@ -2021,7 +2048,13 @@ export function App(): React.JSX.Element {
     }
   }
 
+  function setSkillExtractionBusy(value: boolean): void {
+    skillExtractingRef.current = value
+    setSkillExtracting(value)
+  }
+
   async function extractSkillFromRecentActions(): Promise<void> {
+    if (skillExtractingRef.current || busy || working || configurationBusy) return
     if (!sessionReady || sessionRef.current === null) {
       setError(locale === 'zh' ? '请先连接 Agent。' : 'Connect an agent first.')
       return
@@ -2039,7 +2072,7 @@ export function App(): React.JSX.Element {
       return
     }
     pendingSkillExtractionRef.current = sessionRef.current
-    setSkillExtracting(true)
+    setSkillExtractionBusy(true)
     proposedSkillRef.current = null
     await clearChatSkillDraftCheckpoint().catch(() => {})
     setSkillQuestionAnswers({})
@@ -2047,7 +2080,7 @@ export function App(): React.JSX.Element {
     const accepted = await send(buildExtractSkillPrompt(recap, locale, evidence))
     if (!accepted) {
       pendingSkillExtractionRef.current = null
-      setSkillExtracting(false)
+      setSkillExtractionBusy(false)
       setError(locale === 'zh' ? '提炼请求未发送，请检查 Agent 连接。' : 'Extraction request was not sent. Check the agent connection.')
     }
   }
@@ -2061,7 +2094,7 @@ export function App(): React.JSX.Element {
     if (pendingSkillExtractionRef.current !== sourceSessionId) {
       pendingSkillExtractionRef.current = sourceSessionId
     }
-    setSkillExtracting(false)
+    setSkillExtractionBusy(false)
     const previousQuestions = proposedSkillRef.current?.questions ?? []
     if (previousQuestions.length !== extracted.questions.length
       || previousQuestions.some((question, index) => question !== extracted.questions[index])) {
@@ -2505,6 +2538,29 @@ export function App(): React.JSX.Element {
     : !approvalReadyForSession(queuedApproval, sessionRef.current, sessionChanging)
       ? null : <ApprovalDialog request={queuedApproval!} onDecision={decideApproval} copy={copy} />
 
+  const backendControl = (
+        <div className="connection-control">
+          <button type="button" className="connection" aria-expanded={showBackendPicker}
+            aria-label={locale === 'zh' ? `连接状态：${statusText}。点击选择 Agent` : `Connection: ${statusText}. Choose agent`}
+            onClick={() => setShowBackendPicker((shown) => !shown)}>
+            <span className={`dot ${state}`} />
+            <span className="connection-label" title={statusText}>{state === 'connected' ? agentLabel(backend, locale) : statusText}</span>
+            <ChevronDownIcon />
+          </button>
+          {showBackendPicker && <div className="backend-picker" role="menu">
+            <p>{locale === 'zh' ? '连接到' : 'Connect to'}</p>
+            {AGENT_CHOICES.map((choice) => <button type="button" role="menuitemradio"
+              key={choice} aria-checked={settings?.agentBackend === choice}
+              disabled={settings === null || switchingBackend || working || sessionSwitchBlocked}
+              onClick={() => { void chooseBackend(choice) }}>
+              <span>{agentLabel(choice, locale)}</span>
+              {settings?.agentBackend === choice && <span aria-hidden="true">✓</span>}
+            </button>)}
+            {(working || sessionSwitchBlocked) && <small>{locale === 'zh' ? '请先停止当前任务再切换' : 'Stop the current task before switching'}</small>}
+          </div>}
+        </div>
+  )
+
   if (showSettings) {
     return (
       <><div className="settings">
@@ -2515,6 +2571,9 @@ export function App(): React.JSX.Element {
             <h1>{copy.settings.title}</h1>
           </div>
         </div>
+        <AgentConfiguration api={api} backend={backend} sessionId={sessionRef.current} connected={state === 'connected' && !sessionChanging}
+          embedded onBusyChange={setConfigurationBusy} onModelSelected={selected => { if (sessionRef.current) setModelSelection({ sessionId: sessionRef.current, value: { next: selected } }) }}
+          working={working} revision={configurationRevision} selection={modelSelection?.sessionId === sessionRef.current ? modelSelection.value : null} locale={locale} />
         <UpdateCard copy={copy.update} />
         <div className="settings-panel">
           <label>
@@ -2642,7 +2701,11 @@ export function App(): React.JSX.Element {
               : 'Using your signed-in Codex. Skills, MCP servers and plugins come from the same Codex environment.'}</p>
           </section>
           {state === 'connected' && <CodexCapabilities api={api} sessionId={sessionRef.current} locale={locale} />}</>
-        ) : backend === 'workbuddy' ? <section className="relay-config" aria-label="WorkBuddy">
+        ) : backend === 'cursor' ? <section className="relay-config" aria-label="Cursor">
+          <p>{locale === 'zh'
+            ? 'Cursor 通过本机 Cursor CLI 连接。请安装支持 ACP 的版本，运行 agent login 完成登录，再重新连接。'
+            : 'Cursor connects through the local Cursor CLI. Install a version with ACP support, run agent login, then reconnect.'}</p>
+        </section> : backend === 'workbuddy' ? <section className="relay-config" aria-label="WorkBuddy">
           <p>{locale === 'zh'
             ? 'WorkBuddy 通过本机 ACP Agent 连接。请配置兼容的 Agent 运行时并完成其登录；此连接不会自动复用 WorkBuddy 桌面端账号。'
             : 'WorkBuddy connects through a local ACP agent. Configure and sign in to a compatible runtime; this connection does not automatically reuse the WorkBuddy desktop login.'}</p>
@@ -2780,51 +2843,18 @@ export function App(): React.JSX.Element {
   return (
     <><div className="app">
       <header className="topbar">
-        <div className="connection-control">
-          <button type="button" className="connection" aria-expanded={showBackendPicker}
-            aria-label={locale === 'zh' ? `连接状态：${statusText}。点击选择 Agent` : `Connection: ${statusText}. Choose agent`}
-            onClick={() => setShowBackendPicker((shown) => !shown)}>
-            <span className={`dot ${state}`} />
-            <span className="connection-label">{statusText}</span>
-            <ChevronDownIcon />
-          </button>
-          {showBackendPicker && <div className="backend-picker" role="menu">
-            <p>{locale === 'zh' ? '连接到' : 'Connect to'}</p>
-            {AGENT_CHOICES.map((choice) => <button type="button" role="menuitemradio"
-              key={choice} aria-checked={settings?.agentBackend === choice}
-              disabled={settings === null || switchingBackend || working || sessionSwitchBlocked}
-              onClick={() => { void chooseBackend(choice) }}>
-              <span>{agentLabel(choice, locale)}</span>
-              {settings?.agentBackend === choice && <span aria-hidden="true">✓</span>}
-            </button>)}
-            {(working || sessionSwitchBlocked) && <small>{locale === 'zh' ? '请先停止当前任务再切换' : 'Stop the current task before switching'}</small>}
-          </div>}
-        </div>
+        {workspaceMode === 'run' && backendControl}
         <button className="session-menu-trigger" disabled={state !== 'connected' || sessionSwitchBlocked}
           aria-expanded={showSessionPicker} aria-label={copy.app.openSessions}
           onClick={() => { void openSessionPicker() }} title={sessionMenuTitle}>
           <span>{sessionMenuTitle}</span>
           <ChevronDownIcon />
         </button>
-        <div className="topbar-actions">
-          <button className="icon-button new-session-trigger" disabled={state !== 'connected' || sessionSwitchBlocked}
-            onClick={() => { void startNewSession() }}
-            aria-label={copy.app.newSession} title={copy.app.newSession}>
-            <PlusIcon />
-          </button>
-          <button className="icon-button text-size-trigger" onClick={() => setShowTextSize((open) => !open)}
-            aria-expanded={showTextSize} aria-label={copy.textSize.open} title={copy.textSize.open}>
-            <TextSizeIcon />
-          </button>
-          <button className="icon-button settings-trigger" onClick={() => setShowSettings(true)}
-            aria-label={copy.app.openSettings} title={copy.app.settings}><SettingsIcon /></button>
-        </div>
-      </header>
       <nav className="workspace-nav" aria-label={locale === 'zh' ? '网页助手工作模式' : 'Tandix workspace mode'}>
         {(['chat', 'run'] as const).map((mode) => (
           <button key={mode} aria-current={workspaceMode === mode ? 'page' : undefined}
             onClick={() => setWorkspaceMode(mode)}>
-            {mode === 'chat' ? 'Chat' : <span className="skills-tab-label">
+            {mode === 'chat' ? (locale === 'zh' ? '对话' : 'Chat') : <span className="skills-tab-label">
               <span>{locale === 'zh' ? '技能' : 'Skills'}</span>
               <sup className="skills-tab-count" aria-label={locale === 'zh'
                 ? `${skills.length + managedSkillCount} 个技能` : `${skills.length + managedSkillCount} skills`}>{skills.length + managedSkillCount}</sup>
@@ -2832,6 +2862,27 @@ export function App(): React.JSX.Element {
           </button>
         ))}
       </nav>
+        <div className="topbar-actions">
+          <button className="icon-button new-session-trigger" disabled={state !== 'connected' || sessionSwitchBlocked}
+            onClick={() => { void startNewSession() }}
+            aria-label={copy.app.newSession} title={copy.app.newSession}>
+            <PlusIcon />
+          </button>
+          <div className="more-control">
+            <button type="button" className="icon-button more-trigger" aria-label={locale === 'zh' ? '更多操作' : 'More actions'}
+              aria-expanded={showMore} onClick={() => setShowMore(value => !value)}><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" /></svg></button>
+            {showMore && <><button type="button" className="menu-dismiss" aria-label={locale === 'zh' ? '关闭菜单' : 'Close menu'} onClick={() => setShowMore(false)} />
+            <div className="utility-menu" role="menu" onKeyDown={event => { if (event.key === 'Escape') setShowMore(false) }}>
+              <button type="button" role="menuitem" className="settings-trigger" onClick={() => { setShowMore(false); setShowSettings(true) }}><SettingsIcon />{copy.app.settings}</button>
+              <button type="button" role="menuitem" className="text-size-trigger" onClick={() => { setShowMore(false); setShowTextSize(value => !value) }}><TextSizeIcon />{copy.textSize.open}</button>
+              {backend !== 'cursor' && backend !== 'workbuddy' && <button type="button" role="menuitem" onClick={() => { setShowMore(false); setWorkspaceMode('chat'); setGoalFormOpen(value => !value) }}>{locale === 'zh' ? '设定任务目标' : 'Set task goal'}</button>}
+              <button type="button" role="menuitem" className="skill-extract-button" disabled={!sessionReady || busy || working || skillExtracting}
+                onClick={() => { setShowMore(false); void extractSkillFromRecentActions() }}>{skillExtracting ? (locale === 'zh' ? '生成中…' : 'Creating…') : (locale === 'zh' ? '从操作生成技能' : 'Create skill from actions')}</button>
+            </div></>}
+          </div>
+        </div>
+      </header>
+
       {showTextSize && (
         <TextSizePanel scale={uiScale} copy={copy}
           onStep={(direction) => changeUiScale(stepUiScale(uiScaleRef.current, direction))}
@@ -2839,7 +2890,7 @@ export function App(): React.JSX.Element {
       )}
       {workspaceMode === 'chat' && <>
       <TabAffinityBanner state={tabAffinity} copy={copy} onDecision={decideTabAffinity} />
-      {backend !== 'workbuddy' && <section className="task-goal" aria-label={locale === 'zh' ? '任务目标' : 'Task goal'}>
+      {backend !== 'workbuddy' && backend !== 'cursor' && (goal !== null || goalFormOpen) && <section className="task-goal" aria-label={locale === 'zh' ? '任务目标' : 'Task goal'}>
         {goal === null ? <>
           <div className="task-goal-heading">
             <div><strong>{locale === 'zh' ? '让 Agent 持续完成目标' : 'Give the agent a goal'}</strong>
@@ -3041,6 +3092,17 @@ export function App(): React.JSX.Element {
       {(error ?? connectionError) !== null && <div className="error">{error ?? connectionError}</div>}
       <footer className="composer">
         <div className="composer-box">
+          <div className="composer-context">
+            <button type="button" className="page-context-chip" disabled={tabAffinity?.controlled == null}
+              onClick={() => decideTabAffinity('show-controlled')} title={tabAffinity?.controlled?.url ?? ''}>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18Z"/></svg>
+              <span>{tabAffinity?.controlled ? tabLabel(tabAffinity.controlled, '') : (locale === 'zh' ? '当前网页' : 'Current page')}</span>
+              {tabAffinity?.pinned && <small>{locale === 'zh' ? '固定' : 'Pinned'}</small>}
+            </button>
+            <SkillCaptureButton recording={recordingState} processing={skillExtracting}
+              disabled={!sessionReady || busy || working || configurationBusy || sessionChanging} locale={locale}
+              onExtract={() => { void extractSkillFromRecentActions() }} />
+          </div>
           {selection !== null && (
             <SelectionQuote
               selection={{ ...selection, quote: selection.text }}
@@ -3104,7 +3166,7 @@ export function App(): React.JSX.Element {
               }
             }}
             placeholder={state === 'connected' ? copy.app.connectedPlaceholder : copy.app.disconnectedPlaceholder}
-            disabled={!sessionReady || busy || goalDrafting}
+            disabled={!sessionReady || busy || configurationBusy || goalDrafting}
             rows={2}
           />
           <div className="composer-actions">
@@ -3122,24 +3184,34 @@ export function App(): React.JSX.Element {
                   void addAttachmentFiles(files)
                 }}
               />
-              <button
-                type="button"
-                className="attachment-button"
-                disabled={!sessionReady || busy || addingImages || imageLimits === null
-                  || (backend === 'dsh' && draftImages.length >= imageLimits.maxImagesPerMessage)}
-                aria-label={copy.app.addImages}
-                title={imageLimits === null ? copy.app.imageUnavailable : copy.app.addImages}
-                onClick={() => fileInputRef.current?.click()}
-              ><AttachmentIcon /></button>
-              <button type="button" className="recording-composer-button skill-extract-button"
-                disabled={!sessionReady || busy || working || skillExtracting}
-                aria-label={locale === 'zh' ? '生成技能' : 'Create skill'}
-                title={locale === 'zh' ? '根据最近 10 分钟录制的操作生成技能' : 'Create a skill from recorded actions in the last 10 minutes'}
-                onClick={() => { void extractSkillFromRecentActions() }}>
-                <span>{skillExtracting ? (locale === 'zh' ? '生成中…' : 'Creating…') : (locale === 'zh' ? '生成技能' : 'Create skill')}</span>
-              </button>
-              <span>{copy.app.composerHelp}</span>
+              <div className="attachment-control">
+                <button type="button" className="attachment-button" aria-label={locale === 'zh' ? '添加内容' : 'Add content'}
+                  aria-expanded={showAttachments} onClick={() => setShowAttachments(value => !value)}><PlusIcon /></button>
+                {showAttachments && <><button type="button" className="menu-dismiss" aria-label={locale === 'zh' ? '关闭菜单' : 'Close menu'} onClick={() => setShowAttachments(false)} />
+                  <div className="attachment-menu utility-menu" role="menu">
+                    <button type="button" role="menuitem" disabled={!sessionReady || busy || addingImages || imageLimits === null
+                      || (backend === 'dsh' && draftImages.length >= imageLimits.maxImagesPerMessage)}
+                      title={imageLimits === null ? copy.app.imageUnavailable : copy.app.addImages}
+                      onClick={() => { setShowAttachments(false); fileInputRef.current?.click() }}><AttachmentIcon />{copy.app.addImages}</button>
+                    {backend !== 'cursor' && backend !== 'workbuddy' && <button type="button" role="menuitem" onClick={() => { setShowAttachments(false); setGoalFormOpen(true) }}>{locale === 'zh' ? '设定任务目标' : 'Set task goal'}</button>}
+                    <button type="button" role="menuitem" className="skill-extract-button" disabled={!sessionReady || busy || working || skillExtracting}
+                      onClick={() => { setShowAttachments(false); void extractSkillFromRecentActions() }}>{locale === 'zh' ? '从操作生成技能' : 'Create skill from actions'}</button>
+                  </div></>}
+              </div>
+              <details className="permission-control">
+                <summary title={locale === 'zh' ? '查看浏览器权限' : 'Browser permissions'}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/></svg><span>{settings?.unrestrictedBrowserAccess ? (locale === 'zh' ? '完整权限' : 'Full access') : (locale === 'zh' ? '基本权限' : 'Basic access')}</span><span aria-hidden="true">⌄</span></summary>
+                <div className="permission-popover"><strong>{locale === 'zh' ? '浏览器权限' : 'Browser permissions'}</strong>
+                  <p>{settings?.unrestrictedBrowserAccess ? (locale === 'zh' ? '已启用完整浏览器访问。' : 'Full browser access is enabled.') : (locale === 'zh' ? '网页操作遵循现有授权规则，需要确认时会显示审批。' : 'Browser actions follow your approval rules. Approval is requested when needed.')}</p>
+                  <p>{locale === 'zh' ? '本机文件与命令权限由 Agent 单独管理。' : 'Agent file and command permissions are managed separately.'}</p>
+                  <button type="button" onClick={() => setShowSettings(true)}>{locale === 'zh' ? '管理权限' : 'Manage permissions'}</button>
+                </div>
+              </details>
             </span>
+            <div className="composer-actions-end">
+              {backendControl}
+              <AgentConfiguration onConfigure={() => setShowSettings(true)} api={api} backend={backend} sessionId={sessionRef.current} connected={state === 'connected' && !sessionChanging}
+                onBusyChange={setConfigurationBusy} onModelSelected={selected => { if (sessionRef.current) setModelSelection({ sessionId: sessionRef.current, value: { next: selected } }) }}
+                working={working} revision={configurationRevision} selection={modelSelection?.sessionId === sessionRef.current ? modelSelection.value : null} locale={locale} />
             {working ? (
               <button
                 className="stop-button"
@@ -3152,12 +3224,14 @@ export function App(): React.JSX.Element {
               </button>
             ) : (
               <button onClick={() => void send()}
-                disabled={!sessionReady || busy || goalDrafting || addingImages
+                disabled={!sessionReady || busy || configurationBusy || goalDrafting || addingImages
                   || (input.trim() === '' && draftImages.length === 0 && draftFiles.length === 0 && selection === null)}
                 aria-label={copy.app.sendMessage}><SendIcon /></button>
             )}
+            </div>
           </div>
         </div>
+        <div className="composer-caption">{copy.app.composerHelp}</div>
       </footer>
       </>}
       {workspaceMode === 'run' && <RunSkillsPanel skills={skills} locale={locale} canRun={sessionReady && !busy && !working}

@@ -8,6 +8,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { createInterface } from 'node:readline'
 import { delimiter, dirname, join } from 'node:path'
 import { homedir } from 'node:os'
+import { codexConfiguration } from './agent-configuration.mjs'
 import { LarkAuth } from './lark-auth.mjs'
 import { TANDIX_BROWSER_INSTRUCTIONS } from './browser-guidance.mjs'
 import { titleFromCodexTurns } from './session-title.mjs'
@@ -71,6 +72,16 @@ export class CodexBridge {
       this.toolRoutes = new Map(Object.entries(saved).filter(([token, sessionId]) =>
         /^[a-f0-9]{32}$/.test(token) && typeof sessionId === 'string' && this.sessions.has(sessionId)))
     } catch { this.toolRoutes = new Map() }
+    this.modelSelectionsPath = join(hostDir, 'codex-model-selections.json')
+    this.modelSelections = new Map()
+    this.configurationChanges = new Set()
+    try {
+      for (const [id, value] of Object.entries(JSON.parse(readFileSync(this.modelSelectionsPath, 'utf8')))) {
+        if (this.sessions.has(id) && record(value) && typeof value.model === 'string' && value.model.length <= 200
+          && (value.effort == null || typeof value.effort === 'string')) this.modelSelections.set(id, { model: value.model, ...(value.effort === undefined ? {} : { effort: value.effort }) })
+      }
+    } catch { /* No saved session selection yet. */ }
+    this.sessionConfigurations = new Map()
     this.pending = new Map()
     this.toolPending = new Map()
     this.agentApprovals = new Map()
@@ -597,6 +608,11 @@ export class CodexBridge {
     }
     const sessionId = params.threadId ?? params.thread?.id
     if (typeof sessionId !== 'string' || !this.sessions.has(sessionId)) return
+    if (method === 'thread/settings/updated' && record(params.threadSettings)) {
+      this.sessionConfigurations.set(sessionId, params.threadSettings)
+      this.browserSend({ t: 'event', frame: { rpcId: '', method: 'agent/configuration-changed', payload: { sessionId } } })
+      return
+    }
     if (method === 'item/started' && typeof params.item?.id === 'string'
       && (params.item.type === 'commandExecution' || params.item.type === 'fileChange')) {
       this.pendingItems.set(params.item.id, params.item)
@@ -851,6 +867,62 @@ export class CodexBridge {
         if (!this.sessions.has(payload?.sessionId)) throw new Error('Unknown Tandix Codex session')
         return this.call('thread/goal/clear', { threadId: payload.sessionId })
       }
+      case 'agent.models': {
+        const models = []
+        let cursor = null
+        do {
+          const result = await this.call('model/list', { limit: 100, includeHidden: false, cursor })
+          for (const model of result?.data ?? []) {
+            if (typeof (model.model ?? model.id) !== 'string') continue
+            models.push({ id: model.model ?? model.id, label: model.displayName ?? model.model ?? model.id,
+              efforts: (model.supportedReasoningEfforts ?? []).map(item => item.reasoningEffort).filter(value => typeof value === 'string'),
+              defaultEffort: typeof model.defaultReasoningEffort === 'string' ? model.defaultReasoningEffort : null })
+          }
+          cursor = result?.nextCursor ?? null
+        } while (cursor !== null && models.length < 500)
+        return { models }
+      }
+      case 'agent.configuration.set': {
+        const id = payload?.sessionId
+        if (!this.sessions.has(id) || this.webTaskDirectories.has(id)) throw new Error('Choose a Tandix chat session first')
+        if (this.turns.has(id) || this.configurationChanges.has(id)) throw new Error('Stop the current operation before changing its model')
+        this.configurationChanges.add(id)
+        try {
+          const { models } = await this.rpc('agent.models', {})
+          if (this.turns.has(id)) throw new Error('Stop the current turn before changing its model')
+          const model = models.find(item => item.id === payload.model)
+          if (!model) throw new Error('This model is not available in the current Codex account')
+          const effort = payload.reasoningEffort ?? model.defaultEffort
+          if (effort && !model.efforts.includes(effort)) throw new Error('Unsupported reasoning effort for this model')
+          const selected = { model: model.id, effort: effort || null }
+          const selections = new Map(this.modelSelections).set(id, selected)
+          mkdirSync(this.hostDir, { recursive: true, mode: 0o700 })
+          writeFileSync(this.modelSelectionsPath, JSON.stringify(Object.fromEntries(selections)), { mode: 0o600 })
+          this.modelSelections = selections
+          this.browserSend({ t: 'event', frame: { rpcId: '', method: 'agent/configuration-changed', payload: { sessionId: id } } })
+          return { saved: true, ...codexConfiguration(id, { model: model.id, reasoningEffort: effort }, 'next-turn') }
+        } finally { this.configurationChanges.delete(id) }
+      }
+      case 'agent.configuration': {
+        const id = payload?.sessionId
+        if (id) {
+          if (!this.sessions.has(id)) throw new Error('Unknown Tandix Codex session')
+          const result = await this.call('thread/read', { threadId: id, includeTurns: false })
+          const cached = this.sessionConfigurations.get(id)
+          const thread = result?.thread ?? {}
+          const current = codexConfiguration(id, { ...cached, ...Object.fromEntries(Object.entries(thread).filter(([, value]) => value !== undefined)) },
+            this.loaded.has(id) ? 'session' : 'last-known')
+          const selected = this.modelSelections.get(id)
+          if (selected && (current.modelId !== selected.model || current.reasoningEffort !== (selected.effort ?? null))) {
+            return { ...current, modelId: selected.model, modelLabel: selected.model, reasoningEffort: selected.effort ?? null, source: 'next-turn' }
+          }
+          return current
+        }
+        const result = await this.call('config/read', { includeLayers: false, cwd: join(this.workspace, 'workspace') })
+        const config = result?.config ?? {}
+        return codexConfiguration(null, { model: config.model, modelProvider: config.model_provider, reasoningEffort: config.model_reasoning_effort,
+          approvalPolicy: config.approval_policy, sandbox: { type: config.sandbox_mode } }, 'default')
+      }
       case 'codex.capabilities': return this.capabilities(payload?.sessionId)
       case 'codex.lark.status': return this.larkAuth.status()
       case 'codex.lark.login.start': return this.larkAuth.start()
@@ -907,6 +979,7 @@ export class CodexBridge {
         })
         const sessionId = result?.thread?.id
         if (typeof sessionId !== 'string') throw new Error('Codex did not return a thread ID')
+        this.sessionConfigurations.set(sessionId, result)
         await this.verifyBrowserMcpTools(sessionId)
         this.sessions.add(sessionId)
         this.rememberToolRoute(routeToken, sessionId)
@@ -917,6 +990,7 @@ export class CodexBridge {
       }
       case 'session.prompt': {
         const sessionId = payload?.sessionId
+        if (this.configurationChanges.has(sessionId)) throw new Error('Wait for model settings to finish saving')
         if (!this.sessions.has(sessionId)) throw new Error('Unknown Tandix Codex session')
         const input = []
         for (const part of payload?.content ?? []) {
@@ -951,16 +1025,17 @@ export class CodexBridge {
             this.loaded.add(sessionId)
           } else {
             const routeToken = randomBytes(16).toString('hex')
-            await this.call('thread/resume', { threadId: sessionId, ...this.sandboxOptions(),
+            const resumed = await this.call('thread/resume', { threadId: sessionId, ...this.sandboxOptions(),
               approvalPolicy: 'on-request', developerInstructions: TANDIX_DEVELOPER_INSTRUCTIONS,
               config: this.browserToolConfig(routeToken) })
+            this.sessionConfigurations.set(sessionId, resumed)
             await this.verifyBrowserMcpTools(sessionId)
             this.rememberToolRoute(routeToken, sessionId)
             this.loaded.add(sessionId)
           }
         }
         const webDirectory = this.webTaskDirectories.get(sessionId)
-        return this.call('turn/start', { threadId: sessionId, input,
+        return this.call('turn/start', { threadId: sessionId, input, ...this.modelSelections.get(sessionId),
           ...(webDirectory ? { sandboxPolicy: { type: 'workspaceWrite', writableRoots: [webDirectory],
             networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true } }
             : this.sandboxDirectory === '' ? {} : this.sandboxOptions()) })

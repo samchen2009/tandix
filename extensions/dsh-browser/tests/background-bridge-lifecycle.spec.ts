@@ -45,7 +45,7 @@ function chromeEvent<T extends unknown[]>() {
   }
 }
 
-function panelPort() {
+function panelPort(tabId?: number) {
   const onMessage = chromeEvent<[unknown]>()
   const onDisconnect = chromeEvent<[]>()
   const postMessage = vi.fn()
@@ -54,6 +54,7 @@ function panelPort() {
     postMessage,
     onMessage,
     onDisconnect,
+    ...(tabId === undefined ? {} : { sender: { url: `chrome-extension://test/panel/index.html?tandixTab=${tabId}` } }),
   } as unknown as chrome.runtime.Port
   return { onDisconnect, onMessage, port, postMessage }
 }
@@ -143,6 +144,90 @@ afterEach(() => {
 })
 
 describe('background bridge lifecycle', () => {
+  it.each([1, 2])('keeps live and replayed browser approvals in their owning tab panel (other window %i)', async (otherWindowId) => {
+    const chromeMock = mockChrome({
+      localGet: async () => ({ dshSettings: {
+        bridgeUrl: 'wss://bridge.example/ext/bridge', sharePageContent: 'auto',
+      } }),
+      tabGet: async tabId => ({ id: tabId, windowId: tabId === 2 ? otherWindowId : 1,
+        title: `Tab ${tabId}`, url: 'https://example.com/' } as chrome.tabs.Tab),
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ backend: 'dsh' }))))
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const first = panelPort(1)
+    const second = panelPort(2)
+    chromeMock.onConnect.emit(first.port)
+    chromeMock.onConnect.emit(second.port)
+    first.onMessage.emit({ type: 'panel.window', windowId: 1 })
+    second.onMessage.emit({ type: 'panel.window', windowId: otherWindowId })
+    first.onMessage.emit({ type: 'session.active', sessionId: 'first-session', isNew: true })
+    second.onMessage.emit({ type: 'session.active', sessionId: 'second-session', isNew: true })
+    await vi.waitFor(() => {
+      expect(second.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'tab-affinity', state: expect.objectContaining({ status: 'following', controlled: expect.objectContaining({ tabId: 2 }) }),
+      }))
+      expect(FakeWebSocket.instances).toHaveLength(1)
+    })
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    await Promise.resolve()
+    socket.receive({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    await Promise.resolve()
+
+    socket.receive({ t: 'tool.call', id: 'first-close', sessionId: 'first-session',
+      name: 'browser_close_tab', args: { tabId: 1 }, expiresAt: Date.now() + 30_000 })
+    const approval = await vi.waitFor(() => {
+      const message = first.postMessage.mock.calls.map(([value]) => value)
+        .find(value => value.type === 'approval.request')
+      expect(message?.request.sessionId).toBe('first-session')
+      return message.request
+    })
+    expect(second.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'approval.request' }))
+    second.onMessage.emit({ type: 'request-status' })
+    expect(second.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'approval.request' }))
+
+    // Focusing a different Chrome tab must not cancel another tab's approval.
+    first.onMessage.emit({ type: 'session.active', sessionId: 'first-session' })
+    ;(chrome.tabs.onActivated as unknown as { emit: (value: unknown) => void }).emit({ tabId: 2, windowId: otherWindowId })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(socket.sent).not.toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'first-close' }))
+
+    // A reopened owner receives its pending request; unrelated panels stay put.
+    first.onDisconnect.emit()
+    expect(chrome.notifications.create).toHaveBeenCalledWith(
+      `dsh-browser-approval:${approval.id}`, expect.any(Object))
+    const reopened = panelPort(1)
+    chromeMock.onConnect.emit(reopened.port)
+    reopened.onMessage.emit({ type: 'request-status' })
+    expect(reopened.postMessage).toHaveBeenCalledWith({ type: 'approval.request', request: approval })
+    reopened.onMessage.emit({ type: 'approval.response', id: approval.id, decision: 'deny' })
+    await vi.waitFor(() => {
+      expect(socket.sent).toContainEqual(expect.objectContaining({ t: 'tool.result', id: 'first-close' }))
+    })
+    expect(chromeMock.tabs.remove).not.toHaveBeenCalled()
+
+    // When only an unrelated panel remains, notify and reopen the correct tab.
+    reopened.onDisconnect.emit()
+    vi.mocked(chrome.notifications.create).mockClear()
+    socket.receive({ t: 'tool.call', id: 'closed-owner', sessionId: 'first-session',
+      name: 'browser_close_tab', args: { tabId: 1 }, expiresAt: Date.now() + 30_000 })
+    const notificationId = await vi.waitFor(() => {
+      expect(chrome.notifications.create).toHaveBeenCalled()
+      const id: unknown = vi.mocked(chrome.notifications.create).mock.calls.at(-1)![0]
+      if (typeof id !== 'string') throw new Error('Missing notification ID')
+      return id
+    })
+    expect(second.postMessage).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'approval.request' }))
+    chrome.tabs.update = vi.fn(async () => ({ id: 1 } as chrome.tabs.Tab))
+    chrome.windows.update = vi.fn(async () => ({ id: 1 } as chrome.windows.Window))
+    ;(chrome.notifications.onClicked as unknown as { emit: (value: string) => void }).emit(notificationId)
+    expect(chrome.sidePanel.open).toHaveBeenCalledWith({ tabId: 1 })
+    expect(chrome.tabs.update).toHaveBeenCalledWith(1, { active: true })
+    expect(chrome.windows.update).toHaveBeenCalledWith(1, { focused: true })
+    socket.receive({ t: 'tool.cancel', id: 'closed-owner' })
+  })
+
   it.each([{ version: 2, businessOk: true }, { version: 1, businessOk: true }, { version: undefined, businessOk: true }, { version: 2, businessOk: false }])(
     'handles real gateway responses for panel-free webpage jobs (%j)', async ({ version, businessOk }) => {
     const chromeMock = mockChrome({ localGet: async () => ({
@@ -218,6 +303,44 @@ describe('background bridge lifecycle', () => {
     await new Promise(resolve => setTimeout(resolve, 600))
   })
 
+  it('retires the old socket before starting the newly selected agent', async () => {
+    const chromeMock = mockChrome({ localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://old.example/ext/bridge', agentBackend: 'dsh' } }) })
+    const native = panelPort(); Object.assign(native.port, { disconnect: vi.fn() })
+    chrome.runtime.connectNative = vi.fn(() => native.port)
+    let warmingUp = true
+    vi.stubGlobal('fetch', vi.fn(async target => {
+      if (String(target).includes('old.example')) return new Response(JSON.stringify({ backend: 'dsh' }))
+      if (warmingUp) { warmingUp = false; throw new Error('New bridge is still starting') }
+      return new Response(JSON.stringify({ backend: 'cursor', wsUrl: 'ws://127.0.0.1:3081/ext/bridge' }))
+    }))
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const panel = panelPort(); chromeMock.onConnect.emit(panel.port)
+    try {
+      await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+      const old = FakeWebSocket.instances[0]!
+      old.open(); await Promise.resolve()
+      old.receive({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+      await Promise.resolve()
+      panel.onMessage.emit({ type: 'settings', id: 'choose-cursor', settings: { agentBackend: 'cursor' }, forceReconnect: true })
+      await vi.waitFor(() => expect(native.postMessage).toHaveBeenCalledWith({ type: 'ensure', backend: 'cursor', sandboxDirectory: '' }))
+      expect(old.readyState).toBe(FakeWebSocket.CLOSED)
+      old.receive({ t: 'error', message: 'old connection failed' })
+      expect(panel.postMessage.mock.calls.at(-1)?.[0]).toMatchObject({ type: 'status', state: 'connecting' })
+      expect(panel.postMessage.mock.calls.some(([frame]) => frame.type === 'status' && frame.error)).toBe(false)
+      native.onMessage.emit({ type: 'ready', wsUrl: 'ws://127.0.0.1:3081/ext/bridge' })
+      await vi.waitFor(() => expect(warmingUp).toBe(false))
+      expect(panel.postMessage.mock.calls.at(-1)?.[0]).toMatchObject({ type: 'status', state: 'connecting' })
+      expect(panel.postMessage.mock.calls.some(([frame]) => frame.type === 'status' && frame.error)).toBe(false)
+      await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(2), { timeout: 2000 })
+      const next = FakeWebSocket.instances[1]!
+      next.open(); await Promise.resolve()
+      next.receive({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+      await vi.waitFor(() => expect(panel.postMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'status', backend: 'cursor', state: 'connected' })))
+      expect(panel.postMessage.mock.calls.some(([frame]) => frame.type === 'status' && frame.error)).toBe(false)
+    } finally { panel.onDisconnect.emit(); native.onDisconnect.emit() }
+  })
+
   it('shows dsh startup failures in status and in the connect action result', async () => {
     const chromeMock = mockChrome({ localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }) })
     const native = panelPort()
@@ -275,8 +398,8 @@ describe('background bridge lifecycle', () => {
     }
   })
 
-  it.each(['workbuddy', 'dsh'])('explicit WorkBuddy requires a matching %s companion identity', async (reportedBackend) => {
-    const chromeMock = mockChrome({ localGet: async () => ({ dshSettings: { agentBackend: 'workbuddy' } }) })
+  it.each([['workbuddy', 'workbuddy'], ['workbuddy', 'dsh'], ['cursor', 'cursor'], ['cursor', 'dsh'], ['cursor', 'workbuddy']])('explicit %s requires a matching %s companion identity', async (backend, reportedBackend) => {
+    const chromeMock = mockChrome({ localGet: async () => ({ dshSettings: { agentBackend: backend } }) })
     const native = panelPort()
     Object.assign(native.port, { disconnect: vi.fn() })
     chrome.runtime.connectNative = vi.fn(() => native.port)
@@ -287,12 +410,12 @@ describe('background bridge lifecycle', () => {
     const panel = panelPort()
     chromeMock.onConnect.emit(panel.port)
     try {
-      await vi.waitFor(() => expect(native.postMessage).toHaveBeenCalledWith({ type: 'ensure', backend: 'workbuddy', sandboxDirectory: '' }))
+      await vi.waitFor(() => expect(native.postMessage).toHaveBeenCalledWith({ type: 'ensure', backend, sandboxDirectory: '' }))
       native.onMessage.emit({ type: 'ready', wsUrl: 'ws://127.0.0.1:3080/ext/bridge' })
       await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled())
-      if (reportedBackend === 'workbuddy') await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+      if (reportedBackend === backend) await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
       else { await new Promise(resolve => setTimeout(resolve, 0)); expect(FakeWebSocket.instances).toHaveLength(0) }
-      expect(panel.postMessage.mock.calls.some(([frame]) => frame.type === 'status' && frame.backend === 'workbuddy')).toBe(true)
+      expect(panel.postMessage.mock.calls.some(([frame]) => frame.type === 'status' && frame.backend === backend)).toBe(true)
     } finally {
       native.onDisconnect.emit()
       panel.onDisconnect.emit()

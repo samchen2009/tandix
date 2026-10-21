@@ -7,7 +7,7 @@ English | [中文](README.zh.md)
 ## Features
 
 - Chat in the Chrome side panel, read pages, fill forms, switch tabs, and work across websites.
-- Connect local Codex, DeepSeek Harness (dsh), or a compatible WorkBuddy/CodeBuddy ACP runtime.
+- Connect local Codex, Cursor CLI, DeepSeek Harness (dsh), or a compatible WorkBuddy/CodeBuddy ACP runtime.
 - Record browser actions, discuss the workflow, and save, inspect, or run Tandix skills.
 - Inspect tool activity, answer approval requests, stop tasks, and revisit conversations.
 
@@ -91,8 +91,19 @@ Google Chrome, Git, Node.js **22.19+ or 24+**, and pnpm are required. macOS also
 | Agent | Setup |
 | --- | --- |
 | Codex | Install and sign in to a runnable local Codex CLI; connect through the Tandix native companion |
+| Cursor | Install Cursor CLI with `agent acp` support and run `agent login`; select Cursor explicitly in the sidebar |
 | dsh | Configure a model and credentials in Tandix Settings, or use an existing dsh configuration |
 | WorkBuddy | Install and sign in to a compatible ACP runtime; desktop WorkBuddy login is not automatically reused. See [setup](docs/workbuddy-agent.md) |
+
+### Local Cursor Agent
+
+Connect through [Cursor's official ACP interface](https://cursor.com/docs/cli/acp). Install Cursor CLI, or run `agent update` to upgrade an older installation, then run `agent login`. The CLI must support `agent acp`.
+
+Run `pnpm build` and `pnpm native:install` in the source checkout, reload `extensions/dsh-browser/dist` in Chrome, and select **Cursor** in the sidebar Agent menu. Reloading the extension alone does not update the copied native companion. The Windows installation wizard does not install Cursor CLI automatically; install it separately before registering the updated source companion.
+
+Discovery checks `cursor-agent` and `agent`, including `~/.local/bin`. For a custom location, register with `CURSOR_AGENT_PATH=/absolute/path/to/agent pnpm native:install` (use `$env:CURSOR_AGENT_PATH` in PowerShell). Connection errors include upgrade/login guidance and never fall back to another agent.
+
+Streaming replies, isolated history, session resume, cancellation, tool approvals and Tandix browser/Skill tools are supported; resume and images depend on runtime capabilities. History is stored separately in `cursor-sessions.json`. Cursor-specific question and plan-approval cards are not integrated yet; these requests receive a cancelled response. Automated tests use an ACP fixture; real-account and browser acceptance is still required.
 
 ### macOS
 
@@ -107,7 +118,7 @@ The installer builds the browser bridge and extension. Then:
 1. Open `chrome://extensions` and enable **Developer mode**.
 2. Choose **Load unpacked** and select the printed directory, normally `~/.dsh/browser-extension`. Press `Cmd+Shift+G` in the picker to paste the path.
 3. Run `pnpm native:install` from the repository directory to register the companion. Reload the extension and accept its native-messaging permission.
-4. Open a regular webpage, click Tandix, and select an agent. Automatic tries Codex before dsh; select WorkBuddy explicitly.
+4. Open a regular webpage, click Tandix, and select an agent. Automatic tries Codex before dsh; select Cursor or WorkBuddy explicitly.
 
 Alternatively, run `bash ./安装网页助手.command` in the cloned checkout and follow the loading and registration prompts.
 
@@ -141,7 +152,7 @@ Run `git pull --ff-only`, rerun the installer for your operating system, and rel
 
 Open the page you want to work with and describe the task in the side panel. Review authorization requests before approving them. Inspect the actual result on the page; to reuse the workflow, choose **Create skill**, review the instructions, and save them to Skills.
 
-Goal cards are supported by Codex and dsh. WorkBuddy goals, video prompts, and selected sandbox directories are not yet supported. Browser approvals and local filesystem permissions are managed separately.
+Goal cards are supported by Codex and dsh. Cursor and WorkBuddy goals, video prompts, and selected sandbox directories are not yet supported. Browser approvals and local filesystem permissions are managed separately.
 
 ## Development
 

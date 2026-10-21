@@ -11,7 +11,8 @@ import { BRIDGE_SESSION_PURGE_METHOD, type ServerFrame } from '@yuxianglin/dsh-b
 
 let panelApi: PanelApi
 
-vi.mock('../src/panel/api.ts', () => ({
+vi.mock('../src/panel/api.ts', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/panel/api.ts')>(),
   connectPanel: (): PanelApi => panelApi,
 }))
 
@@ -19,7 +20,7 @@ import { App } from '../src/panel/App.tsx'
 
 describe('panel session transitions', () => {
   let root: Root
-  let onStatus: ((state: BridgeState, caps: null, backend: 'codex' | 'workbuddy' | 'dsh') => void) | undefined
+  let onStatus: ((state: BridgeState, caps: null, backend: 'codex' | 'cursor' | 'workbuddy' | 'dsh') => void) | undefined
   let onResumeHint: ((sessionId: string | null) => void) | undefined
   let onEvent: ((frame: ServerFrame) => void) | undefined
   let onRecordingState: ((state: TeachState) => void) | undefined
@@ -102,7 +103,7 @@ describe('panel session transitions', () => {
     vi.restoreAllMocks()
   })
 
-  async function renderConnected(hint: string | null, backend: 'codex' | 'workbuddy' | 'dsh' = 'dsh'): Promise<void> {
+  async function renderConnected(hint: string | null, backend: 'codex' | 'cursor' | 'workbuddy' | 'dsh' = 'dsh'): Promise<void> {
     await act(async () => { root.render(createElement(App)) })
     await act(async () => {
       onStatus?.('connected', null, backend)
@@ -110,18 +111,51 @@ describe('panel session transitions', () => {
     })
   }
 
-  it('selects WorkBuddy, preserves its status, and shows only supported settings', async () => {
+  it('opens model settings from the model menu and applies the chosen configuration', async () => {
+    const original = rpc.getMockImplementation()!
+    let model = 'model-a'
+    rpc.mockImplementation(async (method, payload) => {
+      if (method === 'agent.configuration') return { backend: 'codex', sessionId: 'session-current', source: 'session', modelId: model, modelLabel: model }
+      if (method === 'agent.models') return { models: ['model-a', 'model-b'].map(id => ({ id, label: id, efforts: ['low', 'high'], defaultEffort: 'low' })) }
+      if (method === 'agent.configuration.set') {
+        model = (payload as { model: string }).model
+        return { saved: true, backend: 'codex', sessionId: 'session-current', source: 'next-turn', modelId: model, modelLabel: model, reasoningEffort: 'high' }
+      }
+      return original(method, payload)
+    })
+    await renderConnected(null, 'codex')
+    await act(async () => document.querySelector<HTMLButtonElement>('.model-trigger')!.click())
+    const configure = document.querySelector<HTMLButtonElement>('.configure-model-button')!
+    expect(configure.textContent).toBe('设置模型')
+    await act(async () => configure.click())
+    expect(document.querySelector('.settings')).not.toBeNull()
+    expect(document.querySelector('.model-settings-panel')?.textContent).toContain('模型设置')
+    await act(async () => {
+      const select = document.querySelector<HTMLSelectElement>('select[aria-label="设置模型"]')!
+      select.value = JSON.stringify(['', 'model-b']); select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await act(async () => {
+      const select = document.querySelector<HTMLSelectElement>('select[aria-label="设置推理强度"]')!
+      select.value = 'high'; select.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    await act(async () => document.querySelector<HTMLButtonElement>('.model-settings-save')!.click())
+    expect(rpc).toHaveBeenCalledWith('agent.configuration.set', { sessionId: 'session-current', model: 'model-b', reasoningEffort: 'high' })
+    expect(document.querySelector('.model-save-success')?.textContent).toContain('下一条消息')
+  })
+
+  it.each([['workbuddy', 'WorkBuddy'], ['cursor', 'Cursor']] as const)('selects %s, preserves its status, and shows only supported settings', async (backend, label) => {
     await renderConnected(null)
     await act(async () => { (document.querySelector('.connection') as HTMLButtonElement).click() })
-    const choice = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')].find(button => button.textContent === 'WorkBuddy')!
+    const choice = [...document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')].find(button => button.textContent === label)!
     expect(choice).toBeDefined()
     await act(async () => { choice.click() })
-    expect(panelApi.updateSettings).toHaveBeenCalledWith({ agentBackend: 'workbuddy' }, true)
-    await act(async () => { onStatus?.('connected', null, 'workbuddy') })
-    expect(document.querySelector('.connection')?.textContent).toContain('WorkBuddy')
+    expect(panelApi.updateSettings).toHaveBeenCalledWith({ agentBackend: backend }, true)
+    await act(async () => { onStatus?.('connected', null, backend) })
+    expect(document.querySelector('.connection')?.textContent).toContain(label)
     expect(document.querySelector('.task-goal')).toBeNull()
+    await act(async () => { document.querySelector<HTMLButtonElement>('.more-trigger')!.click() })
     await act(async () => { (document.querySelector('.settings-trigger') as HTMLButtonElement).click() })
-    expect(document.querySelector('[aria-label="WorkBuddy"]')?.textContent).toContain('ACP')
+    expect(document.querySelector(`[aria-label="${label}"]`)?.textContent).toContain('ACP')
   })
 
   it('keeps the reconnect stream suffix when history resolves late, then shows only the durable settlement', async () => {
@@ -447,6 +481,54 @@ describe('panel session transitions', () => {
   })
 
 
+  it('keeps the skill entry visible when not recording and reports insufficient evidence without starting extraction', async () => {
+    panelApi.setActiveSession = vi.fn(async () => undefined)
+    await renderConnected(null)
+    await vi.waitFor(() => expect(panelApi.setActiveSession).toHaveBeenCalledWith('session-current', true))
+    const capture = document.querySelector<HTMLButtonElement>('.skill-capture-trigger')!
+    expect(capture.dataset.state).toBe('idle')
+    expect(capture.querySelector('.capture-live-dot')).toBeNull()
+    await act(async () => capture.click())
+    expect(document.querySelector('.error')?.textContent).toContain('没有可提炼的页面操作')
+    expect(capture.dataset.state).toBe('idle')
+    expect(capture.getAttribute('aria-busy')).toBe('false')
+    expect(rpc.mock.calls.some(([method]) => method === 'session.prompt')).toBe(false)
+    await act(async () => onRecordingState?.({ phase: 'recording', recordingId: 'active' }))
+    expect(capture.dataset.state).toBe('recording')
+    await act(async () => onRecordingState?.({ phase: 'idle' }))
+    expect(capture.dataset.state).toBe('idle')
+  })
+
+  it('does not let an older initial recorder snapshot replace a live recording update', async () => {
+    let finishInitial: ((state: TeachState) => void) | undefined
+    panelApi.getRecordingState = vi.fn(() => new Promise<TeachState>(resolve => { finishInitial = resolve }))
+    await renderConnected(null)
+    await act(async () => onRecordingState?.({ phase: 'recording', recordingId: 'live' }))
+    await act(async () => finishInitial?.({ phase: 'idle' }))
+    expect(document.querySelector<HTMLButtonElement>('.skill-capture-trigger')?.dataset.state).toBe('recording')
+  })
+
+  it('clears the skill processing state after a rejected prompt and allows retrying recorded actions', async () => {
+    panelApi.setActiveSession = vi.fn(async () => undefined)
+    await renderConnected(null)
+    await vi.waitFor(() => expect(panelApi.setActiveSession).toHaveBeenCalledWith('session-current', true))
+    await act(async () => {
+      onRecordingState?.({ phase: 'recording', recordingId: 'retry' })
+      onRecordingEvent?.('retry', { kind: 'click', capturedAt: Date.now(), button: 0,
+        target: { tag: 'button', selector: '#query', name: '查询', control: 'button' },
+        tab: { id: 1, windowId: 1, title: '业务后台', url: 'https://example.com/' }, frame: { id: 0, url: 'https://example.com/' } })
+    })
+    const original = rpc.getMockImplementation()!
+    rpc.mockImplementation(async (method, payload) => { if (method === 'session.prompt') throw new Error('connection failed'); return original(method, payload) })
+    const capture = document.querySelector<HTMLButtonElement>('.skill-capture-trigger')!
+    await act(async () => capture.click())
+    expect(capture.dataset.state).toBe('recording')
+    expect(capture.disabled).toBe(false)
+    expect(document.querySelector('.error')?.textContent).toContain('提炼请求未发送')
+    await act(async () => capture.click())
+    expect(rpc.mock.calls.filter(([method]) => method === 'session.prompt')).toHaveLength(2)
+  })
+
   it('saves a reviewed browser-only skill after clarification and explicit UI confirmation', async () => {
     panelApi.setActiveSession = vi.fn(async () => undefined)
     await renderConnected(null)
@@ -462,7 +544,14 @@ describe('panel session transitions', () => {
         frame: { id: 0, url: 'https://example.com/' },
       })
     })
-    await act(async () => { document.querySelector<HTMLButtonElement>('.skill-extract-button')!.click() })
+    const capture = document.querySelector<HTMLButtonElement>('.skill-capture-trigger')!
+    expect(capture.dataset.state).toBe('recording')
+    expect(capture.getAttribute('aria-label')).toContain('正在记录')
+    await act(async () => { capture.click(); capture.click() })
+    expect(capture.dataset.state).toBe('processing')
+    expect(capture.getAttribute('aria-busy')).toBe('true')
+    expect(capture.disabled).toBe(true)
+    expect(rpc.mock.calls.filter(([method]) => method === 'session.prompt')).toHaveLength(1)
 
     const browserSkill = {
       goal: '查询目标业务数据',
@@ -488,6 +577,8 @@ describe('panel session transitions', () => {
       })
     })
     await vi.waitFor(() => {
+      expect(capture.dataset.state).toBe('recording')
+      expect(capture.getAttribute('aria-busy')).toBe('false')
       expect(document.querySelector('.chat-skill-review')?.textContent).toContain('查询结果出现是否足以判定完成？')
       expect(document.querySelector('.chat-skill-review')?.textContent).toContain('可保存、运行和下载浏览器版')
     })
@@ -501,7 +592,7 @@ describe('panel session transitions', () => {
       answer.dispatchEvent(new Event('input', { bubbles: true }))
     })
     await act(async () => { document.querySelector<HTMLButtonElement>('.skill-clarification-submit')!.click() })
-    expect(JSON.stringify(rpc.mock.calls.at(-1)?.[1])).toContain('tandix-skill-pair-json')
+    expect(JSON.stringify(rpc.mock.calls.filter(([method]) => method === 'session.prompt').at(-1)?.[1])).toContain('tandix-skill-pair-json')
 
     await act(async () => {
       emitAssistant(11, {

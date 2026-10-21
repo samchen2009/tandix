@@ -79,9 +79,9 @@ export class ApprovalCoordinator {
   }
 
   /** Notify for requests that lost their final visible panel. */
-  notifyPending(): void {
+  notifyPending(hasPanel: (request: ApprovalRequest) => boolean = () => false): void {
     for (const { request, windowId } of this.pending.values()) {
-      this.callbacks.notify(request, windowId)
+      if (!hasPanel(request)) this.callbacks.notify(request, windowId)
     }
   }
 

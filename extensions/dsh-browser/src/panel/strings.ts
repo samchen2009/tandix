@@ -105,7 +105,7 @@ export interface PanelCopy {
     removeOrigin: (origin: string) => string
     save: string
     cancel: string
-    snapshotHint: (maxChars: number, backend: 'codex' | 'dsh' | 'workbuddy') => string
+    snapshotHint: (maxChars: number, backend: 'codex' | 'cursor' | 'dsh' | 'workbuddy') => string
     relaySection: string
     relayHelp: string
     relayName: string
@@ -355,7 +355,7 @@ const EN: PanelCopy = {
     save: 'Save & Connect',
     cancel: 'Cancel',
     snapshotHint: (maxChars, backend) => backend !== 'dsh'
-      ? `${backend === 'workbuddy' ? 'WorkBuddy' : 'Codex'} page snapshots are limited to ${maxChars} characters; longer content is truncated. Read a smaller section or split the page into multiple reads if needed.`
+      ? `${backend === 'cursor' ? 'Cursor' : backend === 'workbuddy' ? 'WorkBuddy' : 'Codex'} page snapshots are limited to ${maxChars} characters; longer content is truncated. Read a smaller section or split the page into multiple reads if needed.`
       : `Page snapshots are limited to ${maxChars} characters and longer content is truncated. Change snapshotMaxChars in the dsh plugin to adjust this limit.`,
     relaySection: 'Models & API relay',
     relayHelp: 'Point the assistant at your own API relay. Each profile becomes one provider route; changes take effect on the next message without a restart.',
@@ -606,7 +606,7 @@ const ZH: PanelCopy = {
     save: '保存并连接',
     cancel: '取消',
     snapshotHint: (maxChars, backend) => backend !== 'dsh'
-      ? `${backend === 'workbuddy' ? 'WorkBuddy' : 'Codex'} 页面快照上限为 ${maxChars} 字符，超出内容会被截断。如需查看完整内容，可缩小读取范围或分段读取。`
+      ? `${backend === 'cursor' ? 'Cursor' : backend === 'workbuddy' ? 'WorkBuddy' : 'Codex'} 页面快照上限为 ${maxChars} 字符，超出内容会被截断。如需查看完整内容，可缩小读取范围或分段读取。`
       : `页面快照上限为 ${maxChars} 字符，超出内容会被截断。可在 dsh 插件中调整 snapshotMaxChars。`,
     relaySection: '模型与中转服务',
     relayHelp: '把助手接到你自己的 API 中转站。每个档案对应一条提供方路由，保存后下一条消息即生效，无需重启。',

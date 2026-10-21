@@ -82,7 +82,7 @@ export interface ResolvedQuestion {
 export interface AgentApproval {
   rpcId: string
   sessionId: string
-  backend: 'dsh' | 'codex' | 'workbuddy'
+  backend: 'dsh' | 'codex' | 'cursor' | 'workbuddy'
   kind: 'command' | 'file-change' | 'permissions'
   toolName: string
   reason: string
@@ -94,8 +94,8 @@ export interface AgentApproval {
 export function agentApprovalFromFrame(frame: EventFrameView): AgentApproval | null {
   if (frame.method !== 'agent-approval/requested' || !isRecord(frame.payload)
     || typeof frame.rpcId !== 'string' || typeof frame.payload.sessionId !== 'string'
-    || (frame.payload.backend !== 'dsh' && frame.payload.backend !== 'codex' && frame.payload.backend !== 'workbuddy')) return null
-  const payload = frame.payload as Record<string, unknown> & { sessionId: string; backend: 'dsh' | 'codex' | 'workbuddy' }
+    || (frame.payload.backend !== 'dsh' && frame.payload.backend !== 'codex' && frame.payload.backend !== 'workbuddy' && frame.payload.backend !== 'cursor')) return null
+  const payload = frame.payload as Record<string, unknown> & { sessionId: string; backend: 'dsh' | 'codex' | 'cursor' | 'workbuddy' }
   return {
     rpcId: frame.rpcId, sessionId: payload.sessionId, backend: payload.backend,
     kind: payload.kind === 'file-change' || payload.kind === 'permissions' ? payload.kind : 'command',

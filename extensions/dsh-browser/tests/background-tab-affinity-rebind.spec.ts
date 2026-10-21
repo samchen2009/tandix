@@ -226,6 +226,49 @@ describe('background tab-affinity rebind protocol', () => {
     })
   })
 
+  it('uses the requesting panel session for show-controlled and follow decisions', async () => {
+    const chromeMock = mockChrome()
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 503 })))
+    await import('../src/background/index.ts')
+    const first = panelPort(1)
+    const second = panelPort(2)
+    chromeMock.onConnect.emit(first.port)
+    chromeMock.onConnect.emit(second.port)
+    first.onMessage.emit({ type: 'panel.window', windowId: 1 })
+    second.onMessage.emit({ type: 'panel.window', windowId: 1 })
+    first.onMessage.emit({ type: 'session.active', sessionId: 'first-session', isNew: true })
+    second.onMessage.emit({ type: 'session.active', sessionId: 'second-session', isNew: true })
+    await vi.waitFor(() => {
+      expect(second.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'tab-affinity', state: expect.objectContaining({ status: 'following', controlled: expect.objectContaining({ tabId: 2 }) }),
+      }))
+    })
+    const third = panelPort(3)
+    chromeMock.onConnect.emit(third.port)
+    third.onMessage.emit({ type: 'panel.window', windowId: 1 })
+    third.onMessage.emit({ type: 'session.active', sessionId: 'first-session' })
+    second.onMessage.emit({ type: 'session.active', sessionId: 'second-session' })
+    const state = () => third.postMessage.mock.calls.map(([message]) => message)
+      .filter(message => message.type === 'tab-affinity').at(-1).state
+    expect(state()).toMatchObject({ status: 'background', controlled: { tabId: 1 }, active: { tabId: 3 } })
+    third.onMessage.emit({ type: 'tab-affinity.response', revision: state().revision,
+      decision: 'show-controlled', sessionId: 'first-session' })
+    await vi.waitFor(() => { expect(chromeMock.update).toHaveBeenCalledWith(1, { active: true }) })
+    expect(chromeMock.update).not.toHaveBeenCalledWith(2, { active: true })
+
+    // Even if another page is globally active, follow means this panel's page.
+    chromeMock.query.mockResolvedValue([tab(2)])
+    third.onMessage.emit({ type: 'tab-affinity.response', revision: state().revision,
+      decision: 'follow', sessionId: 'first-session' })
+    await vi.waitFor(() => {
+      expect(state()).toMatchObject({ status: 'following', controlled: { tabId: 3 }, active: { tabId: 3 } })
+    })
+    second.onMessage.emit({ type: 'request-status' })
+    expect(second.postMessage.mock.calls.map(([message]) => message)
+      .filter(message => message.type === 'tab-affinity').at(-1).state)
+      .toMatchObject({ status: 'following', controlled: { tabId: 2 } })
+  })
+
   it('acknowledges only after control has moved to the freshly queried active tab', async () => {
     const { onMessage, postMessage, query } = await connectPanelForTest()
     query.mockResolvedValue([tab(2)])

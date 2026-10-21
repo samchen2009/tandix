@@ -13,7 +13,7 @@ CodeBuddy CLI 的安装、登录和 ACP 用法见官方文档：[安装](https:/
 1. 安装兼容 CLI，例如 `npm install -g @tencent-ai/codebuddy-code`，运行 `codebuddy` 完成该 CLI 的登录，然后退出交互会话。
 2. 在仓库运行 `pnpm build`，生成 `extensions/dsh-browser/dist`。
 3. 更新本机伴随程序。macOS/Windows 源码安装可运行 `pnpm native:install`（Windows PowerShell 可用 `pnpm.cmd native:install`）；已使用独立安装包的环境需要重新生成并运行包含本次改动的安装包。只刷新 Chrome 扩展不足以更新已复制的伴随程序。
-4. 在 Chrome 扩展管理页重新加载构建目录，在 Tandix 顶部的 Agent 菜单选择 WorkBuddy，发送“读取当前网页，告诉我标题”。
+4. 在 Chrome 扩展管理页重新加载构建目录，在 Tandix 输入框下方的 Agent 菜单选择 WorkBuddy，发送“读取当前网页，告诉我标题”。
 5. 验证流式回复、切换网页、创建新会话和停止任务。检查会话记录没有混入 Codex/dsh 的会话。
 
 如果程序不在标准路径，可在注册伴随程序时保存路径：
