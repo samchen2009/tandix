@@ -60,8 +60,8 @@
 .tool-details { margin-left: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: #ffffff9c; }
 .tool-activity.failed .tool-label, .tool-activity.failed .tool-state { color: var(--danger); }
 .empty { max-width: 310px; padding-bottom: 70px; gap: 20px; }
-.empty-logo { width: 55px; height: 55px; border: 0; border-radius: 18px; background: #e7eee9; box-shadow: none; }
-.empty-logo img { width: 37px; height: 37px; }
+.empty-logo { width: 60px; height: 60px; border: 0; border-radius: 18px; background: transparent; box-shadow: none; }
+.empty-logo img { width: 60px; height: 60px; }
 .empty h1 { font-size: calc(23px * var(--ui-scale)); letter-spacing: -.04em; }
 .empty p { font-size: calc(12px * var(--ui-scale)); line-height: 1.8; }
 .empty > button { border-radius: 999px; padding: 10px 17px; background: #fff; border-color: var(--line); }
