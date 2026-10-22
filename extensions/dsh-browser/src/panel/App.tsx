@@ -15,7 +15,7 @@ import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts
 import type { BridgeState } from '../background/bridge.ts'
 import type { AffinityTab, TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
 import { connectPanel, PanelRpcError, type PanelApi, type PanelSettings } from './api.ts'
-import { renderMarkdown } from './markdown.ts'
+import { MessageMarkdown } from './MessageMarkdown.tsx'
 import brandIconUrl from '../../assets/icons/icon256.png'
 import type { ApprovalDecision, ApprovalRequest } from '../security/approval.ts'
 import { getUiLocale, loadUiLocale, saveUiLocale, type UiLocale } from '../i18n.ts'
@@ -648,11 +648,13 @@ const MessageBody = memo(function MessageBody({
   sessionId,
   api,
   copy,
+  locale,
 }: {
   row: Row
   sessionId: string
   api: PanelApi
   copy: PanelCopy
+  locale: UiLocale
 }): React.JSX.Element {
   if (row.kind === 'user' || row.kind === 'assistant') {
     // A user message may carry a page quote; show the quote, not its fence.
@@ -676,7 +678,8 @@ const MessageBody = memo(function MessageBody({
             label={copy.app.selectionAttached}
           />
         )}
-        {text.trim() !== '' && <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />}
+        {text.trim() !== '' && <MessageMarkdown text={text} assistant={row.kind === 'assistant'}
+          api={api} sessionId={sessionId} zh={locale === 'zh'} />}
       </div>
     )
   }
@@ -3080,15 +3083,15 @@ export function App(): React.JSX.Element {
                       ...attached.selection, text: attached.selection.quote, capturedAt: Date.now(),
                     }, text.trim()), row.images)
                   }}>
-                  <MessageBody row={row} sessionId={sessionRef.current ?? ''} api={api} copy={copy} />
+                  <MessageBody row={row} sessionId={sessionRef.current ?? ''} api={api} copy={copy} locale={locale} />
                 </EditableUserMessage>
-                : <MessageBody row={row} sessionId={sessionRef.current ?? ''} api={api} copy={copy} />}
+                : <MessageBody row={row} sessionId={sessionRef.current ?? ''} api={api} copy={copy} locale={locale} />}
           </div>
         ))}
         {streamRow !== null && !(streamRow.kind === 'assistant' && assistantDisplayText(streamRow.text) === '') && (
           <div className="row assistant" aria-live="polite">
             <span className="assistant-avatar"><img src={brandIconUrl} alt={copy.app.assistant} /></span>
-            <MessageBody row={streamRow} sessionId={sessionRef.current ?? ''} api={api} copy={copy} />
+            <MessageBody row={streamRow} sessionId={sessionRef.current ?? ''} api={api} copy={copy} locale={locale} />
           </div>
         )}
         {working && streamRow === null && question === null && rows[rows.length - 1]?.status !== 'running' && (

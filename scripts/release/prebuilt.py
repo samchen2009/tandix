@@ -27,6 +27,7 @@ FILES = {
     "scripts/runtime/codex-bridge.mjs", "scripts/runtime/codex-mcp.mjs",
     "scripts/runtime/workbuddy-bridge.mjs",
     "scripts/runtime/acp-bridge.mjs",
+    "scripts/runtime/artifacts.mjs",
     "scripts/runtime/agent-configuration.mjs",
     "scripts/runtime/cursor-bridge.mjs",
     "scripts/runtime/web-task-store.mjs",

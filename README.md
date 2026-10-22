@@ -154,6 +154,8 @@ Open the page you want to work with and describe the task in the side panel. Rev
 
 Goal cards are supported by Codex and dsh. Cursor and WorkBuddy goals, video prompts, and selected sandbox directories are not yet supported. Browser approvals and local filesystem permissions are managed separately.
 
+Local file links in Codex, Cursor and WorkBuddy replies are downloadable, up to 25 MiB per file. The file must exist, be linked by that session’s assistant, and stay inside its task workspace or selected task directory. Valid links in stored conversations work too; failures show an error. Update both the extension and native companion to enable this feature. dsh does not yet support this file-download endpoint.
+
 ## Development
 
 ```bash

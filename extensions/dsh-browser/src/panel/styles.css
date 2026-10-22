@@ -1209,6 +1209,9 @@ textarea:focus-visible {
   text-align: center;
 }
 
+.artifact-download-status { color: var(--muted); font-size: calc(12px * var(--ui-scale)); }
+.artifact-download-error { color: #bd3e35; font-size: calc(12px * var(--ui-scale)); overflow-wrap: anywhere; }
+
 /* Markdown content is deliberately open for assistant responses, while user
    messages inherit their compact command-card container. */
 .row .body.md > :first-child {

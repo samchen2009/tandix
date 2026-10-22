@@ -8,6 +8,7 @@
 | `native-proxy.cs` | Windows 本机消息代理源码 |
 | `connection-check.mjs` | 检查本机消息、WebSocket、会话列表及 WorkBuddy/Cursor 认证 |
 | `codex-bridge.mjs`、`workbuddy-bridge.mjs`、`cursor-bridge.mjs`、`acp-bridge.mjs` | 对接对应 Agent |
+| `artifacts.mjs` | 下载当前会话助手回复中链接的工作区文件 |
 | `codex-mcp.mjs` | Agent 调用浏览器的 MCP 服务 |
 | `runtime-discovery.mjs` | 查找本机 Agent、生成启动包装器并管理子进程 |
 | `portable-node.mjs` | 校验和复用安装包中的 Node |

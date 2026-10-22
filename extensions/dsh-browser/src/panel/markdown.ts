@@ -13,6 +13,7 @@ import { Marked } from 'marked'
 import katex from 'katex'
 import 'katex/contrib/mhchem'
 import { mathExtensions } from './math.ts'
+import { isLocalArtifactLink } from './artifacts.ts'
 
 const MARKDOWN_SANITIZE_OPTIONS = {
   ALLOWED_TAGS: [
@@ -32,10 +33,22 @@ const MARKDOWN_SANITIZE_OPTIONS = {
  * @param source - markdown text (may be empty)
  * @returns sanitized HTML fragment
  */
-export function renderMarkdown(source: string): string {
-  const mathNodes = new Map<string, HTMLSpanElement>()
+export function renderMarkdown(source: string, { artifactLinks = false } = {}): string {
+  const mathNodes = new Map<string, HTMLElement>()
   const nonce = crypto.randomUUID()
   const marked = new Marked({ gfm: true, breaks: true })
+  if (artifactLinks) marked.use({ renderer: {
+    link({ href, tokens }) {
+      if (!isLocalArtifactLink(href)) return false
+      const node = document.createElement('a')
+      node.href = '#'
+      node.dataset.artifactPath = href
+      node.innerHTML = DOMPurify.sanitize(this.parser.parseInline(tokens), MARKDOWN_SANITIZE_OPTIONS)
+      const key = `${nonce}:${mathNodes.size}`
+      mathNodes.set(key, node)
+      return `<code>${key}</code>`
+    },
+  } })
   marked.use({ extensions: mathExtensions((text, displayMode) => {
     const node = document.createElement('span')
     node.className = displayMode ? 'math-block' : 'math-inline'

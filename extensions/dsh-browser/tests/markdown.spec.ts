@@ -56,6 +56,27 @@ describe('renderMarkdown', () => {
     expect(renderMarkdown('plain text')).toContain('plain text')
   })
 
+  it('turns assistant local file links into download actions without allowing file navigation', () => {
+    const root = document.createElement('div')
+    root.innerHTML = renderMarkdown('[下载长图](/Users/me/workspace/output/数学学习-长图.png)', { artifactLinks: true })
+    const link = root.querySelector('a')!
+    expect(link.textContent).toBe('下载长图')
+    expect(link.getAttribute('href')).toBe('#')
+    expect(link.dataset.artifactPath).toBe('/Users/me/workspace/output/数学学习-长图.png')
+    expect(link.hasAttribute('target')).toBe(false)
+    expect(renderMarkdown('[文件](/Users/me/output.png)')).not.toContain('data-artifact-path')
+  })
+
+  it('supports encoded file paths, sandbox and relative output links while keeping raw HTML inert', () => {
+    for (const href of ['file:///Users/me/output/long%20image.png', 'sandbox:/mnt/data/long.png', 'output/long.png', 'C:/work/output/long.png']) {
+      expect(renderMarkdown(`[下载](${href})`, { artifactLinks: true })).toContain('data-artifact-path=')
+    }
+    const html = renderMarkdown('<a href="file:///etc/passwd" data-artifact-path="/etc/passwd">fake</a> [bad](javascript:alert(1))', { artifactLinks: true })
+    expect(html).not.toContain('data-artifact-path')
+    expect(html).not.toContain('file:///')
+    expect(html).not.toContain('javascript:')
+  })
+
   it('renders inline and display LaTeX without Markdown consuming commands', () => {
     const html = renderMarkdown(String.raw`行内 \(CH_3SH\) 和 $x^2$。
 \[
