@@ -1,4 +1,5 @@
 /** Local-only design fixture. Uses the real panel with a simulated background; no agent calls. */
+import manifest from '../manifest.json'
 const params = new URLSearchParams(location.search)
 const recording = params.get('recording') === '1'
 let backend = params.get('backend') ?? 'codex'
@@ -24,7 +25,7 @@ const reply = (id: unknown, value: unknown) => onMessage.emit({ type: 'rpc.resul
 const tab = { tabId: 1, windowId: 1, title: 'Tandix · 让网页里的工作顺畅一点', url: 'https://example.com/tandix' }
 const status = () => { onMessage.emit({ type: 'status', state: 'connected', backend, caps: {} }); onMessage.emit({ type: 'session.resume-hint', sessionId: null }); onMessage.emit({ type: 'tab-affinity', state: { revision: 1, status: 'following', controlled: tab, active: tab, pinned: false } }) }
 Object.assign(globalThis, { chrome: {
-  runtime: { getManifest: () => ({ version: '0.1.4' }), getURL: (path: string) => `/${path}`, connect: () => ({ onMessage, onDisconnect: event(), postMessage: (message: Record<string, any>) => queueMicrotask(() => {
+  runtime: { getManifest: () => ({ version: manifest.version }), getURL: (path: string) => `/${path}`, connect: () => ({ onMessage, onDisconnect: event(), postMessage: (message: Record<string, any>) => queueMicrotask(() => {
     if (message.type === 'request-status') status()
     if (message.type === 'recording.get-state') {
       onMessage.emit({ type: 'recording.result', id: message.id, ok: true, result: recording ? { phase: 'recording', recordingId: 'preview-recording' } : { phase: 'idle' } })
