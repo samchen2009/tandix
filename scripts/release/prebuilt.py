@@ -12,6 +12,7 @@ PREFIX = Path("网页助手_Tandix")
 FILES = {
     ".npmrc", "LICENSE", "README.zh.md", "package.json", "pnpm-lock.yaml",
     "pnpm-workspace.yaml", "安装网页助手.command", "安装网页助手.cmd",
+    "scripts/dev/version.mjs",
     "extensions/dsh-browser/package.json",
     "packages/browser/bridge-browser/package.json",
     "packages/browser/bridge-browser/cordis.patch.yml",

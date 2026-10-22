@@ -167,6 +167,8 @@ pnpm build
 
 构建产物在 `extensions/dsh-browser/dist`，可直接加载为 Chrome 扩展。另见[架构说明](docs/architecture.md)、[Skill 格式](docs/agent-skills.md)及[网页调用接口](docs/web-api.md)（prompt + PDF / 多张图片 → 文本或 JSON，无需展开侧栏）。
 
+安装依赖时会安装自动升版钩子，普通提交自动递增 `0.x.y` 中的 `y` 并同步发布信息。`x` 手动调整：在根目录 `package.json` 中修改并暂存新起点（例如 `0.3.0`）。已有 checkout 可运行 `pnpm hooks:install`，详见[开发升版说明](scripts/dev/README.md)。
+
 ## 致谢与许可
 
 Tandix 基于 [dsh-browser](https://github.com/omdsh-dev/dsh-browser) 开发，感谢原作者 Yuxiang Lin 及贡献者提供浏览器工具和安全机制的基础。

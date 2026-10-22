@@ -165,6 +165,8 @@ pnpm build
 
 The extension is built into `extensions/dsh-browser/dist`; load that directory directly during development. Chrome saves skills in `~/.tandix/skills`, independently of the installation path and extension ID, and automatically migrates accessible legacy skills. See [architecture](docs/architecture.md), [skill storage and format](docs/agent-skills.md), and the [webpage API](docs/web-api.md) (prompt + PDF/images → text or JSON, without an open side panel).
 
+Installing dependencies also installs the commit-version hooks. Normal commits increment `y` in `0.x.y` and synchronize release metadata. To change `x`, stage the new starting version (for example `0.3.0`) in the root `package.json`. Existing checkouts can run `pnpm hooks:install`; see [versioning details](scripts/dev/README.md).
+
 ## Acknowledgements and license
 
 Tandix builds on [dsh-browser](https://github.com/omdsh-dev/dsh-browser). Thanks to Yuxiang Lin and the original contributors for the browser tools and security foundations.
