@@ -6,7 +6,7 @@ English | [中文](README.zh.md)
 
 The **browser-operation end** of dsh: the model reads and operates the browser page you have open — extract content, click elements, fill forms, scroll, and navigate, all in the real page with your login state preserved. The side panel is the conversation entry.
 
-**Two explicit channels**: browser pages are still rendered as structured text (a numbered interactive-element inventory), so browser tools never take screenshots. Separately, a dsh 0.1.2 host can advertise multimodal image limits; the side panel then accepts PNG, JPEG, WebP, and GIF attachments and renders their durable history references.
+**Page reading and image attachments**: browser pages are normally rendered as structured text (a numbered interactive-element inventory). For canvas-based tables and other visual pages, `browser_screenshot` captures the visible controlled tab. Separately, compatible agent hosts advertise multimodal image limits so the side panel can accept image attachments and render their durable history references.
 
 ## What the model can do
 
@@ -127,7 +127,7 @@ For extension-only development, load `extensions/dsh-browser/dist/` from `chrome
 
 ## Permissions
 
-Chrome uses `sidePanel`; Firefox uses `sidebar_action`. Both request `storage` (settings and recent-session continuity), `notifications` (optional reminders for approvals received while the panel is closed), `tabs` + `activeTab` + `scripting` (observe tab changes and inject/message the explicitly controlled tab, including lazy recovery for pages opened before install), `webNavigation` (enumerate and bind messages to that tab's frame documents), `alarms` (background keepalive), and `http/https` (content-script injection on normal pages). Firefox's AMO manifest declares the browsing activity, website content/activity, and personal communications that the add-on sends to the configured dsh/model service. The extension never changes the visible tab or silently follows a manual switch; background operation happens only after the user chooses to stay on the original tab.
+Chrome uses `sidePanel`; Firefox uses `sidebar_action`. Both request `storage` (settings and recent-session continuity), `notifications` (optional reminders for approvals received while the panel is closed), `tabs` + `activeTab` + `scripting` (observe tab changes and inject/message the explicitly controlled tab, including lazy recovery for pages opened before install), `webNavigation` (enumerate and bind messages to that tab's frame documents), `alarms` (background keepalive), and `<all_urls>` (browser screenshot authorization; content scripts still match only HTTP/HTTPS pages). Firefox's AMO manifest declares the browsing activity, website content/activity, and personal communications that the add-on sends to the configured dsh/model service. The extension never changes the visible tab or silently follows a manual switch; background operation happens only after the user chooses to stay on the original tab.
 
 ## Known limitations
 
@@ -138,3 +138,9 @@ Chrome uses `sidePanel`; Firefox uses `sidebar_action`. Both request `storage` (
 - No automatic token rotation.
 - Synthetic `browser_press` events do not trigger browser-native default actions such as Tab focus movement, arrow-key scrolling, or Enter activation; use manual input when a workflow depends on those defaults.
 - `browser_wait` considers page load plus a fixed quiet window, but does not observe continuously changing DOM state; a live-updating SPA may be reported as stable.
+
+### Screenshot access
+
+[Chrome requires `<all_urls>` host permission or a temporary `activeTab` grant for `tabs.captureVisibleTab`](https://developer.chrome.com/docs/extensions/reference/api/tabs#method-captureVisibleTab); separate `http://*/*` and `https://*/*` declarations do not satisfy its `<all_urls>` check. Both extension manifests declare `<all_urls>` so screenshot access does not depend on clicking the toolbar icon again after each tab handoff. Existing page-sharing and controlled-tab checks still apply.
+
+The Full access setting skips Tandix approval prompts; browser site-access restrictions still apply. If the browser denies capture, keep the target page active and click the Tandix toolbar icon, then retry. After an extension update, reload Tandix and review its browser site-access setting. Canvas-rendered table cells may be absent from text snapshots, and reading an ordinary webpage image cannot replace a screenshot of that table.

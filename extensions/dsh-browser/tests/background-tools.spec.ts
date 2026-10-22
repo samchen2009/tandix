@@ -157,6 +157,69 @@ describe('dispatchToolCall', () => {
     expect(chromeMock.executeScript).not.toHaveBeenCalled()
   })
 
+  it('explains browser permission failures even with Tandix Full access enabled', async () => {
+    const chromeMock = mockChrome({ tab: { id: 7, windowId: 1, active: true, url: 'https://example.com/sheets' } })
+    const browserError = "Either the '<all_urls>' or 'activeTab' permission is required."
+    chromeMock.captureVisibleTab.mockRejectedValue(new Error(browserError))
+    const authorize = vi.fn(async () => 'approved' as const)
+
+    const answer = await dispatchToolCall(
+      { id: 'shot', name: 'browser_screenshot', args: {} },
+      'off', undefined, authorize, undefined, undefined, undefined, { unrestrictedAccess: true },
+    )
+
+    expect(answer.ok).toBe(false)
+    expect(answer.error?.message).toContain('Full access')
+    expect(answer.error?.message).toContain('click the Tandix icon in the browser toolbar')
+    expect(answer.error?.message).toContain(browserError)
+    expect(answer.error?.message).toContain('No loaded, visible webpage image was found')
+    expect(chromeMock.captureVisibleTab).toHaveBeenCalledOnce()
+    expect(authorize).not.toHaveBeenCalled()
+  })
+
+  it('does not capture pixels when page sharing is off without Full access', async () => {
+    const chromeMock = mockChrome({ tab: { id: 7, windowId: 1, active: true, url: 'https://example.com/sheets' } })
+
+    const answer = await dispatchToolCall({ id: 'shot', name: 'browser_screenshot', args: {} }, 'off')
+
+    expect(answer.ok).toBe(false)
+    expect(chromeMock.captureVisibleTab).not.toHaveBeenCalled()
+    expect(chromeMock.executeScript).not.toHaveBeenCalled()
+  })
+
+  it('discards captured pixels if the visible tab changes during capture', async () => {
+    const target = managedTab(7, { active: true })
+    const chromeMock = mockChrome({ tab: target })
+    chromeMock.captureVisibleTab.mockImplementation(async () => {
+      chromeMock.query.mockResolvedValue([managedTab(8, { active: true })])
+      return 'data:image/png;base64,AQID'
+    })
+
+    const answer = await dispatchToolCall(
+      { id: 'shot', name: 'browser_screenshot', args: {} }, 'auto', undefined, undefined, undefined, target,
+    )
+
+    expect(answer).toMatchObject({ ok: false, error: { message: expect.stringContaining('visible tab changed') } })
+    expect(answer.result).toBeUndefined()
+  })
+
+  it('discards captured pixels if capture is cancelled', async () => {
+    const chromeMock = mockChrome({ tab: managedTab(7, { active: true }) })
+    const controller = new AbortController()
+    chromeMock.captureVisibleTab.mockImplementation(async () => {
+      controller.abort()
+      return 'data:image/png;base64,AQID'
+    })
+
+    const answer = await dispatchToolCall(
+      { id: 'shot', name: 'browser_screenshot', args: {} }, 'auto', undefined, undefined, controller.signal,
+    )
+
+    expect(answer.ok).toBe(false)
+    expect(answer.result).toBeUndefined()
+    expect(chromeMock.executeScript).not.toHaveBeenCalled()
+  })
+
   it('uses an already-loaded content script without injecting', async () => {
     const chromeMock = mockChrome({ tab: { id: 7, url: 'https://example.com' } })
 

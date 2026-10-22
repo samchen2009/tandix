@@ -111,6 +111,51 @@ describe('panel session transitions', () => {
     })
   }
 
+  function agentApproval(sessionId: string, rpcId: string): ServerFrame {
+    return { t: 'event', frame: { rpcId, method: 'agent-approval/requested', payload: {
+      sessionId, backend: 'codex', kind: 'command', toolName: 'bash', command: `read-${sessionId}`,
+    } } }
+  }
+
+  it('shows only the current conversation’s local approvals, even if another request arrived first', async () => {
+    await renderConnected(null, 'codex')
+    await act(async () => { onEvent?.(agentApproval('session-other', 'other-approval')) })
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull()
+    expect(panelApi.setActiveSession).not.toHaveBeenCalledWith('session-other')
+    await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })) })
+    expect(panelApi.respond).not.toHaveBeenCalled()
+
+    vi.mocked(panelApi.respond).mockResolvedValue({ accepted: true })
+    await act(async () => { onEvent?.(agentApproval('session-current', 'current-approval')) })
+    expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain('read-session-current')
+    expect(document.querySelector('[role="alertdialog"]')?.textContent).not.toContain('read-session-other')
+    await act(async () => { document.querySelector<HTMLButtonElement>('.approval-dialog .allow')!.click() })
+    expect(panelApi.respond).toHaveBeenCalledWith('current-approval', { ok: true, value: 'accept' })
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull()
+  })
+
+  it('hides an old conversation’s approval while switching and restores it only in that conversation', async () => {
+    vi.mocked(panelApi.setActiveSession).mockReset().mockResolvedValue(undefined)
+    await renderConnected(null, 'codex')
+    await act(async () => { onEvent?.(agentApproval('session-current', 'current-approval')) })
+    expect(document.querySelector('[role="alertdialog"]')).not.toBeNull()
+    const selectSession = async (index: number): Promise<void> => {
+      await act(async () => { document.querySelector<HTMLButtonElement>('.session-menu-trigger')!.click() })
+      const sessions = document.querySelectorAll<HTMLButtonElement>('.session-list li > button:not(.session-delete)')
+      await act(async () => { sessions[index]!.click() })
+    }
+    await selectSession(1)
+    expect(panelApi.setActiveSession).toHaveBeenLastCalledWith('session-saved')
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull()
+    await selectSession(0)
+    expect(document.querySelector('[role="alertdialog"]')?.textContent).toContain('read-session-current')
+    await act(async () => { onEvent?.({ t: 'event', frame: { rpcId: '', method: 'session/event', payload: {
+      sessionId: 'session-current', event: { type: 'turn/end', data: { turn: 1 } },
+    } } }) })
+    expect(document.querySelector('[role="alertdialog"]')).toBeNull()
+    expect(panelApi.respond).not.toHaveBeenCalled()
+  })
+
   it('opens model settings from the model menu and applies the chosen configuration', async () => {
     const original = rpc.getMockImplementation()!
     let model = 'model-a'

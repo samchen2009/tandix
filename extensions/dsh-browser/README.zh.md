@@ -6,7 +6,7 @@
 
 dsh 的**浏览器操作端**：让模型直接读取并操作你在浏览器里打开的页面——抓取内容、点击元素、填写表单、滚动与导航，全部在真实页面执行、登录态保留。侧边栏面板是与模型对话的入口。
 
-**两条明确分离的通道**：浏览器页面仍以结构化文本呈现（带编号的交互元素清单），浏览器工具不会截图；另一方面，dsh 0.1.2 宿主可声明多模态图片限制，侧栏据此接收 PNG、JPEG、WebP 和 GIF，并渲染会话中的持久图片附件。
+**页面读取与图片附件**：浏览器页面通常以结构化文本呈现（带编号的交互元素清单）；对于画布绘制的表格等视觉页面，`browser_screenshot` 可截取当前可见的受控标签页。兼容的 Agent 宿主可声明多模态图片限制，侧栏据此接收图片附件，并渲染会话中的持久图片引用。
 
 ## 模型能做什么
 
@@ -135,7 +135,13 @@ pnpm --filter dsh-browser-extension run test
 
 ## 权限说明
 
-Chrome 使用 `sidePanel`，Firefox 使用 `sidebar_action`。两者都申请 `storage`（设置与最近会话续接）、`notifications`（侧栏关闭时可选的审批提醒）、`tabs` + `activeTab` + `scripting`（观察切页，并向用户显式选择的受控标签页注入/发消息；安装前已打开的页面也会按需补注入）、`webNavigation`（枚举该标签页中的 frame，并把消息绑定到具体文档）、`alarms`（后台保活）和 `http/https`（内容脚本注入普通网页）。Firefox AMO manifest 如实声明扩展会把浏览活动、网页内容/操作和对话内容发送给用户配置的 dsh/模型服务。扩展绝不改变用户正在看的标签页，也不会静默跟随手动切页；只有用户选择继续原页面后，助手才会在后台操作。
+Chrome 使用 `sidePanel`，Firefox 使用 `sidebar_action`。两者都申请 `storage`（设置与最近会话续接）、`notifications`（侧栏关闭时可选的审批提醒）、`tabs` + `activeTab` + `scripting`（观察切页，并向用户显式选择的受控标签页注入/发消息；安装前已打开的页面也会按需补注入）、`webNavigation`（枚举该标签页中的 frame，并把消息绑定到具体文档）、`alarms`（后台保活）和 `<all_urls>`（浏览器截图授权，内容脚本仍只匹配 HTTP/HTTPS 页面）。Firefox AMO manifest 如实声明扩展会把浏览活动、网页内容/操作和对话内容发送给用户配置的 dsh/模型服务。扩展绝不改变用户正在看的标签页，也不会静默跟随手动切页；只有用户选择继续原页面后，助手才会在后台操作。
+
+### 截图授权
+
+[Chrome 截图 API 要求 `<all_urls>` 网站权限或临时 `activeTab` 授权](https://developer.chrome.com/docs/extensions/reference/api/tabs#method-captureVisibleTab)，单独声明 HTTP/HTTPS 网站匹配不能替代其 `<all_urls>` 检查。两个浏览器版本均声明该权限，截图仍受页面共享和受控标签页检查约束。
+
+「完整权限」跳过的是 Tandix 内部审批，不能绕过浏览器授权。若截图被浏览器拒绝，请保持目标页面可见，点击浏览器工具栏上的 Tandix 图标后重试；更新扩展后需重新加载，并检查浏览器中的网站访问权限。画布绘制的表格正文可能不在页面文本中，普通网页图片读取也无法替代该表格的截图。
 
 ## 已知限制
 

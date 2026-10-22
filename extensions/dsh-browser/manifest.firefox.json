@@ -30,8 +30,7 @@
     "notifications"
   ],
   "host_permissions": [
-    "http://*/*",
-    "https://*/*"
+    "<all_urls>"
   ],
   "background": {
     "scripts": [

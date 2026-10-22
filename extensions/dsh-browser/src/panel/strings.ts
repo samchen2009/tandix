@@ -200,6 +200,12 @@ export interface PanelCopy {
     startRecording: string
     stopRecording: string
     sendMessage: string
+    editMessage: string
+    cancelEdit: string
+    resendMessage: string
+    resendingMessage: string
+    editAttachmentsHint: string
+    editResendHelp: string
     stopTurn: string
     stoppingTurn: string
     addImages: string
@@ -337,7 +343,7 @@ const EN: PanelCopy = {
     sharingAsk: 'Ask every time',
     sharingOff: 'Off',
     unrestrictedBrowserAccess: 'Allow unrestricted browser control',
-    unrestrictedBrowserAccessHelp: 'Let the model read every HTTP(S) page, inspect all open tab titles and URLs, and perform actions—including following and closing tabs—without confirmation. Browser-protected page content remains inaccessible.',
+    unrestrictedBrowserAccessHelp: 'Let the model read every HTTP(S) page, inspect all open tab titles and URLs, and perform actions—including following and closing tabs—without confirmation. Browser-protected page content remains inaccessible. Screenshots also require browser site-access permission.',
     approvalNotifications: 'Browser approval notifications',
     approvalNotificationsHelp: 'Notify you when an approval arrives while the side panel is closed',
     autoResumeSession: "Resume this page's conversation",
@@ -451,6 +457,12 @@ const EN: PanelCopy = {
     startRecording: 'Record actions',
     stopRecording: 'Stop recording',
     sendMessage: 'Send message',
+    editMessage: 'Edit message',
+    cancelEdit: 'Cancel',
+    resendMessage: 'Resend',
+    resendingMessage: 'Sending…',
+    editAttachmentsHint: 'The original quote and images will be included in the new message.',
+    editResendHelp: 'Send as a new message in this conversation.',
     stopTurn: 'Stop generating',
     stoppingTurn: 'Stopping…',
     addImages: 'Add images',
@@ -588,7 +600,7 @@ const ZH: PanelCopy = {
     sharingAsk: '每次询问',
     sharingOff: '关闭',
     unrestrictedBrowserAccess: '允许模型完全控制浏览器',
-    unrestrictedBrowserAccessHelp: '模型无需确认即可读取所有 HTTP(S) 页面、查看全部已打开标签页的标题和链接，并执行包括跟随、关闭标签页在内的所有操作。浏览器受保护页面的内容仍不可访问。',
+    unrestrictedBrowserAccessHelp: '模型无需确认即可读取所有 HTTP(S) 页面、查看全部已打开标签页的标题和链接，并执行包括跟随、关闭标签页在内的所有操作。浏览器受保护页面的内容仍不可访问；截图还需浏览器授予网站访问权限。',
     approvalNotifications: '浏览器审批通知',
     approvalNotificationsHelp: '侧栏关闭时收到审批请求，通过系统通知提醒你',
     autoResumeSession: '续接当前页面会话',
@@ -702,6 +714,12 @@ const ZH: PanelCopy = {
     startRecording: '录制操作',
     stopRecording: '停止录制',
     sendMessage: '发送消息',
+    editMessage: '编辑消息',
+    cancelEdit: '取消编辑',
+    resendMessage: '重新发送',
+    resendingMessage: '正在发送…',
+    editAttachmentsHint: '原引用和图片将一并作为新消息发送。',
+    editResendHelp: '修改后将作为新消息发送到当前会话。',
     stopTurn: '停止生成',
     stoppingTurn: '正在停止…',
     addImages: '添加图片',

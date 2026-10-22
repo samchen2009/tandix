@@ -36,6 +36,7 @@ import { AgentConfiguration } from './AgentConfiguration.tsx'
 import { CodexCapabilities } from './CodexCapabilities.tsx'
 import { buildGoalContinuePrompt, buildGoalDraftPrompt, buildGoalObjective, buildGoalStartPrompt, parseGoalDraft, type GoalState } from './goal.ts'
 import { MessageImages } from './MessageImages.tsx'
+import { EditableUserMessage } from './EditableUserMessage.tsx'
 import type { QuestionAnswer } from './questions.ts'
 import {
   hasPendingQuestion,
@@ -53,6 +54,7 @@ import {
 import { approvalReadyForSession, approvalSessionToFocus } from './approvals.ts'
 import {
   browserTimeZone,
+  attachmentResponseDataUrl,
   clipboardMediaFiles,
   draftImageDataUrl,
   parseImageAttachmentLimits,
@@ -62,6 +64,7 @@ import {
   type DraftFile,
   type DraftImage,
   type ImageAttachmentLimits,
+  type ImageAttachmentRef,
 } from './attachments.ts'
 import { imageErrorMessage } from './image-errors.ts'
 import { AssistantStreamView } from './assistant-stream.ts'
@@ -822,6 +825,8 @@ export function App(): React.JSX.Element {
   const stoppingRef = useRef(false)
   const addingImagesRef = useRef(false)
   const sendingRef = useRef(false)
+  const activePromptRef = useRef<symbol | null>(null)
+  const cancelPromptRef = useRef<(() => void) | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const imageProjectionRef = useRef<{
     sessionId: string | null
@@ -884,6 +889,13 @@ export function App(): React.JSX.Element {
     sessionChanging,
     sessionRef.current,
   )
+  function releaseCancelledPrompt(): void {
+    activePromptRef.current = null
+    cancelPromptRef.current?.()
+    cancelPromptRef.current = null
+    sendingRef.current = false
+    setBusy(false)
+  }
   function replaceQuestions(next: PendingQuestion[]): void {
     questionsRef.current = next
     setQuestions(next)
@@ -1018,6 +1030,7 @@ export function App(): React.JSX.Element {
         streamRefreshRef.current.clear()
         setStreamRow(null)
         setRows([])
+        releaseCancelledPrompt()
         setDraft((current) => ({ ...current, images: [], files: [] }))
         setImageLimits(null)
         imageProjectionRef.current = { sessionId: null, seq: Number.NEGATIVE_INFINITY, limits: null }
@@ -1074,6 +1087,8 @@ export function App(): React.JSX.Element {
   }, [state, sessionEpoch, settings, resumeHint])
 
   const queuedApproval = approvalQueue[0]
+  const queuedAgentApproval = sessionChanging ? undefined
+    : agentApprovals.find(request => request.sessionId === sessionRef.current)
   useEffect(() => {
     const sessionId = approvalSessionToFocus(
       queuedApproval,
@@ -1260,6 +1275,7 @@ export function App(): React.JSX.Element {
     }
     if (payload.event.type === 'turn/end') {
       sessionRuntimeRef.current.finishTurn(payload.sessionId)
+      setAgentApprovals((current) => current.filter(request => request.sessionId !== payload.sessionId))
       if (payload.sessionId !== sessionRef.current) return
       setRows((prev) => interruptRunningTools(prev))
       stoppingRef.current = false
@@ -1980,18 +1996,23 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function send(textOverride?: string): Promise<boolean> {
+  async function send(textOverride?: string, resendImages: readonly ImageAttachmentRef[] = []): Promise<boolean> {
     if (configurationBusy) return false
     const text = (textOverride ?? input).trim()
     const saveSkillIntent = textOverride === undefined && requestsSkillSave(text)
-    const submittedImages = textOverride === undefined ? draftImages : []
+    let submittedImages = textOverride === undefined ? draftImages : []
     const submittedFiles = textOverride === undefined ? draftFiles : []
     // A quick-start prompt asks about the whole page, not about a quote.
     const submittedSelection = textOverride === undefined ? selection : null
     const id = sessionRef.current
     // busy state 是异步的：连续回车可能都通过 state 检查——用 ref 同步锁。
-    if ((text === '' && submittedImages.length === 0 && submittedFiles.length === 0 && submittedSelection === null)
-      || busy || goalDrafting || addingImagesRef.current || sendingRef.current || sessionChangingRef.current || id === null) return false
+    if ((text === '' && submittedImages.length === 0 && resendImages.length === 0 && submittedFiles.length === 0 && submittedSelection === null)
+      || busy || stoppingRef.current || goalDrafting || addingImagesRef.current || sendingRef.current || sessionChangingRef.current || id === null) return false
+    const attempt = Symbol('prompt')
+    activePromptRef.current = attempt
+    const cancellation = new Promise<never>((_resolve, reject) => {
+      cancelPromptRef.current = () => reject(new Error('Prompt cancelled'))
+    })
     sendingRef.current = true
     const submittedDraft: ComposerDraft<DraftImage, DraftFile> = {
       text, images: submittedImages, files: submittedFiles,
@@ -2004,12 +2025,21 @@ export function App(): React.JSX.Element {
     setError(null)
     // 不渲染乐观行：live user/message 事件即时回显，避免同一消息出现两行。
     try {
+      if (resendImages.length > 0) {
+        submittedImages = await Promise.race([cancellation, Promise.all(resendImages.map(async (image): Promise<DraftImage> => {
+          const value = await api.rpc('session.attachment', { sessionId: id, attachmentId: image.attachmentId })
+          const url = attachmentResponseDataUrl(value, image)
+          if (url === null) throw new Error(copy.app.imageLoadFailed)
+          return { ...image, id: image.attachmentId, data: url.slice(url.indexOf(',') + 1) }
+        }))])
+      }
+      if (activePromptRef.current !== attempt || sessionRef.current !== id) return false
       if (saveSkillIntent) {
         pendingManagedSkillSaveRef.current = { sessionId: id, sentAt: Date.now(), retries: 0 }
         managedSkillDraftRef.current = null
       }
       const clientTimeZone = browserTimeZone()
-      await api.rpc('session.prompt', {
+      await Promise.race([cancellation, api.rpc('session.prompt', {
         sessionId: id,
         mode: 'queue',
         ...(saveSkillIntent ? { tandixSkillSaveIntent: true } : {}),
@@ -2019,7 +2049,8 @@ export function App(): React.JSX.Element {
           submittedFiles,
         ),
         ...(clientTimeZone === undefined ? {} : { clientTimeZone }),
-      })
+      })])
+      if (activePromptRef.current !== attempt || sessionRef.current !== id) return false
       if (submittedSelection !== null) {
         // Keep the background authoritative while the prompt is in flight.
         // Conditional clearing cannot consume a newer highlight captured in
@@ -2030,6 +2061,7 @@ export function App(): React.JSX.Element {
       }
       return true
     } catch (cause) {
+      if (activePromptRef.current !== attempt || sessionRef.current !== id) return false
       if (saveSkillIntent && pendingManagedSkillSaveRef.current?.sessionId === id) {
         pendingManagedSkillSaveRef.current = null
         managedSkillDraftRef.current = null
@@ -2043,8 +2075,12 @@ export function App(): React.JSX.Element {
       }
       return false
     } finally {
-      setBusy(false)
-      sendingRef.current = false
+      if (activePromptRef.current === attempt) {
+        activePromptRef.current = null
+        cancelPromptRef.current = null
+        setBusy(false)
+        sendingRef.current = false
+      }
     }
   }
 
@@ -2193,6 +2229,9 @@ export function App(): React.JSX.Element {
       }
       await api.rpc('session.cancel', { sessionId: id })
       if (sessionRef.current === id) {
+        // Some hosts return prompt admission after cancellation. Release the
+        // composer now; that old promise must not affect a newer submission.
+        releaseCancelledPrompt()
         if (pendingGoalDraftRef.current === id) {
           pendingGoalDraftRef.current = null
           setGoalDrafting(false)
@@ -2490,9 +2529,8 @@ export function App(): React.JSX.Element {
     }
   }
 
-  async function decideAgentApproval(decision: 'deny' | 'once' | 'session'): Promise<void> {
-    const request = agentApprovals[0]
-    if (request === undefined || agentApprovalBusy) return
+  async function decideAgentApproval(request: AgentApproval, decision: 'deny' | 'once' | 'session'): Promise<void> {
+    if (request.sessionId !== sessionRef.current || sessionChangingRef.current || agentApprovalBusy) return
     setAgentApprovalBusy(true)
     try {
       const receipt = await api.respond(request.rpcId, { ok: true,
@@ -2533,8 +2571,8 @@ export function App(): React.JSX.Element {
     ? (locale === 'zh' ? `${agentLabel(backend, locale)} 已连接` : `${agentLabel(backend, locale)} connected`)
     : copy.status[state]
   const sessionMenuTitle = sessionTitle ?? copy.app.newSession
-  const approvalDialog = agentApprovals[0] !== undefined
-    ? <AgentApprovalDialog request={agentApprovals[0]} locale={locale} deciding={agentApprovalBusy} onDecision={(decision) => { void decideAgentApproval(decision) }} />
+  const approvalDialog = queuedAgentApproval !== undefined
+    ? <AgentApprovalDialog request={queuedAgentApproval} locale={locale} deciding={agentApprovalBusy} onDecision={(decision) => { void decideAgentApproval(queuedAgentApproval, decision) }} />
     : !approvalReadyForSession(queuedApproval, sessionRef.current, sessionChanging)
       ? null : <ApprovalDialog request={queuedApproval!} onDecision={decideApproval} copy={copy} />
 
@@ -3032,7 +3070,19 @@ export function App(): React.JSX.Element {
             {row.kind === 'assistant' && <span className="assistant-avatar"><img src={brandIconUrl} alt={copy.app.assistant} /></span>}
             {row.kind === 'tool'
               ? <ToolActivity row={row} copy={copy} />
-              : <MessageBody row={row} sessionId={sessionRef.current ?? ''} api={api} copy={copy} />}
+              : row.kind === 'user' ? <EditableUserMessage key={`${sessionRef.current}:${row.seq}`}
+                  text={splitSelectionMessage(row.text)?.message ?? row.text}
+                  hasAttachments={(row.images?.length ?? 0) > 0 || splitSelectionMessage(row.text) !== null}
+                  disabled={!sessionReady || busy || working || stopping || configurationBusy || goalDrafting || addingImages}
+                  copy={copy} onResend={(text) => {
+                    const attached = splitSelectionMessage(row.text)
+                    return send(attached === null ? text : selectionPromptText({
+                      ...attached.selection, text: attached.selection.quote, capturedAt: Date.now(),
+                    }, text.trim()), row.images)
+                  }}>
+                  <MessageBody row={row} sessionId={sessionRef.current ?? ''} api={api} copy={copy} />
+                </EditableUserMessage>
+                : <MessageBody row={row} sessionId={sessionRef.current ?? ''} api={api} copy={copy} />}
           </div>
         ))}
         {streamRow !== null && !(streamRow.kind === 'assistant' && assistantDisplayText(streamRow.text) === '') && (
@@ -3201,7 +3251,7 @@ export function App(): React.JSX.Element {
               <details className="permission-control">
                 <summary title={locale === 'zh' ? '查看浏览器权限' : 'Browser permissions'}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/></svg><span>{settings?.unrestrictedBrowserAccess ? (locale === 'zh' ? '完整权限' : 'Full access') : (locale === 'zh' ? '基本权限' : 'Basic access')}</span><span aria-hidden="true">⌄</span></summary>
                 <div className="permission-popover"><strong>{locale === 'zh' ? '浏览器权限' : 'Browser permissions'}</strong>
-                  <p>{settings?.unrestrictedBrowserAccess ? (locale === 'zh' ? '已启用完整浏览器访问。' : 'Full browser access is enabled.') : (locale === 'zh' ? '网页操作遵循现有授权规则，需要确认时会显示审批。' : 'Browser actions follow your approval rules. Approval is requested when needed.')}</p>
+                  <p>{settings?.unrestrictedBrowserAccess ? (locale === 'zh' ? '已启用免确认操作。截图还需浏览器授予网站访问权限。' : 'Actions can run without Tandix prompts. Screenshots also require browser site-access permission.') : (locale === 'zh' ? '网页操作遵循现有授权规则，需要确认时会显示审批。' : 'Browser actions follow your approval rules. Approval is requested when needed.')}</p>
                   <p>{locale === 'zh' ? '本机文件与命令权限由 Agent 单独管理。' : 'Agent file and command permissions are managed separately.'}</p>
                   <button type="button" onClick={() => setShowSettings(true)}>{locale === 'zh' ? '管理权限' : 'Manage permissions'}</button>
                 </div>

@@ -676,8 +676,43 @@ function recordSelection(tab: chrome.tabs.Tab, frameId: number, value: unknown):
 
 function broadcastEvent(frame: ServerFrame): void {
   for (const port of panelPorts) {
-    try { port.postMessage({ type: 'event', frame }) } catch { /* port already closed */ }
+    deliverEventToPanel(port, frame)
   }
+}
+
+function agentApprovalSession(frame: ServerFrame): string | undefined {
+  if (frame.t !== 'event' || frame.frame.method !== 'agent-approval/requested') return undefined
+  const payload = frame.frame.payload as { sessionId?: unknown } | null
+  return validSessionId(payload?.sessionId)
+}
+
+/** An unrelated conversation must never receive local command/file details. */
+function agentApprovalBelongsToPanel(port: chrome.runtime.Port, sessionId: string): boolean {
+  const displayed = panelActiveSessions.get(port)
+  if (displayed !== undefined) return displayed === sessionId
+  if ([...panelPorts].some(candidate => panelActiveSessions.get(candidate) === sessionId)) return false
+  // A reopened panel can receive pending requests before history restoration.
+  const tab = tabAffinity.getSessionTab(sessionId)
+  if (tab === undefined) return false
+  const ownedTabId = panelTabs.get(port)
+  return ownedTabId === undefined
+    ? panelWindows.get(port) === tab.windowId
+    : ownedTabId === tab.tabId
+}
+
+function deliverEventToPanel(port: chrome.runtime.Port, frame: ServerFrame): boolean {
+  if (frame.t === 'event' && frame.frame.method === 'agent-approval/requested') {
+    const sessionId = agentApprovalSession(frame)
+    if (sessionId === undefined || !agentApprovalBelongsToPanel(port, sessionId)) return false
+  }
+  try { port.postMessage({ type: 'event', frame }) } catch { return false /* port already closed */ }
+  if (frame.t === 'event' && frame.frame.method === 'agent-approval/requested'
+    && agentApprovalPending.has(frame.frame.rpcId)) clearAgentApprovalNotification(frame.frame.rpcId)
+  return true
+}
+
+function replayTransientEvents(port: chrome.runtime.Port): void {
+  for (const frame of transientEvents.replay()) deliverEventToPanel(port, frame)
 }
 
 function broadcastApprovalResolved(id: string): void {
@@ -690,27 +725,46 @@ const APPROVAL_NOTIFICATION_PREFIX = 'dsh-browser-approval:'
 const AGENT_APPROVAL_NOTIFICATION_PREFIX = 'tandix-agent-approval:'
 const approvalNotificationTabs = new Map<string, number>()
 const agentApprovalWindows = new Map<string, number>()
+const agentApprovalTabs = new Map<string, number>()
 const agentApprovalPending = new Set<string>()
 
-async function notifyAgentApproval(id: string): Promise<void> {
-  if (!settings.approvalNotifications || panelPorts.size > 0) return
+async function notifyAgentApproval(frame: ServerFrame): Promise<void> {
+  const sessionId = agentApprovalSession(frame)
+  if (sessionId === undefined || frame.t !== 'event' || !settings.approvalNotifications
+    || [...panelPorts].some(port => agentApprovalBelongsToPanel(port, sessionId))) return
+  const id = frame.frame.rpcId
+  if (agentApprovalPending.has(id)) return
   agentApprovalPending.add(id)
   try {
-    const window = await chrome.windows.getLastFocused()
-    if (window.id === undefined || !agentApprovalPending.has(id) || panelPorts.size > 0) return
-    agentApprovalWindows.set(id, window.id)
+    await affinityReady
+    const tab = tabAffinity.getSessionTab(sessionId)
+    if (tab === undefined || !agentApprovalPending.has(id)
+      || [...panelPorts].some(port => agentApprovalBelongsToPanel(port, sessionId))) {
+      clearAgentApprovalNotification(id)
+      return
+    }
+    agentApprovalWindows.set(id, tab.windowId)
+    agentApprovalTabs.set(id, tab.tabId)
     await chrome.notifications.create(`${AGENT_APPROVAL_NOTIFICATION_PREFIX}${id}`, {
       type: 'basic', iconUrl: chrome.runtime.getURL('assets/icons/icon128.png'),
       title: getUiLocale() === 'zh' ? '本地操作等待授权' : 'Local action awaiting approval',
       message: getUiLocale() === 'zh' ? '点击打开网页助手，查看具体操作并选择允许或拒绝。' : 'Open Tandix to review and allow or deny the action.',
       requireInteraction: true,
     })
+    if (!agentApprovalPending.has(id)) clearAgentApprovalNotification(id)
   } catch { /* Notifications are best effort; the request remains pending. */ }
+}
+
+function notifyPendingAgentApprovals(): void {
+  for (const frame of transientEvents.replay()) {
+    if (agentApprovalSession(frame) !== undefined) void notifyAgentApproval(frame)
+  }
 }
 
 function clearAgentApprovalNotification(id: string): void {
   agentApprovalPending.delete(id)
   agentApprovalWindows.delete(id)
+  agentApprovalTabs.delete(id)
   void Promise.resolve(chrome.notifications.clear(`${AGENT_APPROVAL_NOTIFICATION_PREFIX}${id}`)).catch(() => {})
 }
 
@@ -1709,11 +1763,17 @@ async function startBridge(): Promise<string | undefined> {
             }
             transientEvents.ingest(frame)
             broadcastEvent(frame)
-            if (frame.frame.method === 'agent-approval/requested' && panelPorts.size === 0) {
-              void notifyAgentApproval(frame.frame.rpcId)
+            if (frame.frame.method === 'agent-approval/requested') {
+              void notifyAgentApproval(frame)
             } else if (frame.frame.method === 'agent-approval/resolved'
               && typeof (frame.frame.payload as { approvalRpcId?: unknown } | null)?.approvalRpcId === 'string') {
               clearAgentApprovalNotification((frame.frame.payload as { approvalRpcId: string }).approvalRpcId)
+            } else if (frame.frame.method === 'session/event'
+              && (frame.frame.payload as { event?: { type?: string } } | null)?.event?.type === 'turn/end') {
+              // A cancelled turn may end without a separate approval receipt.
+              const pendingIds = new Set(transientEvents.replay().filter(entry => agentApprovalSession(entry) !== undefined)
+                .map(entry => entry.frame.rpcId))
+              for (const id of agentApprovalPending) if (!pendingIds.has(id)) clearAgentApprovalNotification(id)
             }
           }
           else if (frame.t === 'tool.call') routeToolCall(frame)
@@ -1873,6 +1933,15 @@ chrome.runtime.onConnect.addListener((port) => {
       case 'respond': {
         const response = message as { id?: unknown; rpcId?: unknown; result?: unknown }
         if (typeof response.id !== 'string' || typeof response.rpcId !== 'string' || !isRespondResult(response.result)) break
+        const approval = transientEvents.replay().find(frame => agentApprovalSession(frame) !== undefined
+          && frame.frame.rpcId === response.rpcId)
+        const approvalSessionId = approval === undefined ? undefined : agentApprovalSession(approval)
+        if (approvalSessionId !== undefined && !agentApprovalBelongsToPanel(port, approvalSessionId)) {
+          port.postMessage({ type: 'respond.result', id: response.id, ok: false,
+            error: { code: 'approval-session-mismatch', message: getUiLocale() === 'zh'
+              ? '请在授权请求所属的会话中处理。' : 'Review this approval in its own conversation.' } })
+          break
+        }
         const messages = responseMessages()
         interactionResponses.begin(
           port,
@@ -2027,6 +2096,7 @@ chrome.runtime.onConnect.addListener((port) => {
           || !Number.isInteger(registration.windowId)
           || registration.windowId < 0) break
         panelWindows.set(port, registration.windowId)
+        replayTransientEvents(port)
         syncSelectionWatch()
         // Keep a recent operation trace while the side panel is open. The
         // user no longer has to arm a separate Teach recording.
@@ -2072,6 +2142,7 @@ chrome.runtime.onConnect.addListener((port) => {
           panelActiveSessions.delete(port)
         } else {
           panelActiveSessions.set(port, sid)
+          replayTransientEvents(port)
           if (session.isNew === true) {
             const bind = Promise.all([affinityReady, pageSessionContexts.ready]).then(async () => {
               const windowId = panelWindows.get(port)
@@ -2095,6 +2166,7 @@ chrome.runtime.onConnect.addListener((port) => {
           }
           approvals.replay(request => deliverApprovalToPanel(port, request))
         }
+        notifyPendingAgentApprovals()
         break
       }
       case 'approval.response': {
@@ -2171,7 +2243,7 @@ chrome.runtime.onConnect.addListener((port) => {
           if (statusWindowId !== undefined) {
             port.postMessage({ type: 'selection', selection: selections.current(statusWindowId) })
           }
-          for (const frame of transientEvents.replay()) port.postMessage({ type: 'event', frame })
+          replayTransientEvents(port)
           approvals.replay(request => deliverApprovalToPanel(port, request))
           const resumeWindowId = panelWindows.get(port)
           if (resumeWindowId !== undefined) void postResumeHint(port, resumeWindowId)
@@ -2191,6 +2263,7 @@ chrome.runtime.onConnect.addListener((port) => {
     const panelSessionId = panelActiveSessions.get(port)
     panelActiveSessions.delete(port)
     panelPorts.delete(port)
+    notifyPendingAgentApprovals()
     approvals.notifyPending(request => [...panelPorts].some(candidate => approvalBelongsToPanel(candidate, request)))
     if (panelSessionId !== undefined) void checkpointSessionPage(panelSessionId)
     interactionResponses.removePort(port)
@@ -2224,9 +2297,10 @@ chrome.notifications.onClicked.addListener((notificationId) => {
   if (notificationId.startsWith(AGENT_APPROVAL_NOTIFICATION_PREFIX)) {
     const id = notificationId.slice(AGENT_APPROVAL_NOTIFICATION_PREFIX.length)
     const windowId = agentApprovalWindows.get(id)
+    const tabId = agentApprovalTabs.get(id)
     if (windowId !== undefined) {
       clearAgentApprovalNotification(id)
-      openAssistantPanel(windowId)
+      openAssistantPanel(windowId, tabId)
     }
     return
   }

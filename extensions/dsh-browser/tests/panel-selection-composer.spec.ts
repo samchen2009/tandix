@@ -7,6 +7,7 @@ import type { BridgeState } from '../src/background/bridge.ts'
 import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { PanelApi } from '../src/panel/api.ts'
 import type { PageSelection } from '../src/selection.ts'
+import { selectionPromptText } from '../src/panel/selection.ts'
 
 let panelApi: PanelApi
 
@@ -113,6 +114,140 @@ describe('attaching a page selection in the composer', () => {
     })
     await vi.waitFor(() => { expect(rpc).toHaveBeenCalledWith('session.create', {}) })
   }
+
+  async function typeInto(selector: string, text: string): Promise<void> {
+    const textarea = document.querySelector<HTMLTextAreaElement>(selector)!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(textarea, text)
+      textarea.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+  }
+
+  async function showUserMessage(text: string, images: unknown[] = []): Promise<void> {
+    await act(async () => { onEvent?.({ t: 'event', frame: { rpcId: '', method: 'session/event', payload: {
+      sessionId: 'session-current', event: { type: 'user/message', data: {
+        message: { source: { kind: 'user' }, content: [{ type: 'text', text }, ...images] },
+      } },
+    } } } as ServerFrame) })
+  }
+
+  it('unlocks after stopping an unresolved send and isolates a resend from its late response', async () => {
+    await startPanel('codex')
+    const original = rpc.getMockImplementation()!
+    let rejectOld: ((cause: Error) => void) | undefined
+    let acceptResend: (() => void) | undefined
+    let prompts = 0
+    rpc.mockImplementation(async (method, payload) => {
+      if (method === 'session.prompt') {
+        prompts += 1
+        if (prompts === 1) return new Promise((_resolve, reject) => { rejectOld = reject })
+        if (prompts === 2) return new Promise<void>((resolve) => { acceptResend = resolve })
+        return {}
+      }
+      return original(method, payload)
+    })
+    await typeInto('.composer textarea', 'Original request')
+    await act(async () => { document.querySelector<HTMLButtonElement>('.composer-actions-end > button')!.click() })
+    await showUserMessage('Original request')
+    expect(document.querySelector<HTMLButtonElement>('.message-edit-button')?.disabled).toBe(true)
+    await act(async () => { document.querySelector<HTMLButtonElement>('.stop-button')!.click() })
+
+    expect(document.querySelector<HTMLTextAreaElement>('.composer textarea')?.disabled).toBe(false)
+    await act(async () => { document.querySelector<HTMLButtonElement>('.message-edit-button')!.click() })
+    await typeInto('.message-editor textarea', 'Revised request')
+    await act(async () => { document.querySelector<HTMLButtonElement>('.message-editor button[type="submit"]')!.click() })
+    expect(prompts).toBe(2)
+    await act(async () => { rejectOld?.(new Error('late cancellation')) })
+    expect(document.querySelector<HTMLTextAreaElement>('.composer textarea')?.disabled).toBe(true)
+    expect(document.querySelector('.error')).toBeNull()
+
+    // Cancelling a resend also releases its editor, even if its RPC never ends.
+    await act(async () => { document.querySelector<HTMLButtonElement>('.stop-button')!.click() })
+    expect(document.querySelector<HTMLTextAreaElement>('.message-editor textarea')?.value).toBe('Revised request')
+    expect(document.querySelector<HTMLButtonElement>('.message-editor button[type="submit"]')?.disabled).toBe(false)
+    await act(async () => { document.querySelector<HTMLButtonElement>('.message-editor button[type="submit"]')!.click() })
+    expect(prompts).toBe(3)
+    expect(document.querySelector('.message-editor')).toBeNull()
+    await act(async () => { acceptResend?.() })
+    expect(document.querySelector('.error')).toBeNull()
+  })
+
+  it('resends the edited text with its original quote and image, preserving the current composer draft', async () => {
+    await startPanel()
+    const image = { attachmentId: 'image-original', mediaType: 'image/png', bytes: 3, width: 10, height: 10, name: 'table.png' }
+    const original = rpc.getMockImplementation()!
+    rpc.mockImplementation(async (method, payload) => method === 'session.attachment'
+      ? { attachment: image, data: 'AQID' } : original(method, payload))
+    await showUserMessage(selectionPromptText(selection, 'Original question'), [{ type: 'image', attachment: image }])
+    const newer = { ...selection, text: 'New highlight', capturedAt: 3_000 }
+    await act(async () => { onSelection?.(newer) })
+    await typeInto('.composer textarea', 'Unsent draft')
+    await act(async () => { document.querySelector<HTMLButtonElement>('.message-edit-button')!.click() })
+    expect(document.querySelector<HTMLTextAreaElement>('.message-editor textarea')?.value).toBe('Original question')
+    await typeInto('.message-editor textarea', 'Revised question')
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>('.message-editor button[type="submit"]')!.click()
+      document.querySelector<HTMLButtonElement>('.message-editor button[type="submit"]')!.click()
+    })
+
+    const calls = rpc.mock.calls.filter(([method]) => method === 'session.prompt')
+    expect(calls).toHaveLength(1)
+    const content = (calls[0]![1] as { content: Array<Record<string, unknown>> }).content
+    expect(content[0]?.text).toContain(selection.text)
+    expect(content[0]?.text).toContain('<UNTRUSTED_PAGE_CONTENT nonce="')
+    expect((content[0]?.text as string).endsWith('Revised question')).toBe(true)
+    expect(content[0]?.text).not.toContain('New highlight')
+    expect(content[1]).toEqual({ type: 'image', mediaType: 'image/png', data: 'AQID', name: 'table.png' })
+    expect(document.querySelector('.message-editor')).toBeNull()
+    expect(document.querySelector<HTMLTextAreaElement>('.composer textarea')?.value).toBe('Unsent draft')
+    expect(document.querySelector('.composer-box .page-selection-quote')?.textContent).toContain(newer.text)
+    expect(panelApi.clearSelection).not.toHaveBeenCalled()
+    expect(document.querySelector('.row.user')?.textContent).toContain('Original question')
+  })
+
+  it('retains failed edits for retry and lets Escape discard an edit without changing history', async () => {
+    await startPanel()
+    await showUserMessage('Original request')
+    const original = rpc.getMockImplementation()!
+    let rejectPrompt = true
+    rpc.mockImplementation(async (method, payload) => {
+      if (method === 'session.prompt' && rejectPrompt) throw new Error('bridge unavailable')
+      return original(method, payload)
+    })
+    await act(async () => { document.querySelector<HTMLButtonElement>('.message-edit-button')!.click() })
+    await typeInto('.message-editor textarea', 'Keep this revision')
+    await act(async () => { document.querySelector<HTMLButtonElement>('.message-editor button[type="submit"]')!.click() })
+    expect(document.querySelector<HTMLTextAreaElement>('.message-editor textarea')?.value).toBe('Keep this revision')
+    expect(document.querySelector('.error')?.textContent).toContain('bridge unavailable')
+    rejectPrompt = false
+    await act(async () => { document.querySelector<HTMLTextAreaElement>('.message-editor textarea')!
+      .dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })) })
+    expect(document.querySelector('.message-editor')).toBeNull()
+    expect(rpc.mock.calls.filter(([method]) => method === 'session.prompt')).toHaveLength(2)
+    await act(async () => { document.querySelector<HTMLButtonElement>('.stop-button')!.click() })
+    await act(async () => { document.querySelector<HTMLButtonElement>('.message-edit-button')!.click() })
+    await typeInto('.message-editor textarea', 'Discard this revision')
+    await act(async () => { document.querySelector<HTMLTextAreaElement>('.message-editor textarea')!
+      .dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })) })
+    expect(document.querySelector('.message-editor')).toBeNull()
+    expect(document.querySelector('.row.user')?.textContent).toContain('Original request')
+    expect(rpc.mock.calls.filter(([method]) => method === 'session.prompt')).toHaveLength(2)
+  })
+
+  it('keeps an image edit intact when the original attachment cannot be loaded', async () => {
+    await startPanel()
+    const image = { attachmentId: 'unavailable', mediaType: 'image/png', bytes: 3, width: 10, height: 10 }
+    const original = rpc.getMockImplementation()!
+    rpc.mockImplementation(async (method, payload) => method === 'session.attachment' ? {} : original(method, payload))
+    await showUserMessage('Look at this image', [{ type: 'image', attachment: image }])
+    await act(async () => { document.querySelector<HTMLButtonElement>('.message-edit-button')!.click() })
+    await typeInto('.message-editor textarea', 'Revised image question')
+    await act(async () => { document.querySelector<HTMLButtonElement>('.message-editor button[type="submit"]')!.click() })
+    expect(document.querySelector<HTMLTextAreaElement>('.message-editor textarea')?.value).toBe('Revised image question')
+    expect(document.querySelector('.error')).not.toBeNull()
+    expect(rpc.mock.calls.filter(([method]) => method === 'session.prompt')).toHaveLength(0)
+    expect(document.querySelector<HTMLButtonElement>('.message-editor button[type="submit"]')?.disabled).toBe(false)
+  })
 
   it.each(['codex', 'dsh'] as const)('asks %s for a draft, then starts a goal only after review', async (backend) => {
     await startPanel(backend)

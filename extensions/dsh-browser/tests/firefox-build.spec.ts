@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest'
 interface ExtensionManifest {
   version: string
   permissions: string[]
+  host_permissions: string[]
   background: Record<string, unknown>
   content_security_policy: { extension_pages: string }
   browser_specific_settings?: {
@@ -21,6 +22,12 @@ async function readJson<T>(relativePath: string): Promise<T> {
 }
 
 describe('Firefox build contract', () => {
+  it.each(['../manifest.json', '../manifest.firefox.json'])('declares captureVisibleTab host authorization in %s', async (path) => {
+    const manifest = await readJson<ExtensionManifest>(path)
+
+    expect(manifest.host_permissions).toContain('<all_urls>')
+  })
+
   it('keeps release metadata and shared capabilities aligned with Chrome', async () => {
     const [chromeManifest, firefoxManifest, packageManifest] = await Promise.all([
       readJson<ExtensionManifest>('../manifest.json'),

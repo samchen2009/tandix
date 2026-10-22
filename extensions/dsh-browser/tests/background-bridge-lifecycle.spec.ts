@@ -144,6 +144,94 @@ afterEach(() => {
 })
 
 describe('background bridge lifecycle', () => {
+  it.each([1, 2])('isolates live/replayed local approvals and notification clicks to their owner (other window %i)', async (otherWindowId) => {
+    const chromeMock = mockChrome({
+      localGet: async () => ({ dshSettings: { bridgeUrl: 'wss://bridge.example/ext/bridge' } }),
+      tabGet: async tabId => ({ id: tabId, windowId: tabId === 2 ? otherWindowId : 1,
+        title: `Tab ${tabId}`, url: 'https://example.com/' } as chrome.tabs.Tab),
+    })
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ backend: 'dsh' }))))
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    await import('../src/background/index.ts')
+    const first = panelPort(1)
+    const second = panelPort(2)
+    chromeMock.onConnect.emit(first.port)
+    chromeMock.onConnect.emit(second.port)
+    first.onMessage.emit({ type: 'panel.window', windowId: 1 })
+    second.onMessage.emit({ type: 'panel.window', windowId: otherWindowId })
+    first.onMessage.emit({ type: 'session.active', sessionId: 'first-session', isNew: true })
+    second.onMessage.emit({ type: 'session.active', sessionId: 'second-session', isNew: true })
+    await vi.waitFor(() => {
+      expect(second.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'tab-affinity', state: expect.objectContaining({ controlled: expect.objectContaining({ tabId: 2 }) }),
+      }))
+      expect(FakeWebSocket.instances).toHaveLength(1)
+    })
+    const socket = FakeWebSocket.instances[0]!
+    socket.open()
+    await Promise.resolve()
+    socket.receive({ t: 'hello.ok', caps: { textOnly: true, snapshotMaxChars: 32_000, maxInteractiveItems: 60 } })
+    const approval = { t: 'event', frame: { rpcId: 'local-approval', method: 'agent-approval/requested', payload: {
+      sessionId: 'first-session', backend: 'codex', kind: 'command', command: 'read-private-sheet',
+    } } }
+    socket.receive(approval)
+    expect(first.postMessage).toHaveBeenCalledWith({ type: 'event', frame: approval })
+    expect(second.postMessage).not.toHaveBeenCalledWith({ type: 'event', frame: approval })
+    second.onMessage.emit({ type: 'request-status' })
+    second.onMessage.emit({ type: 'session.active', sessionId: 'second-session' })
+    expect(second.postMessage).not.toHaveBeenCalledWith({ type: 'event', frame: approval })
+
+    // A stale/foreign panel cannot authorize another tab's command either.
+    second.onMessage.emit({ type: 'respond', id: 'foreign-response', rpcId: 'local-approval', result: { ok: true, value: 'accept' } })
+    expect(second.postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'respond.result', id: 'foreign-response', ok: false,
+      error: expect.objectContaining({ code: 'approval-session-mismatch' }),
+    }))
+    expect(socket.sent).not.toContainEqual(expect.objectContaining({ t: 'respond', id: 'foreign-response' }))
+
+    // Another tab's open panel must not suppress the owner's notification.
+    first.onDisconnect.emit()
+    await vi.waitFor(() => expect(chrome.notifications.create).toHaveBeenCalledWith(
+      'tandix-agent-approval:local-approval', expect.any(Object)))
+    chrome.tabs.update = vi.fn(async () => ({ id: 1 } as chrome.tabs.Tab))
+    chrome.windows.update = vi.fn(async () => ({ id: 1 } as chrome.windows.Window))
+    ;(chrome.notifications.onClicked as unknown as { emit: (id: string) => void }).emit('tandix-agent-approval:local-approval')
+    expect(chrome.sidePanel.open).toHaveBeenCalledWith({ tabId: 1 })
+    expect(chrome.tabs.update).toHaveBeenCalledWith(1, { active: true })
+    expect(chrome.windows.update).toHaveBeenCalledWith(1, { focused: true })
+
+    const reopened = panelPort(1)
+    chromeMock.onConnect.emit(reopened.port)
+    reopened.onMessage.emit({ type: 'request-status' })
+    expect(reopened.postMessage).toHaveBeenCalledWith({ type: 'event', frame: approval })
+    reopened.onMessage.emit({ type: 'session.active', sessionId: 'first-session' })
+    reopened.onMessage.emit({ type: 'respond', id: 'owner-response', rpcId: 'local-approval', result: { ok: true, value: 'accept' } })
+    expect(socket.sent).toContainEqual({ t: 'respond', id: 'owner-response', rpcId: 'local-approval', result: { ok: true, value: 'accept' } })
+    socket.receive({ t: 'respond.result', id: 'owner-response', ok: true, result: { accepted: true } })
+    socket.receive({ t: 'event', frame: { rpcId: '', method: 'agent-approval/resolved', payload: {
+      sessionId: 'first-session', approvalRpcId: 'local-approval',
+    } } })
+    reopened.postMessage.mockClear()
+    reopened.onMessage.emit({ type: 'request-status' })
+    expect(reopened.postMessage).not.toHaveBeenCalledWith({ type: 'event', frame: approval })
+
+    // New requests arriving while only the unrelated page remains are scoped too.
+    reopened.onDisconnect.emit()
+    const next = { ...approval, frame: { ...approval.frame, rpcId: 'next-local-approval' } }
+    socket.receive(next)
+    await vi.waitFor(() => expect(chrome.notifications.create).toHaveBeenCalledWith(
+      'tandix-agent-approval:next-local-approval', expect.any(Object)))
+    expect(second.postMessage).not.toHaveBeenCalledWith({ type: 'event', frame: next })
+    socket.receive({ t: 'event', frame: { rpcId: '', method: 'session/event', payload: {
+      sessionId: 'first-session', event: { type: 'turn/end' },
+    } } })
+    expect(chrome.notifications.clear).toHaveBeenCalledWith('tandix-agent-approval:next-local-approval')
+    const afterEnd = panelPort(1)
+    chromeMock.onConnect.emit(afterEnd.port)
+    afterEnd.onMessage.emit({ type: 'request-status' })
+    expect(afterEnd.postMessage).not.toHaveBeenCalledWith({ type: 'event', frame: next })
+  })
+
   it.each([1, 2])('keeps live and replayed browser approvals in their owning tab panel (other window %i)', async (otherWindowId) => {
     const chromeMock = mockChrome({
       localGet: async () => ({ dshSettings: {
