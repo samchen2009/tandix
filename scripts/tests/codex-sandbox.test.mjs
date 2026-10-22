@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 import { CodexBridge, TANDIX_DEVELOPER_INSTRUCTIONS } from '../runtime/codex-bridge.mjs'
 import { TANDIX_BROWSER_INSTRUCTIONS } from '../runtime/browser-guidance.mjs'
@@ -139,8 +141,10 @@ test('Codex rejects a browser MCP server missing tab discovery or form-entry too
   await assert.rejects(bridge.verifyBrowserMcpTools('session-one'), /missing browser_click, browser_type, browser_list_tabs, browser_follow_tab/u)
 })
 
-test('resuming an existing Tandix session refreshes browser instructions before the next turn', async () => {
-  const bridge = new CodexBridge(options)
+test('resuming an existing Tandix session refreshes browser instructions before the next turn', async t => {
+  const workspace = mkdtempSync(join(tmpdir(), 'tandix-resume-instructions-'))
+  t.after(() => rmSync(workspace, { recursive: true, force: true }))
+  const bridge = new CodexBridge({ ...options, workspace })
   bridge.sessions.add('session-one')
   bridge.verifyBrowserMcpTools = async () => {}
   bridge.browserToolConfig = () => ({ mcp_servers: { tandix: {} } })

@@ -284,6 +284,10 @@ bootstrap_remote_install() {
   rsync -a --delete-after \
     --exclude 'node_modules/' \
     --exclude '.managed-by-install-sh' \
+    --exclude '/workspace/' \
+    --exclude '/output/' \
+    --exclude '/.agents/' \
+    --exclude '/.codex/' \
     "$source_dir/" "$MANAGED_ROOT/"
 
   cleanup_bootstrap

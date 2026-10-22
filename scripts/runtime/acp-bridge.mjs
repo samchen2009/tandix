@@ -58,7 +58,7 @@ export class AcpBridge {
     this.proc.stdin.on('error', error => this.fail(error))
     createInterface({ input: this.proc.stdout }).on('line', line => this.receive(line))
     const initialized = await this.call('initialize', { protocolVersion: 1,
-      clientInfo: { name: 'tandix', version: '0.2.4' },
+      clientInfo: { name: 'tandix', version: '0.2.5' },
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } }, 15_000)
     if (initialized?.protocolVersion !== 1) throw new Error(`${this.label} agent does not support ACP protocol version 1.`)
     this.agentCapabilities = initialized.agentCapabilities ?? {}

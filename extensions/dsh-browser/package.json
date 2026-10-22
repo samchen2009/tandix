@@ -1,7 +1,7 @@
 {
   "name": "dsh-browser-extension",
   "description": "Tandix Chrome and Firefox MV3 extension — help on the current webpage with reusable workflow skills",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "author": "Yuxiang Lin",
   "license": "MIT",
   "private": true,

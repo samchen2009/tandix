@@ -127,6 +127,7 @@ export class CodexBridge {
   }
 
   async start() {
+    this.ensureWorkspaceDirectory()
     const batch = process.platform === 'win32' && /\.(?:cmd|bat)$/iu.test(this.codexPath)
     this.proc = spawn(batch ? `"${this.codexPath}"` : this.codexPath, ['app-server'], {
       cwd: this.workspace,
@@ -140,7 +141,7 @@ export class CodexBridge {
     this.proc.on('exit', () => this.failAll(new Error('Codex app-server exited')))
     createInterface({ input: this.proc.stdout }).on('line', line => this.receiveCodex(line))
     await this.call('initialize', {
-      clientInfo: { name: 'tandix', title: 'Tandix', version: '0.2.4' },
+      clientInfo: { name: 'tandix', title: 'Tandix', version: '0.2.5' },
     }, 8_000)
     this.writeCodex({ method: 'initialized', params: {} })
     const auth = await this.call('account/read', { refreshToken: false }, 8_000)
@@ -164,6 +165,13 @@ export class CodexBridge {
 
   get wsUrl() { return `ws://127.0.0.1:${this.port}/ext/bridge` }
   get isReady() { return !this.closed && this.proc?.exitCode === null && this.http?.listening === true }
+
+  ensureWorkspaceDirectory() {
+    // MCP inherits the thread cwd; a missing cwd makes a valid executable fail with ENOENT.
+    const cwd = join(this.workspace, 'workspace')
+    mkdirSync(cwd, { recursive: true })
+    return cwd
+  }
 
   async inspectWebTaskTurn(sessionId) {
     let turn
@@ -980,7 +988,7 @@ export class CodexBridge {
         }
         const routeToken = randomBytes(16).toString('hex')
         const result = await this.call('thread/start', {
-          cwd: join(this.workspace, 'workspace'),
+          cwd: this.ensureWorkspaceDirectory(),
           ...this.sandboxOptions(),
           approvalPolicy: 'on-request',
           serviceName: 'tandix',
@@ -1035,7 +1043,7 @@ export class CodexBridge {
             this.loaded.add(sessionId)
           } else {
             const routeToken = randomBytes(16).toString('hex')
-            const resumed = await this.call('thread/resume', { threadId: sessionId, ...this.sandboxOptions(),
+            const resumed = await this.call('thread/resume', { threadId: sessionId, cwd: this.ensureWorkspaceDirectory(), ...this.sandboxOptions(),
               approvalPolicy: 'on-request', developerInstructions: TANDIX_DEVELOPER_INSTRUCTIONS,
               config: this.browserToolConfig(routeToken) })
             this.sessionConfigurations.set(sessionId, resumed)

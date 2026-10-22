@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import tarfile
 import tempfile
 import unittest
 
@@ -134,6 +135,58 @@ exit "$TEST_NATIVE_STATUS"
         self.assertTrue(native_args)
         self.assertNotIn('Extension files and native companion are updated.', result.stdout)
         self.assertEqual(remaining, [])
+
+
+@unittest.skipUnless(os.name != 'nt' and shutil.which('rsync'), 'Requires Unix rsync')
+class UnixManagedUpdate(unittest.TestCase):
+    def test_source_sync_preserves_task_workspaces_and_local_agent_files(self):
+        with tempfile.TemporaryDirectory(prefix='tandix managed update ') as directory:
+            work = Path(directory)
+            source = work / 'source'
+            for name in ['package.json', 'pnpm-lock.yaml', 'extensions/dsh-browser/package.json',
+                         'packages/browser/bridge-browser/package.json']:
+                path = source / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('{}')
+            entry = ROOT / 'scripts/install/source-unix.sh'
+            script = source / 'scripts/install/source-unix.sh'
+            script.parent.mkdir(parents=True)
+            shutil.copyfile(entry, script)
+            (source / 'new-source.txt').write_text('new source')
+            archive = work / 'source.tar.gz'
+            with tarfile.open(str(archive), 'w:gz') as tar:
+                tar.add(str(source), arcname='tandix-main')
+            managed = work / 'dsh/dsh-browser'
+            managed.mkdir(parents=True)
+            (managed / '.managed-by-install-sh').touch()
+            preserved = ['workspace/output/report.txt', 'output/report.txt', '.agents/skills/local.txt',
+                         '.codex/local.txt', 'node_modules/cache.txt']
+            for name in preserved:
+                path = managed / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('keep local file')
+            (managed / 'obsolete-source.txt').write_text('old source')
+            tools = work / 'bin'
+            tools.mkdir()
+            for name, body in {
+                'curl': '#!/bin/bash\nfor destination in "$@"; do :; done\ncp "$TEST_ARCHIVE" "$destination"\n',
+                'node': '#!/bin/bash\nexit 0\n',
+                'pnpm': '#!/bin/bash\nexit 37\n',
+            }.items():
+                path = tools / name
+                path.write_text(body)
+                path.chmod(0o755)
+            standalone = work / 'install.sh'
+            shutil.copyfile(entry, standalone)
+            result = subprocess.run(['/bin/bash', str(standalone)], env={**os.environ,
+                'PATH': str(tools) + ':/usr/bin:/bin', 'DSH_HOME': str(work / 'dsh'),
+                'TEST_ARCHIVE': str(archive), 'TMPDIR': str(work)}, text=True, capture_output=True)
+            # Stop before installing dependencies: exercise the real archive sync without network or installs.
+            self.assertEqual(result.returncode, 37, result.stdout + result.stderr)
+            self.assertEqual((managed / 'new-source.txt').read_text(), 'new source')
+            self.assertFalse((managed / 'obsolete-source.txt').exists())
+            for name in preserved:
+                self.assertEqual((managed / name).read_text(), 'keep local file', name)
 
 
 @unittest.skipUnless(os.name == 'nt', 'Windows PowerShell harness')
