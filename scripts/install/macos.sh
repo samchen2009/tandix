@@ -3,7 +3,7 @@
 set -euo pipefail
 
 if [ "${1:-}" = --help ]; then
-  printf 'Usage: bash install-macos.sh\nRequires Chrome and Node.js 22.19+ or 24+ (with npm).\nDownloads Tandix source from GitHub and builds it using pnpm 11.7.0.\n'
+  printf 'Usage: bash install-macos.sh\nRequires Chrome and Node.js 22.19+ or 24+ (with npm).\nDownloads and builds Tandix, then installs or updates its native companion.\nFirst-time Chrome extension loading requires your interaction.\n'
   exit 0
 fi
 if [ "$#" -ne 0 ]; then
@@ -27,8 +27,33 @@ printf 'Downloading the Tandix source installer from GitHub...\n'
 curl -fL --retry 2 --connect-timeout 15 \
   'https://raw.githubusercontent.com/samchen2009/tandix/main/scripts/install/source-unix.sh' -o "$installer"
 # npm provides the pinned pnpm only to the child process, without changing global tools.
-npm exec --yes --package=pnpm@11.7.0 -- /bin/bash "$installer"
+TANDIX_MACOS_WIZARD=1 npm exec --yes --package=pnpm@11.7.0 -- /bin/bash "$installer"
 
-printf '\nTo start dsh, keep this command running:\n  cd %q\n  npm exec --yes --package=pnpm@11.7.0 -- pnpm start\n' \
-  "${DSH_HOME:-$HOME/.dsh}/dsh-browser"
-printf '\nFor Codex on macOS, load the extension in Chrome first, then run in that directory:\n  npm exec --yes --package=pnpm@11.7.0 -- pnpm native:install\n'
+root="${DSH_HOME:-$HOME/.dsh}/dsh-browser"
+host="$root/scripts/runtime/native-host.mjs"
+if [ ! -f "$host" ]; then
+  printf '未找到本机伴随程序，安装未完成，请重新运行安装命令。\nNative companion source is missing; rerun the installer.\n' >&2
+  exit 1
+fi
+
+printf '\n正在检测 Chrome 中已加载的 Tandix 扩展……\nDetecting the loaded Tandix Chrome extension…\n'
+while ! extension_id="$(node "$host" extension-id 2>"$work/extension-id.log")"; do
+  printf '\n请在 chrome://extensions 开启开发者模式，加载以下目录：\nIn chrome://extensions, enable Developer mode and load:\n  %s\n' \
+    "${DSH_HOME:-$HOME/.dsh}/browser-extension"
+  printf '如果加载了多个 Tandix 副本，请填写本次要连接的扩展 ID。\nIf multiple Tandix copies are loaded, enter the ID of the intended copy.\n'
+  printf '完成后按回车重试，或粘贴扩展卡片上的 32 位 ID：\nPress Enter to retry, or paste the extension card’s 32-letter ID: '
+  if ! read -r extension_id; then
+    printf '\n尚未确认 Chrome 扩展，本机伴随程序未注册。请完成加载后重新运行本安装命令。\nChrome extension not confirmed; the companion is not registered. Load the extension and rerun this command.\n' >&2
+    exit 1
+  fi
+  if [[ "$extension_id" =~ ^[a-p]{32}$ ]]; then break; fi
+  if [ -n "$extension_id" ]; then
+    printf '扩展 ID 无效，应为 a–p 组成的 32 位 ID。\nInvalid extension ID; expected 32 letters from a to p.\n' >&2
+  fi
+done
+
+printf '\n正在安装或更新本机伴随程序……\nInstalling or updating the native companion…\n'
+(cd "$root" && npm exec --yes --package=pnpm@11.7.0 -- pnpm native:install --extension-id "$extension_id")
+printf '\n扩展文件与本机伴随程序均已更新。\nExtension files and native companion are updated.\n'
+printf '请在 chrome://extensions 点击 Tandix 卡片上的“重新加载”，然后重新打开侧栏。\nClick Reload on the Tandix card in chrome://extensions, then reopen its side panel.\n'
+printf '无需另外执行 native:install，也无需保持 pnpm start 运行。\nNo separate native:install command or persistent pnpm start terminal is needed.\n'

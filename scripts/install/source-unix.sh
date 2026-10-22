@@ -430,12 +430,14 @@ else
   printf '   %s\n' "$DIST_DIR"
 fi
 
-printf '\n'
-print_pair "加载完成后：" "After loading the extension:"
-print_pair "• 点击工具栏中的网页助手图标，打开侧边栏" "Click the Tandix icon in the toolbar to open the side panel"
-print_pair "• 扩展会自动发现本机 dsh，无需填写地址或 token" "The extension discovers local dsh automatically; no address or token is required"
-printf '• 启动固定版本：cd %q && pnpm start\n' "$ROOT"
-printf '   Start the pinned version: cd %q && pnpm start\n' "$ROOT"
-print_pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.1.5-rc.2 web" "Or start the pinned version directly: npx @deepseek-ai/dsh@0.1.5-rc.2 web"
+if [ "${TANDIX_MACOS_WIZARD:-0}" != "1" ]; then
+  printf '\n'
+  print_pair "加载完成后：" "After loading the extension:"
+  print_pair "• 点击工具栏中的网页助手图标，打开侧边栏" "Click the Tandix icon in the toolbar to open the side panel"
+  print_pair "• 扩展会自动发现本机 dsh，无需填写地址或 token" "The extension discovers local dsh automatically; no address or token is required"
+  printf '• 启动固定版本：cd %q && pnpm start\n' "$ROOT"
+  printf '   Start the pinned version: cd %q && pnpm start\n' "$ROOT"
+  print_pair "• 或直接启动固定版本：npx @deepseek-ai/dsh@0.1.5-rc.2 web" "Or start the pinned version directly: npx @deepseek-ai/dsh@0.1.5-rc.2 web"
+fi
 printf '\n'
 print_pair "如果用得顺手，欢迎在 GitHub 点个 Star 支持我们：https://github.com/samchen2009/tandix" "If dsh-browser is useful to you, we'd appreciate a Star on GitHub: https://github.com/samchen2009/tandix"

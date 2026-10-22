@@ -10,6 +10,9 @@ export const UPDATE_MANIFEST_URL =
   'https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/extensions/dsh-browser/manifest.json'
 
 export const UPDATE_COMMAND =
+  'curl -fL https://raw.githubusercontent.com/samchen2009/tandix/main/scripts/install/macos.sh -o install-macos.sh && bash ./install-macos.sh'
+
+export const LINUX_UPDATE_COMMAND =
   'curl -fsSL https://raw.githubusercontent.com/samchen2009/tandix/refs/heads/main/scripts/install/source-unix.sh | bash'
 
 /**
@@ -95,7 +98,8 @@ export function checkoutInstallCommand(sourceRoot: string): string {
  * running on — which is the machine the extension was installed to.
  */
 export function managedInstallCommand(userAgent: string = navigator.userAgent): string {
-  return /windows/i.test(userAgent) ? WINDOWS_UPDATE_COMMAND : UPDATE_COMMAND
+  if (/windows/i.test(userAgent)) return WINDOWS_UPDATE_COMMAND
+  return /macintosh|mac os x|darwin/i.test(userAgent) ? UPDATE_COMMAND : LINUX_UPDATE_COMMAND
 }
 
 function versionParts(version: string): number[] {

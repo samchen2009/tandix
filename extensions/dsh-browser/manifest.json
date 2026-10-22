@@ -3,7 +3,7 @@
   "name": "__MSG_extensionName__",
   "description": "__MSG_extensionDescription__",
   "default_locale": "zh_CN",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "minimum_chrome_version": "116",
   "options_page": "web-access/index.html",
   "externally_connectable": {

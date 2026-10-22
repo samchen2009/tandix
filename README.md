@@ -39,11 +39,11 @@ Alternatively, download the [macOS script](scripts/install/macos.sh) or [Windows
 
 On the first install, enable **Developer mode** in `chrome://extensions`, choose **Load unpacked**, and select the printed folder (normally `~/.dsh/browser-extension`). Windows waits for extension loading, registers the native companion and checks native messaging, WebSocket authentication and session listing. WorkBuddy also gets an ACP session authentication check. If sign-in is needed, the wizard opens the CLI for you to complete it. It never supplies your account passwords or model credentials.
 
-Windows prepares Codex, WorkBuddy and dsh, detects an existing Cursor CLI, and selects the first ready agent in this order: **Codex → Cursor → WorkBuddy → dsh**. Install and sign in to Cursor CLI separately. Reload the extension and choose Automatic or a specific agent. Configure a provider/model in Tandix Settings for dsh if needed. **No `pnpm start` terminal is required**. Add `-Agent workbuddy` to require WorkBuddy, or `-Agents dsh` to prepare only dsh. On macOS, follow the printed companion registration commands.
+Windows prepares Codex, WorkBuddy and dsh, detects an existing Cursor CLI, and selects the first ready agent in this order: **Codex → Cursor → WorkBuddy → dsh**. Install and sign in to Cursor CLI separately. Reload the extension and choose Automatic or a specific agent. Configure a provider/model in Tandix Settings for dsh if needed. **No `pnpm start` terminal is required**. Add `-Agent workbuddy` to require WorkBuddy, or `-Agents dsh` to prepare only dsh. The macOS entry point automatically registers or updates the native companion after building. On first install, load the Chrome extension when prompted and return to Terminal to continue; no separate `native:install` command is needed.
 
 Windows logs and per-agent results are saved to `%LOCALAPPDATA%\Tandix\install.log` and `%LOCALAPPDATA%\Tandix\install-report.json`. A failed selected agent returns a failed installation status. Other agent failures are explicitly reported. If Chrome cannot be installed through the package manager, the wizard opens its official download page and waits for installation.
 
-Rerun the entry point to update a managed source installation, then reload the extension in Chrome. The installer stops if an existing installation directory is not managed by it, to avoid overwriting it.
+Rerun the same entry point to update a managed source installation and its native companion, then reload the extension in Chrome and reopen its side panel. The installer stops if an existing installation directory is not managed by it, to avoid overwriting it.
 
 ## Install for everyday use (recommended)
 

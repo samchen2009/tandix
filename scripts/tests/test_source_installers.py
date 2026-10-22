@@ -12,25 +12,41 @@ ROOT = Path(__file__).resolve().parents[2]
 
 @unittest.skipIf(os.name == 'nt', 'Unix shell harness')
 class MacSourceInstaller(unittest.TestCase):
-    def run_case(self, node=0, download=0, install=0, platform='Darwin'):
+    def run_case(self, node=0, download=0, install=0, platform='Darwin', native=0, detect_failures=0, input_text=''):
         with tempfile.TemporaryDirectory(prefix='tandix source ') as directory:
             work = Path(directory)
             bin_dir = work / 'bin'
             bin_dir.mkdir()
             commands = {
                 'uname': '#!/bin/bash\nprintf "%s\\n" "$TEST_PLATFORM"\n',
-                'node': '#!/bin/bash\nexit "$TEST_NODE_STATUS"\n',
+                'node': '''#!/bin/bash
+if [ "${2:-}" = extension-id ]; then
+  count=0
+  [ ! -f "$TEST_WORK/detections" ] || count="$(cat "$TEST_WORK/detections")"
+  count=$((count + 1))
+  printf '%s' "$count" > "$TEST_WORK/detections"
+  [ "$count" -gt "$TEST_DETECT_FAILURES" ] || exit 1
+  printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  exit 0
+fi
+exit "$TEST_NODE_STATUS"
+''',
                 'curl': '''#!/bin/bash
 touch "$TEST_WORK/downloaded"
 [ "$TEST_DOWNLOAD_STATUS" = 0 ] || exit "$TEST_DOWNLOAD_STATUS"
 for arg in "$@"; do destination="$arg"; done
-printf '%s\\n' '#!/bin/bash' 'touch "$TEST_WORK/installed"' 'exit "$TEST_INSTALL_STATUS"' > "$destination"
+printf '%s\\n' '#!/bin/bash' 'touch "$TEST_WORK/installed"' 'mkdir -p "$DSH_HOME/dsh-browser/scripts/runtime"' 'touch "$DSH_HOME/dsh-browser/scripts/runtime/native-host.mjs"' 'exit "$TEST_INSTALL_STATUS"' > "$destination"
 ''',
                 'npm': '''#!/bin/bash
-printf '%s\\n' "$@" > "$TEST_WORK/npm-args"
+printf '%s\\n' "$@" >> "$TEST_WORK/npm-args"
 while [ "$1" != -- ]; do shift; done
 shift
 exec "$@"
+''',
+                'pnpm': '''#!/bin/bash
+pwd > "$TEST_WORK/native-cwd"
+printf '%s\\n' "$@" > "$TEST_WORK/native-args"
+exit "$TEST_NATIVE_STATUS"
 ''',
             }
             for name, body in commands.items():
@@ -40,42 +56,83 @@ exec "$@"
             env = {**os.environ, 'PATH': str(bin_dir) + ':/usr/bin:/bin',
                    'TMPDIR': str(work), 'TEST_WORK': str(work), 'TEST_PLATFORM': platform,
                    'TEST_NODE_STATUS': str(node), 'TEST_DOWNLOAD_STATUS': str(download),
-                   'TEST_INSTALL_STATUS': str(install), 'DSH_HOME': str(work / "user's dsh")}
+                   'TEST_INSTALL_STATUS': str(install), 'DSH_HOME': str(work / "user's dsh"),
+                   'TEST_NATIVE_STATUS': str(native), 'TEST_DETECT_FAILURES': str(detect_failures)}
             result = subprocess.run(['/bin/bash', str(ROOT / 'scripts/install/macos.sh')],
-                                    env=env, text=True, capture_output=True)
+                                    env=env, input=input_text, text=True, capture_output=True)
             return (result, (work / 'downloaded').exists(), (work / 'installed').exists(),
                     (work / 'npm-args').read_text() if (work / 'npm-args').exists() else '',
-                    list(work.glob('tandix-source.*')))
+                    list(work.glob('tandix-source.*')),
+                    (work / 'native-args').read_text().splitlines() if (work / 'native-args').exists() else [],
+                    (work / 'native-cwd').read_text().strip() if (work / 'native-cwd').exists() else '',
+                    str(work / "user's dsh/dsh-browser"))
 
     def test_success_uses_pinned_pnpm_and_cleans_temp(self):
-        result, downloaded, installed, args, remaining = self.run_case()
+        result, downloaded, installed, args, remaining, native_args, cwd, expected_cwd = self.run_case()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(downloaded and installed)
         pin = json.loads((ROOT / 'package.json').read_text())['packageManager']
         self.assertIn('--package=' + pin, args)
         self.assertIn('pnpm start', result.stdout)
-        self.assertIn('pnpm native:install', result.stdout)
+        self.assertEqual(args.count('--package=' + pin), 2)
+        self.assertEqual(native_args, ['native:install', '--extension-id', 'a' * 32])
+        self.assertEqual(cwd, expected_cwd)
+        self.assertIn('Extension files and native companion are updated.', result.stdout)
         self.assertEqual(remaining, [])
 
     def test_prerequisite_failures_stop_before_download(self):
         for kwargs in ({'node': 1}, {'platform': 'Linux'}):
             with self.subTest(**kwargs):
-                result, downloaded, installed, _, _ = self.run_case(**kwargs)
+                result, downloaded, installed, _, _, native_args, _, _ = self.run_case(**kwargs)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(downloaded or installed)
+                self.assertEqual(native_args, [])
 
     def test_download_failure_never_runs_installer(self):
-        result, downloaded, installed, _, remaining = self.run_case(download=22)
+        result, downloaded, installed, _, remaining, native_args, _, _ = self.run_case(download=22)
         self.assertEqual(result.returncode, 22)
         self.assertTrue(downloaded)
         self.assertFalse(installed)
+        self.assertEqual(native_args, [])
         self.assertEqual(remaining, [])
 
     def test_child_failure_is_propagated(self):
-        result, _, installed, _, remaining = self.run_case(install=37)
+        result, _, installed, _, remaining, native_args, _, _ = self.run_case(install=37)
         self.assertEqual(result.returncode, 37)
         self.assertTrue(installed)
         self.assertNotIn('To start dsh', result.stdout)
+        self.assertEqual(native_args, [])
+        self.assertEqual(remaining, [])
+
+    def test_first_install_waits_for_loading_before_registering(self):
+        result, _, _, _, _, native_args, _, _ = self.run_case(detect_failures=1, input_text='\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('enable Developer mode and load:', result.stdout)
+        self.assertEqual(native_args, ['native:install', '--extension-id', 'a' * 32])
+
+    def test_manual_id_resolves_multiple_loaded_copies(self):
+        result, _, _, _, _, native_args, _, _ = self.run_case(detect_failures=99, input_text='b' * 32 + '\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(native_args, ['native:install', '--extension-id', 'b' * 32])
+
+    def test_invalid_id_is_not_registered(self):
+        result, _, _, _, _, native_args, _, _ = self.run_case(detect_failures=99, input_text='bad-id\n')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(native_args, [])
+        self.assertIn('Invalid extension ID', result.stderr)
+
+    def test_unloaded_extension_without_input_is_not_success(self):
+        result, _, _, _, remaining, native_args, _, _ = self.run_case(detect_failures=99)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(native_args, [])
+        self.assertNotIn('Extension files and native companion are updated.', result.stdout)
+        self.assertEqual(remaining, [])
+
+    def test_native_registration_failure_is_propagated(self):
+        result, _, _, _, remaining, native_args, _, _ = self.run_case(native=41)
+        self.assertEqual(result.returncode, 41)
+        self.assertTrue(native_args)
+        self.assertNotIn('Extension files and native companion are updated.', result.stdout)
         self.assertEqual(remaining, [])
 
 

@@ -6,6 +6,7 @@ import {
   checkoutInstallCommand,
   compareExtensionVersions,
   managedInstallCommand,
+  LINUX_UPDATE_COMMAND,
   parseExtensionInstallInfo,
   readExtensionInstallInfo,
   UPDATE_COMMAND,
@@ -113,8 +114,10 @@ describe('extension update checks', () => {
 
   it('picks the managed installer that matches the running platform', () => {
     expect(managedInstallCommand('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)')).toBe(UPDATE_COMMAND)
-    expect(managedInstallCommand('Mozilla/5.0 (X11; Linux x86_64)')).toBe(UPDATE_COMMAND)
+    expect(managedInstallCommand('Mozilla/5.0 (X11; Linux x86_64)')).toBe(LINUX_UPDATE_COMMAND)
     expect(managedInstallCommand('Mozilla/5.0 (Windows NT 10.0; Win64; x64)')).toBe(WINDOWS_UPDATE_COMMAND)
+    expect(UPDATE_COMMAND).toContain('scripts/install/macos.sh')
+    expect(UPDATE_COMMAND).toContain('&& bash ./install-macos.sh')
   })
 
   it('keeps package, Chrome manifest, and update CSP metadata aligned', () => {

@@ -15,4 +15,4 @@
 
 Windows：`powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install/windows.ps1`。
 
-macOS：`bash scripts/install/macos.sh`。当前 macOS 源码入口需要已有 Chrome 和兼容 Node/npm，具体要求见根目录安装说明。
+macOS：`bash scripts/install/macos.sh`。需要已有 Chrome 和兼容 Node/npm；构建后自动识别 Chrome 扩展并注册或更新本机伴随程序。首次安装需按提示加载扩展，再回到终端继续；更新使用同一入口，无需另跑 `native:install`。具体要求见根目录安装说明。

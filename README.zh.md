@@ -39,11 +39,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File $installer
 
 首次安装时，在 `chrome://extensions` 开启「开发者模式」，选择「加载已解压的扩展程序」，加载脚本打印的目录（默认 `~/.dsh/browser-extension`）。Windows 向导会等待扩展加载、注册本机伴随程序，并实际检查本机消息、WebSocket 和会话列表；WorkBuddy 还会进行 ACP 会话认证检查。账号未登录时，向导会打开对应 CLI，让你完成登录。不会代替你输入账号密码或模型密钥。
 
-Windows 默认准备 Codex、WorkBuddy 和 dsh，并检测已有 Cursor CLI，按 **Codex → Cursor → WorkBuddy → dsh** 的顺序选择首个连接检查通过的 Agent。Cursor CLI 需自行安装并登录。完成后重新加载扩展，在侧栏选择「自动选择」，或手动指定 Agent。dsh 首次使用还需在设置中选择模型并填写自己的凭据。**不需要手动运行 `pnpm start`**。如主要使用 WorkBuddy，在命令末尾加 `-Agent workbuddy`；仅准备 dsh 可加 `-Agents dsh`。macOS 仍按脚本提示完成本机伴随程序注册。
+Windows 默认准备 Codex、WorkBuddy 和 dsh，并检测已有 Cursor CLI，按 **Codex → Cursor → WorkBuddy → dsh** 的顺序选择首个连接检查通过的 Agent。Cursor CLI 需自行安装并登录。完成后重新加载扩展，在侧栏选择「自动选择」，或手动指定 Agent。dsh 首次使用还需在设置中选择模型并填写自己的凭据。**不需要手动运行 `pnpm start`**。如主要使用 WorkBuddy，在命令末尾加 `-Agent workbuddy`；仅准备 dsh 可加 `-Agents dsh`。macOS 入口在构建后自动注册或更新本机伴随程序；首次安装按提示加载 Chrome 扩展，回到终端继续即可，无需另跑 `native:install`。
 
 Windows 安装日志和逐项连接报告默认保存在 `%LOCALAPPDATA%\Tandix\install.log`、`%LOCALAPPDATA%\Tandix\install-report.json`。某个 Agent 连接失败时会明确列出原因；所选 Agent 未就绪时安装器返回失败，不会把文件构建完成当成连接成功。Chrome 无法通过系统包管理器自动安装时，向导会打开官方下载页并等待你完成安装。
 
-再次运行入口即可更新托管源码安装；更新后在 Chrome 中重新加载扩展。已有安装目录不由脚本管理时，安装器会停止，避免覆盖。
+再次运行同一入口即可更新托管源码安装和本机伴随程序；更新后在 Chrome 中重新加载扩展，并重新打开侧栏。已有安装目录不由脚本管理时，安装器会停止，避免覆盖。
 
 ## 普通用户安装（推荐）
 
