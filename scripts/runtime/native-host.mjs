@@ -246,6 +246,7 @@ let ownedChildSandboxDirectory = ''
 let codexBridge = null
 let workbuddyBridge = null
 let cursorBridge = null
+let automaticBridge = null
 let stopping = false
 let ensureQueue = Promise.resolve()
 
@@ -308,8 +309,37 @@ function send(message) {
   process.stdout.write(Buffer.concat([header, payload]))
 }
 
+export const AUTO_AGENT_PRIORITY = ['codex', 'cursor', 'workbuddy', 'dsh']
+
+export async function selectAutomaticAgent(connect, reportFailure = () => {}) {
+  const failures = []
+  for (const backend of AUTO_AGENT_PRIORITY) {
+    try { return { backend, url: await connect(backend) } }
+    catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      failures.push(`${backend}: ${detail}`)
+      reportFailure(backend, detail)
+    }
+  }
+  throw new Error(`No local agent is ready. ${failures.join('; ')}`)
+}
+
 async function ensureBridge(preference = 'auto', requestedSandboxDirectory = '') {
   const sandboxDirectory = normalizeSandboxDirectory(requestedSandboxDirectory)
+  if (preference === 'auto') {
+    const selected = automaticBridge
+    const ready = selected?.backend === 'codex' ? codexBridge?.isReady
+      : selected?.backend === 'cursor' ? cursorBridge?.isReady
+        : selected?.backend === 'workbuddy' ? workbuddyBridge?.isReady
+          : selected?.backend === 'dsh' && ownedChild?.exitCode === null
+    if (selected?.sandboxDirectory === sandboxDirectory && ready) return selected.url
+    automaticBridge = null
+    const result = await selectAutomaticAgent(backend => ensureBridge(backend, sandboxDirectory),
+      (backend, detail) => process.stderr.write(`Tandix: ${backend} unavailable (${detail}); trying the next local agent.\n`))
+    automaticBridge = { ...result, sandboxDirectory }
+    return result.url
+  }
+  automaticBridge = null
   if (preference === 'cursor' && cursorBridge?.isReady && cursorBridge.sandboxDirectory === sandboxDirectory) return cursorBridge.wsUrl
   if (preference !== 'cursor') { cursorBridge?.close(); cursorBridge = null }
   if (preference === 'cursor') {

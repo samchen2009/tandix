@@ -111,7 +111,7 @@ pnpm --filter dsh-browser-extension run test
 
 3. **开始使用**：打开普通的 `http://` 或 `https://` 页面，点击网页助手图标打开侧边栏。两个构建都会自动探测本机 dsh。Chrome 回环连接无需地址或 Token；Firefox 的 `moz-extension://` UUID 不能证明扩展身份，必须在设置中填入 `~/.dsh/ext-bridge-token`。可以直接对话，或先点「读取页面」。
 
-   macOS Chrome 可选用**按需启动**，免去每次手动运行 `pnpm start`：先在 Chrome 加载网页助手扩展，再在仓库根目录运行 `pnpm native:install`，最后到 `chrome://extensions` 重新加载扩展并接受新增的本机通信权限。安装器只将本机入口开放给当前加载的 网页助手扩展 ID，不设置开机启动。打开侧栏时，伴随程序优先探测本机 Codex CLI 的 ChatGPT 登录状态；已登录则启动 Codex app-server，侧栏直接使用 Codex，不需要在网页助手中配置模型、Base URL 或 OpenAI API Key，也不要求 Codex 桌面窗口保持打开。Codex 不可用或未登录时，伴随程序才复用或启动 `dsh web --no-open`，并在侧栏设置中配置模型提供商。侧栏全部关闭 10 分钟后停止由伴随程序启动的 Agent；原本由你手动启动的 dsh 不会被关闭。若 dsh 连接失败，检查 `~/.dsh/traceforge-native-host/dsh.log`。
+   macOS Chrome 可选用**按需启动**，免去每次手动运行 `pnpm start`：先在 Chrome 加载网页助手扩展，再在仓库根目录运行 `pnpm native:install`，最后到 `chrome://extensions` 重新加载扩展并接受新增的本机通信权限。安装器只将本机入口开放给当前加载的 网页助手扩展 ID，不设置开机启动。自动选择依次尝试 Codex、Cursor、WorkBuddy、dsh，使用首个可连接的 Agent；手动指定 Agent 时连接失败不会自动切换。Codex 使用本机 CLI 的 ChatGPT 登录状态，不需要在网页助手中配置模型、Base URL 或 OpenAI API Key，也不要求 Codex 桌面窗口保持打开；dsh 的模型提供商仍在侧栏设置中配置。侧栏全部关闭 10 分钟后停止由伴随程序启动的 Agent；原本由你手动启动的 dsh 不会被关闭。若 dsh 连接失败，检查 `~/.dsh/traceforge-native-host/dsh.log`。
 
 页面即使在扩展安装或重载之前已经打开，也会在第一次操作时自动补加载内容脚本，无需手动刷新。`chrome://`、Chrome Web Store 等浏览器内置或受保护页面只提供标签页元数据，以及浏览器级 HTTP(S) 导航、后退、前进和刷新；不能读取或操作其 DOM。
 

@@ -81,12 +81,15 @@ exec "$@"
 
 @unittest.skipUnless(os.name == 'nt', 'Windows PowerShell harness')
 class WindowsSourceInstaller(unittest.TestCase):
-    def run_case(self, stage='', healthy=True):
+    def run_case(self, stage='', healthy=True, agent='dsh', agents=('dsh',), ready_agents=None):
         with tempfile.TemporaryDirectory(prefix='tandix setup ') as directory:
             work = Path(directory)
+            cursor = work / 'scripts/runtime/cursor-bridge.mjs'
+            cursor.parent.mkdir(parents=True)
+            cursor.write_text('export function findCursorAgent() { return process.execPath }')
             harness = work / 'harness.ps1'
             harness.write_text(r'''$ErrorActionPreference = 'Stop'
-. $env:TEST_ENTRY -FunctionsOnly -NonInteractive -Agents dsh -Agent dsh -InstallHome (Join-Path $env:TEST_WORK 'install')
+. $env:TEST_ENTRY -FunctionsOnly -NonInteractive -Agents ($env:TEST_AGENTS -split ',') -Agent $env:TEST_AGENT -InstallHome (Join-Path $env:TEST_WORK 'install')
 $SourceRoot = $env:TEST_WORK
 function Record([string]$Stage) {
   Add-Content -LiteralPath (Join-Path $env:TEST_WORK 'stages') -Value $Stage
@@ -97,15 +100,20 @@ function Install-Toolkit { Record 'pnpm' }
 function Ensure-Chrome { Record 'chrome' }
 function Test-SourceRoot { return $true }
 function Install-Source { Record 'build'; $script:ReadySourceRoot = $env:TEST_WORK }
+function Install-AgentCli { return (Get-Command node.exe).Source }
 function Register-Companion { Record 'register' }
 function Test-AgentConnection {
+  param([string]$Backend)
   Record 'check'
-  return [pscustomobject]@{backend='dsh';status=$env:TEST_CONNECTION_STATUS;message='simulated result'}
+  $status = if (($env:TEST_READY_AGENTS -split ',') -contains $Backend) { 'ready' } else { 'failed' }
+  return [pscustomobject]@{backend=$Backend;status=$status;message='simulated result'}
 }
 try { Invoke-TandixSetup; exit 0 } catch { exit 1 }
 ''')
+            available = ready_agents if ready_agents is not None else (('dsh',) if healthy else ())
             env = {**os.environ, 'TEST_WORK': str(work), 'TEST_ENTRY': str(ROOT / 'scripts/install/windows.ps1'),
-                   'TEST_FAIL_STAGE': stage, 'TEST_CONNECTION_STATUS': 'ready' if healthy else 'failed'}
+                   'TEST_FAIL_STAGE': stage, 'TEST_AGENT': agent, 'TEST_AGENTS': ','.join(agents),
+                   'TEST_READY_AGENTS': ','.join(available)}
             result = subprocess.run([shutil.which('powershell.exe'), '-NoProfile', '-ExecutionPolicy', 'Bypass',
                                      '-File', str(harness)], env=env, text=True, capture_output=True)
             report = work / 'install/install-report.json'
@@ -133,6 +141,29 @@ try { Invoke-TandixSetup; exit 0 } catch { exit 1 }
         self.assertIn('check', stages)
         self.assertFalse(report['selectedAgentReady'])
         self.assertEqual(report['status'], 'failed')
+
+    def test_auto_selects_first_ready_agent_in_priority_order(self):
+        priority = ('codex', 'cursor', 'workbuddy', 'dsh')
+        for index, selected in enumerate(priority):
+            with self.subTest(selected=selected):
+                result, _, report = self.run_case(agent='auto', agents=tuple(reversed(priority)),
+                                                  ready_agents=priority[index:])
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                self.assertEqual([entry['backend'] for entry in report['agents']], list(priority))
+                self.assertEqual(report['selectedAgent'], selected)
+                self.assertTrue(report['selectedAgentReady'])
+
+    def test_auto_fails_when_no_agent_is_ready(self):
+        result, _, report = self.run_case(agent='auto', agents=('codex', 'cursor', 'workbuddy', 'dsh'),
+                                          ready_agents=())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(report['selectedAgentReady'])
+
+    def test_explicit_agent_does_not_fall_back_to_another_ready_agent(self):
+        result, _, report = self.run_case(agent='codex', agents=('codex', 'dsh'), ready_agents=('dsh',))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(report['selectedAgent'], 'codex')
+        self.assertFalse(report['selectedAgentReady'])
 
     def test_profile_bundle_list_keeps_array_shape(self):
         with tempfile.TemporaryDirectory() as directory:

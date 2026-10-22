@@ -74,7 +74,7 @@ export function nativePanelsClosed(): void {
   }, IDLE_STOP_MS)
 }
 
-/** Prefer a signed-in local Codex agent; otherwise reuse or start dsh. */
+/** Auto tries Codex, Cursor, WorkBuddy, then dsh; explicit choices never fall back. */
 export function ensureNativeBridge(backend: AgentPreference = 'auto', sandboxDirectory = ''): Promise<string | undefined> {
   // An explicit user choice should retry immediately after a prior automatic
   // probe failed, rather than inheriting its five-minute cooldown.

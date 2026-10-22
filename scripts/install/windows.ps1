@@ -3,8 +3,8 @@ param(
   [switch]$Help,
   [string]$SourceRoot,
   [string]$InstallHome,
-  [ValidateSet('dsh', 'workbuddy', 'codex')][string[]]$Agents = @('dsh', 'workbuddy', 'codex'),
-  [ValidateSet('dsh', 'workbuddy', 'codex')][string]$Agent = 'dsh',
+  [ValidateSet('codex', 'cursor', 'workbuddy', 'dsh')][string[]]$Agents = @('codex', 'cursor', 'workbuddy', 'dsh'),
+  [ValidateSet('auto', 'codex', 'cursor', 'workbuddy', 'dsh')][string]$Agent = 'auto',
   [string]$ExtensionId,
   [switch]$NonInteractive,
   [switch]$FunctionsOnly
@@ -223,7 +223,8 @@ function Invoke-TandixSetup {
     }
     Install-Source $root $node $temporaryDirectory
     $root = $script:ReadySourceRoot
-    $requested = @($Agents + $Agent | Select-Object -Unique)
+    $priority = @('codex', 'cursor', 'workbuddy', 'dsh')
+    $requested = @($priority | Where-Object { $Agents -contains $_ -or $Agent -eq $_ })
     $installFailures = @{}
     if ($requested -contains 'workbuddy') {
       try {
@@ -243,35 +244,47 @@ function Invoke-TandixSetup {
         else { $env:CODEX_CLI_PATH = Install-AgentCli 'codex' '@openai/codex' $node $tools }
       } catch { $installFailures['codex'] = $_.Exception.Message; Write-Host "ATTENTION: Codex install failed: $_" }
     }
+    if ($requested -contains 'cursor') {
+      try {
+        $discovery = Join-Path $root 'scripts\runtime\cursor-bridge.mjs'
+        $cursor = & $node --input-type=module -e "import {pathToFileURL} from 'node:url';const m=await import(pathToFileURL(process.argv[1]));process.stdout.write(m.findCursorAgent()||'');" $discovery
+        if (-not $cursor) { throw 'Cursor CLI was not found. Install a CLI supporting agent acp and run agent login, then rerun setup.' }
+        $env:CURSOR_AGENT_PATH = $cursor
+      } catch { $installFailures['cursor'] = $_.Exception.Message; Write-Host "ATTENTION: Cursor discovery failed: $_" }
+    }
     Register-Companion $root $node
     Write-Host '[6/7] Checking the actual native messaging and WebSocket connections...'
+    $selectedAgent = if ($Agent -eq 'auto') { $null } else { $Agent }
     foreach ($backend in $requested) {
       $backendReport = Join-Path $temporaryDirectory "$backend.json"
       if ($installFailures.ContainsKey($backend)) {
         $result = [pscustomobject]@{ backend = $backend; status = 'failed'; message = $installFailures[$backend] }
       } else { $result = Test-AgentConnection $backend $root $node $backendReport }
-      if ($result.status -ne 'ready' -and $backend -ne 'dsh' -and -not $NonInteractive -and -not $installFailures.ContainsKey($backend)) {
-          $launcher = if ($backend -eq 'workbuddy') { $env:WORKBUDDY_AGENT_PATH } else { $env:CODEX_CLI_PATH }
+      if ($result.status -ne 'ready' -and $backend -ne 'dsh' -and -not $NonInteractive -and -not $installFailures.ContainsKey($backend) -and
+          ($Agent -ne 'auto' -or -not $selectedAgent)) {
+          $launcher = if ($backend -eq 'workbuddy') { $env:WORKBUDDY_AGENT_PATH } elseif ($backend -eq 'cursor') { $env:CURSOR_AGENT_PATH } else { $env:CODEX_CLI_PATH }
           Write-Host 'Complete sign-in in the CLI, then type /exit to return to setup.'
           $previous = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
           try { if ($launcher -match '\.(mjs|cjs|js)$') { & $node $launcher } else { & $launcher } } finally { $ErrorActionPreference = $previous }
           $result = Test-AgentConnection $backend $root $node $backendReport
       }
       $results += $result
+      if ($Agent -eq 'auto' -and -not $selectedAgent -and $result.status -eq 'ready') { $selectedAgent = $backend }
     }
-    $ready = @($results | Where-Object { $_.backend -eq $Agent -and $_.status -eq 'ready' }).Count -eq 1
+    $ready = @($results | Where-Object { $_.backend -eq $selectedAgent -and $_.status -eq 'ready' }).Count -eq 1
     $overall = if (@($results | Where-Object { $_.status -ne 'ready' }).Count) { 'partial' } else { 'ready' }
     $report = [ordered]@{ status = $overall; schemaVersion = 1; sourceRoot = $root; node = $node; tools = $tools;
       extensionLoading = $(if ($NonInteractive) { 'not-verified' } else { 'user-confirmed-or-detected' });
-      selectedAgent = $Agent; selectedAgentReady = $ready; agents = $results }
+      requestedAgent = $Agent; selectedAgent = $selectedAgent; selectedAgentReady = $ready; agents = $results }
     $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reportPath -Encoding UTF8
     Write-Host "Connection report: $reportPath"
     if (-not $ready) { throw "$Agent is not ready. See the connection report and install.log." }
-    Write-Host "[7/7] $Agent connection check passed. Reload Tandix in chrome://extensions."
-    Write-Host "Open Tandix and select $Agent. No pnpm start terminal is needed."
-    if ($Agent -eq 'dsh') { Write-Host 'If no model is configured yet, choose a provider/model in Tandix Settings and enter your own credentials.' }
+    Write-Host "[7/7] $selectedAgent connection check passed. Reload Tandix in chrome://extensions."
+    $selection = if ($Agent -eq 'auto') { "Automatic (first ready: $selectedAgent)" } else { $selectedAgent }
+    Write-Host "Open Tandix and select $selection. No pnpm start terminal is needed."
+    if ($selectedAgent -eq 'dsh') { Write-Host 'If no model is configured yet, choose a provider/model in Tandix Settings and enter your own credentials.' }
     foreach ($result in $results) {
-      if ($result.status -ne 'ready') { Write-Host "ATTENTION: $($result.backend) is installed but its connection failed: $($result.message)" }
+      if ($result.status -ne 'ready') { Write-Host "ATTENTION: $($result.backend) is not ready: $($result.message)" }
     }
     Write-Host "Install log: $log"
   } catch {
@@ -287,7 +300,8 @@ function Invoke-TandixSetup {
 
 if ($FunctionsOnly) { return }
 if ($Help) {
-  Write-Host 'Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install/windows.ps1 [-Agent dsh|workbuddy|codex]'
+  Write-Host 'Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install/windows.ps1 [-Agent auto|codex|cursor|workbuddy|dsh]'
+  Write-Host 'Default priority: Codex > Cursor > WorkBuddy > dsh. Cursor CLI must already be installed.'
   Write-Host 'Automatically prepares Node, private pnpm, Chrome, source, all three agent runtimes and the native companion.'
   Write-Host 'Chrome first-time extension loading and account sign-in require your interaction.'
   Write-Host 'Use -NonInteractive -ExtensionId <id> -Agents dsh for an unattended dsh transport check.'

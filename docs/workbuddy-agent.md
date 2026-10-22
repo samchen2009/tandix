@@ -22,7 +22,7 @@ CodeBuddy CLI 的安装、登录和 ACP 用法见官方文档：[安装](https:/
 WORKBUDDY_AGENT_PATH=/absolute/path/to/agent pnpm native:install
 ```
 
-路径会写入本机伴随配置；不要把账号密钥放入路径或命令参数。自动选择仍沿用原有 Codex/dsh 策略，WorkBuddy 需要显式选择。连接失败不会回退到其他 Agent。
+路径会写入本机伴随配置；不要把账号密钥放入路径或命令参数。自动选择依次尝试 Codex、Cursor、WorkBuddy、dsh。手动指定 Agent 时，连接失败不会回退到其他 Agent。
 
 ## 当前限制与验证
 
@@ -40,7 +40,7 @@ WORKBUDDY_AGENT_PATH=/absolute/path/to/agent pnpm native:install
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install\windows.ps1 -Agent workbuddy
 ```
 
-向导会自动准备 Node、私有 pnpm、dsh、CodeBuddy CLI、Codex CLI，构建扩展并注册本机伴随程序。Chrome 首次加载扩展和账号登录需要你按提示完成。默认连接 dsh；`-Agent workbuddy` 要求 WorkBuddy 的连接检查通过。
+向导会自动准备 Node、私有 pnpm、dsh、CodeBuddy CLI、Codex CLI，检测已有 Cursor CLI，构建扩展并注册本机伴随程序。Chrome 首次加载扩展和账号登录需要你按提示完成，Cursor CLI 需自行安装并登录。默认按 Codex、Cursor、WorkBuddy、dsh 的顺序选择首个连接检查通过的 Agent；`-Agent workbuddy` 要求 WorkBuddy 的连接检查通过。
 
 向导会验证本机消息通道、Agent 身份、WebSocket 握手和会话列表。WorkBuddy 还会进行一次无模型提示的 ACP 会话握手，检查登录；不会在 Tandix 历史中创建测试对话。失败会显示原因，必要时打开 CLI 完成登录后重试。报告位于 `%LOCALAPPDATA%\Tandix\install-report.json`，安装日志位于同目录的 `install.log`。无需手动保持 `pnpm start` 运行。
 
