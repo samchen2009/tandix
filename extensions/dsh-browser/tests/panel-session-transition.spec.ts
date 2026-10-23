@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import type { BridgeState } from '../src/background/bridge.ts'
 import type { PanelApi } from '../src/panel/api.ts'
+import type { TabAffinityState } from '../src/background/tab-affinity.ts'
 import type { RecordingEventInput } from '../src/recording/schema.ts'
 import type { TeachState } from '../src/recording/state-machine.ts'
 import { BRIDGE_SESSION_PURGE_METHOD, type ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
@@ -21,7 +22,8 @@ import { App } from '../src/panel/App.tsx'
 describe('panel session transitions', () => {
   let root: Root
   let onStatus: ((state: BridgeState, caps: null, backend: 'codex' | 'cursor' | 'workbuddy' | 'dsh') => void) | undefined
-  let onResumeHint: ((sessionId: string | null) => void) | undefined
+  let onResumeHint: ((sessionId: string | null, shared?: boolean) => void) | undefined
+  let onTabAffinity: ((state: TabAffinityState) => void) | undefined
   let onEvent: ((frame: ServerFrame) => void) | undefined
   let onRecordingState: ((state: TeachState) => void) | undefined
   let onRecordingEvent: ((recordingId: string, event: RecordingEventInput) => void) | undefined
@@ -73,7 +75,7 @@ describe('panel session transitions', () => {
       onEvent: vi.fn((callback) => { onEvent = callback; return unsubscribe }),
       onApprovalRequest: vi.fn(() => unsubscribe),
       onApprovalResolved: vi.fn(() => unsubscribe),
-      onTabAffinity: vi.fn(() => unsubscribe),
+      onTabAffinity: vi.fn((callback) => { onTabAffinity = callback; return unsubscribe }),
       onSelection: vi.fn(() => unsubscribe),
       onSessionResumeHint: vi.fn((callback) => { onResumeHint = callback; return unsubscribe }),
       respondToApproval: vi.fn(async () => {}),
@@ -116,6 +118,46 @@ describe('panel session transitions', () => {
       sessionId, backend: 'codex', kind: 'command', toolName: 'bash', command: `read-${sessionId}`,
     } } }
   }
+
+  it('switches page chips without creating a session or replacing the shared conversation', async () => {
+    panelApi.setActiveSession = vi.fn(async () => {})
+    await renderConnected(null)
+    await act(async () => { onEvent?.({ t: 'event', frame: { rpcId: '', method: 'session/event', payload: {
+      sessionId: 'session-current', event: { type: 'user/message', data: { message: {
+        source: { kind: 'user' }, content: [{ type: 'text', text: 'Compare these pages' }],
+      } } },
+    } } }) })
+    const tabs = [
+      { tabId: 1, windowId: 1, title: 'List', url: 'https://example.com/list' },
+      { tabId: 2, windowId: 1, title: 'Details', url: 'https://example.com/detail' },
+    ]
+    await act(async () => onTabAffinity?.({ revision: 4, status: 'following', pinned: false,
+      controlled: tabs[0]!, active: tabs[0]!, visibleTabId: 1, tabs }))
+    const historyReads = rpc.mock.calls.filter(([method]) => method === 'session.history').length
+    const sessionsCreated = rpc.mock.calls.filter(([method]) => method === 'session.create').length
+    const before = document.querySelector('.messages')?.textContent
+    expect(before).toContain('Compare these pages')
+    await act(async () => document.querySelectorAll<HTMLButtonElement>('.session-tabs button')[1]!.click())
+    expect(panelApi.resolveTabAffinity).toHaveBeenCalledWith(4, 'show-tab', 'session-current', 2)
+    await act(async () => onTabAffinity?.({ revision: 5, status: 'following', pinned: false,
+      controlled: tabs[1]!, active: tabs[1]!, visibleTabId: 2, tabs }))
+    expect(document.querySelector('.messages')?.textContent).toBe(before)
+    expect(rpc.mock.calls.filter(([method]) => method === 'session.history')).toHaveLength(historyReads)
+    expect(rpc.mock.calls.filter(([method]) => method === 'session.create')).toHaveLength(sessionsCreated)
+    expect(document.querySelector('.session-tabs [aria-current="page"]')?.textContent).toBe('Details')
+  })
+
+  it('restores a shared conversation when its linked page opens another panel', async () => {
+    panelApi.setActiveSession = vi.fn(async () => {})
+    await act(async () => root.render(createElement(App)))
+    await act(async () => {
+      onStatus?.('connected', null, 'dsh')
+      onResumeHint?.('session-saved', true)
+    })
+    expect(panelApi.setActiveSession).toHaveBeenCalledWith('session-saved')
+    expect(rpc).not.toHaveBeenCalledWith('session.create', {})
+    expect(rpc).toHaveBeenCalledWith('session.history', { sessionId: 'session-saved' })
+  })
 
   it('shows only the current conversation’s local approvals, even if another request arrived first', async () => {
     await renderConnected(null, 'codex')

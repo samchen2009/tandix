@@ -270,6 +270,7 @@ chrome.storage.onChanged?.addListener((changes, areaName) => {
 const sessionTrustedActionOrigins = new Set<string>()
 /** Tool calls that are either withdrawable or completing an already-dispatched action. */
 interface ActiveToolCall {
+  sessionId?: string
   controller: AbortController
   unrestrictedAccess: boolean
   committed: boolean
@@ -286,6 +287,11 @@ let lastPersistedAffinity: string | undefined
 let affinityPersistence = Promise.resolve()
 /** Per-session snapshot refreshes preserve prompt ordering without cross-session cancellation. */
 const sessionSnapshotRefreshes = new Map<string, Promise<void>>()
+/** Only page handoffs delay tools; initial host snapshot injection may itself use tools. */
+const sessionTabTransitions = new Map<string, Promise<void>>()
+const pendingTabFollows = new Map<string, number>()
+/** Inheritance is attributed at the browser event, before async metadata reads. */
+const pendingTabAssociations = new Map<number, Promise<void>>()
 interface ActiveFollowRefresh {
   controller: AbortController
   unrestrictedAccess: boolean
@@ -475,12 +481,16 @@ function recordingStateForPanel(port: chrome.runtime.Port): TeachState {
 
 function tabAffinityForPanel(port: chrome.runtime.Port): TabAffinityState {
   const shared = tabAffinity.snapshot()
-  if (import.meta.env.EXT_TARGET === 'firefox') return shared
+  const sessionId = panelActiveSessions.get(port)
+  const pages = sessionId === undefined ? {} : {
+    tabs: sessionPages(sessionId),
+    ...(shared.active === null ? {} : { visibleTabId: shared.active.tabId }),
+  }
+  if (import.meta.env.EXT_TARGET === 'firefox') return { ...shared, ...pages }
 
   const ownedTabId = panelTabs.get(port)
-  if (ownedTabId === undefined) return shared
+  if (ownedTabId === undefined) return { ...shared, ...pages }
 
-  const sessionId = panelActiveSessions.get(port)
   const sessionTab = sessionId === undefined ? undefined : tabAffinity.getSessionTab(sessionId)
   const owned = panelOwnedTabs.get(port)
     ?? (shared.active?.tabId === ownedTabId ? shared.active : undefined)
@@ -503,6 +513,7 @@ function tabAffinityForPanel(port: chrome.runtime.Port): TabAffinityState {
       controlled: null,
       active: { ...owned },
       pinned: false,
+      ...pages,
     }
   }
   return {
@@ -511,7 +522,17 @@ function tabAffinityForPanel(port: chrome.runtime.Port): TabAffinityState {
     controlled: { ...sessionTab },
     active: { ...owned },
     pinned: false,
+    ...pages,
   }
+}
+
+function sessionPages(sessionId: string): AffinityTab[] {
+  const pages = pageSessionContexts.list(sessionId).map(tab => ({
+    tabId: tab.id, windowId: tab.windowId, title: tab.title ?? '', url: tab.url ?? '',
+  }))
+  const current = tabAffinity.getSessionTab(sessionId)
+  if (current !== undefined && !pages.some(tab => tab.tabId === current.tabId)) pages.push(current)
+  return pages
 }
 
 function sendTabAffinity(port: chrome.runtime.Port): void {
@@ -928,6 +949,71 @@ function observeActiveSummary(summary: AffinityTab): void {
   }
   persistTabAffinity()
   broadcastTabAffinity()
+  followAssociatedPage(summary)
+}
+
+/** Follow a visible page in the same conversation without restarting its agent. */
+function followAssociatedPage(summary: AffinityTab): void {
+  const sid = pageSessionContexts.candidate({ id: summary.tabId, ...summary })
+  if (sid === null || !/^https?:\/\//i.test(summary.url)) return
+  const previous = tabAffinity.getSessionTab(sid)
+  if (previous?.tabId === summary.tabId) return
+  if (pendingTabFollows.get(sid) === summary.tabId) return
+  pendingTabFollows.set(sid, summary.tabId)
+  const pending = [...activeToolCalls.values()].filter(call => call.sessionId === sid)
+  const operation = Promise.all(pending.map(call => call.settled)).then(async () => {
+    if (tabAffinity.snapshot().active?.tabId !== summary.tabId) return
+    if (pageSessionContexts.candidate({ id: summary.tabId, ...summary }) !== sid) return
+    const current = tabAffinity.getSessionTab(sid)
+    if (current?.tabId === summary.tabId || current?.tabId !== previous?.tabId) return
+    const live = summarizeTab(await chrome.tabs.get(summary.tabId))
+    if (live === null || !/^https?:\/\//i.test(live.url)
+      || tabAffinity.snapshot().active?.tabId !== summary.tabId) return
+    commitTabAffinityRebind(live, sid)
+    if (bridge?.state === 'connected') await refreshFollowedPage(sid, live.tabId).catch(() => {})
+  }).catch(() => {})
+  sessionSnapshotRefreshes.set(sid, operation)
+  sessionTabTransitions.set(sid, operation)
+  void operation.finally(() => {
+    if (sessionSnapshotRefreshes.get(sid) === operation) sessionSnapshotRefreshes.delete(sid)
+    if (sessionTabTransitions.get(sid) === operation) {
+      sessionTabTransitions.delete(sid)
+      pendingTabFollows.delete(sid)
+    }
+  })
+}
+
+/** A browser navigation-target event proves the page opened a child tab. */
+function associatePageOpenedTab(sourceTabId: number, targetTabId: number): void {
+  if (pendingTabAssociations.has(targetTabId)) return
+  const operation = inheritTabSession(sourceTabId, targetTabId)
+  pendingTabAssociations.set(targetTabId, operation)
+  void operation.catch(() => {}).finally(() => {
+    if (pendingTabAssociations.get(targetTabId) === operation) pendingTabAssociations.delete(targetTabId)
+    notifyTabSessionChanged(targetTabId)
+  })
+}
+
+function notifyTabSessionChanged(tabId: number): void {
+  for (const port of panelPorts) {
+    if (panelTabs.get(port) !== tabId) continue
+    const windowId = panelWindows.get(port)
+    if (windowId !== undefined) void postResumeHint(port, windowId)
+  }
+}
+
+/** Page links share context; opener metadata alone never establishes membership. */
+async function inheritTabSession(sourceTabId: number, targetTabId: number): Promise<void> {
+  await Promise.all([affinityReady, pageSessionContexts.ready])
+  const [source, target] = await Promise.all([chrome.tabs.get(sourceTabId), chrome.tabs.get(targetTabId)])
+  const sid = pageSessionContexts.candidate(source)
+  if (sid === null || pageSessionContexts.candidate(target) !== null) return
+  pageSessionContexts.bind(sid, target)
+  const summary = summarizeTab(target)
+  if (summary !== null) {
+    if (target.active && tabAffinity.snapshot().active?.tabId === target.id) followAssociatedPage(summary)
+    broadcastTabAffinity()
+  }
 }
 
 function observeActiveTab(tab: chrome.tabs.Tab): void {
@@ -1003,6 +1089,10 @@ async function restoreTabAffinity(): Promise<void> {
     }
     tabAffinity.restoreSessionTabs(restoredSessions)
   }
+  await pageSessionContexts.ready
+  try {
+    pageSessionContexts.reconcile(await chrome.tabs.query({}))
+  } catch { /* Keep stored associations if Chrome is temporarily unavailable. */ }
   tabAffinity.restoreFocusedSession(record?.focusedSessionId ?? null)
 
   if (record !== null && 'controlledTabId' in record) {
@@ -1077,12 +1167,18 @@ async function postResumeHint(port: chrome.runtime.Port, windowId: number): Prom
   let sessionId: string | null = null
   try {
     const tab = await tabForPanel(port, windowId)
-    if (tab !== undefined) sessionId = pageSessionContexts.candidate(tab)
+    if (tab !== undefined) {
+      if (tab.id !== undefined) await pendingTabAssociations.get(tab.id)
+      sessionId = pageSessionContexts.candidate(tab)
+    }
   } catch {
     // Without an exact live page the panel must start a new conversation.
   }
   if (!panelPorts.has(port) || panelWindows.get(port) !== windowId) return
-  try { port.postMessage({ type: 'session.resume-hint', sessionId }) } catch { /* port closed */ }
+  try {
+    port.postMessage({ type: 'session.resume-hint', sessionId,
+      ...(sessionId !== null && pageSessionContexts.list(sessionId).length > 1 ? { shared: true } : {}) })
+  } catch { /* port closed */ }
 }
 
 /** Re-checkpoint each open panel before issuing a bridge-epoch resume hint. */
@@ -1208,6 +1304,8 @@ function bindOpenedTab(
   if (sid !== undefined && sid !== '') {
     void pageSessionContexts.ready.then(() => {
       pageSessionContexts.bind(sid, { id: summary.tabId, ...summary })
+      broadcastTabAffinity()
+      notifyTabSessionChanged(summary.tabId)
     })
   }
   persistTabAffinity()
@@ -1305,17 +1403,21 @@ async function resolveTabAffinityResponse(response: {
   revision: number
   decision: TabAffinityDecision
   sessionId: unknown
+  tabId?: unknown
 }, port: chrome.runtime.Port): Promise<void> {
   await affinityReady
   const sid = typeof response.sessionId === 'string' ? response.sessionId : undefined
 
-  if (response.decision === 'show-controlled') {
+  if (response.decision === 'show-controlled' || response.decision === 'show-tab') {
     const state = tabAffinityForPanel(port)
-    if (response.revision !== state.revision || state.controlled === null) {
+    const controlled = response.decision === 'show-tab'
+      ? state.tabs?.find(tab => tab.tabId === response.tabId)
+      : state.controlled
+    if (response.revision !== state.revision || controlled == null
+      || (response.decision === 'show-tab' && (sid === undefined || panelActiveSessions.get(port) !== sid))) {
       broadcastTabAffinity()
       return
     }
-    const controlled = state.controlled
     try {
       const tab = await chrome.tabs.get(controlled.tabId)
       const summary = summarizeTab(tab)
@@ -1472,6 +1574,7 @@ function routeToolCall(call: ToolCall): void {
   const unrestrictedAccess = unrestrictedAccessEnabled()
   let settle!: () => void
   const activeCall: ActiveToolCall = {
+    sessionId: call.sessionId,
     controller,
     unrestrictedAccess,
     committed: false,
@@ -1525,7 +1628,11 @@ function routeToolCall(call: ToolCall): void {
       },
     )
   }
-  void (call.name.startsWith('tandix_skill_')
+  const previousRefresh = call.sessionId === undefined ? undefined : sessionTabTransitions.get(call.sessionId)
+  void Promise.resolve(previousRefresh).then(() => previousRefresh !== undefined
+    && ['browser_click', 'browser_type', 'browser_press', 'browser_scroll', 'browser_pointer'].includes(call.name)
+    ? { ok: false, error: { code: 'action-failed', message: 'The controlled tab changed while this action was being prepared. No action was performed. Read browser_snapshot and use its new page targets before retrying.' } } as ToolAnswer
+    : (call.name.startsWith('tandix_skill_')
     ? skillTools.dispatch(call, controller.signal, commitAction)
     : isTabManagementTool(call.name)
     ? managementDispatch()
@@ -1543,19 +1650,20 @@ function routeToolCall(call: ToolCall): void {
           (tabId) => tabAffinity.allowsTarget(tabId, call.sessionId),
           commitAction,
         ))
-    : resolveToolTab(call.sessionId).then((target) => 'ok' in target
-      ? target
-      : dispatchToolCall(
-          call,
-          sharePageContent,
-          budget,
-          (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess),
-          controller.signal,
-          target,
-          () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
-          { unrestrictedAccess, commitAction, rollbackActionCommit },
-        ))
-  ).then(
+    : resolveToolTab(call.sessionId).then((target) => {
+      if ('ok' in target) return target
+      return dispatchToolCall(
+        call,
+        sharePageContent,
+        budget,
+        (prompt) => authorizeToolCall(prompt, controller.signal, target.windowId, call.sessionId, unrestrictedAccess),
+        controller.signal,
+        target,
+        () => target.id !== undefined && tabAffinity.allowsTarget(target.id, call.sessionId),
+        { unrestrictedAccess, commitAction, rollbackActionCommit },
+      )
+    })
+  )).then(
     async (answer) => {
       if (activeToolCalls.get(call.id) !== activeCall) return
       // A committed browser_open_tab already rebound affinity; prefer that
@@ -2160,7 +2268,8 @@ chrome.runtime.onConnect.addListener((port) => {
             void bind.finally(() => {
               if (sessionSnapshotRefreshes.get(sid) === bind) sessionSnapshotRefreshes.delete(sid)
             })
-          } else if (tabAffinity.focusSession(sid)) {
+          } else {
+            tabAffinity.focusSession(sid)
             persistTabAffinity()
             broadcastTabAffinity()
           }
@@ -2177,18 +2286,29 @@ chrome.runtime.onConnect.addListener((port) => {
         break
       }
       case 'tab-affinity.response': {
-        const response = message as { revision?: unknown; decision?: unknown; sessionId?: unknown }
+        const response = message as { revision?: unknown; decision?: unknown; sessionId?: unknown; tabId?: unknown }
         if (typeof response.revision !== 'number' || !isTabAffinityDecision(response.decision)) break
         const sid = typeof response.sessionId === 'string' ? response.sessionId : undefined
+        // Keep sidePanel.open in the original extension click's user gesture.
+        // The destination panel restores the same conversation from its tab.
+        if (response.decision === 'show-tab' && sid !== undefined && panelActiveSessions.get(port) === sid
+          && response.revision === tabAffinityForPanel(port).revision
+          && sessionPages(sid).some(tab => tab.tabId === response.tabId)
+          && import.meta.env.EXT_TARGET !== 'firefox') {
+          void chrome.sidePanel.open({ tabId: response.tabId as number }).catch(() => {})
+        }
         const decision = resolveTabAffinityResponse({
           revision: response.revision,
           decision: response.decision,
           sessionId: response.sessionId,
+          tabId: response.tabId,
         }, port).catch(() => {})
-        if ((response.decision === 'follow' || response.decision === 'show-controlled') && sid !== undefined) {
+        if ((response.decision === 'follow' || response.decision === 'show-controlled' || response.decision === 'show-tab') && sid !== undefined) {
           sessionSnapshotRefreshes.set(sid, decision)
+          sessionTabTransitions.set(sid, decision)
           void decision.finally(() => {
             if (sessionSnapshotRefreshes.get(sid) === decision) sessionSnapshotRefreshes.delete(sid)
+            if (sessionTabTransitions.get(sid) === decision) sessionTabTransitions.delete(sid)
           })
         } else {
           void decision
@@ -2339,6 +2459,13 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
   if (hasPanelForTab(tabId, tab.windowId)) void recordingService?.observeTabUpdate(tabId, changeInfo, tab)
   void affinityReady.then(() => {
+    if (pageSessionContexts.observeTab(tab)) {
+      broadcastTabAffinity()
+      if (tabAffinity.snapshot().active?.tabId === tabId) {
+        const current = summarizeTab(tab)
+        if (current !== null) followAssociatedPage(current)
+      }
+    }
     if (!tabAffinity.tracks(tabId)) return
     const summary = summarizeTab(tab)
     if (summary !== null && tabAffinity.snapshot().active?.tabId === tabId
@@ -2355,15 +2482,13 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
   if (import.meta.env.EXT_TARGET !== 'firefox') void configureTabPanel(addedTabId)
   // The old document is gone even though Chrome transfers the tab identity.
   broadcastSelections(selections.clearTab(removedTabId))
-  void pageSessionContexts.ready.then(() => {
-    pageSessionContexts.replaceTab(removedTabId, addedTabId)
-  })
-  void affinityReady.then(() => {
+  void Promise.all([affinityReady, pageSessionContexts.ready]).then(() => {
+    const replacedContext = pageSessionContexts.replaceTab(removedTabId, addedTabId)
     // onReplaced is an identity swap (for example prerender activation), not
     // a close or user-visible switch. Transfer IDs synchronously before any
     // metadata lookup so tool resolution never observes the removed target.
     const affectedSessions = tabAffinity.sessionIdsForTab(removedTabId)
-    if (!tabAffinity.replaceTab(removedTabId, addedTabId)) return
+    if (!tabAffinity.replaceTab(removedTabId, addedTabId) && !replacedContext) return
     for (const sid of affectedSessions) {
       activeFollowRefreshes.get(sid)?.controller.abort()
       cancelPendingApprovals(sid)
@@ -2374,7 +2499,9 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
     broadcastTabAffinity()
     return chrome.tabs.get(addedTabId).then((tab) => {
       const summary = summarizeTab(tab)
-      if (summary !== null && tabAffinity.observeTab(summary)) broadcastTabAffinity()
+      pageSessionContexts.observeTab(tab)
+      if (summary !== null) tabAffinity.observeTab(summary)
+      broadcastTabAffinity()
     }).catch(() => {})
   })
 })
@@ -2383,19 +2510,29 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   configuredPanelTabs.delete(tabId)
   void recordingService?.observeTabClosed(tabId)
   broadcastSelections(selections.clearTab(tabId))
-  void pageSessionContexts.ready.then(() => {
+  void Promise.all([affinityReady, pageSessionContexts.ready]).then(() => {
     pageSessionContexts.removeTab(tabId)
-  })
-  void affinityReady.then(() => {
     const affectedSessions = tabAffinity.sessionIdsForTab(tabId)
-    if (!tabAffinity.removeTab(tabId)) return
+    tabAffinity.removeTab(tabId)
     for (const sid of affectedSessions) {
       activeFollowRefreshes.get(sid)?.controller.abort()
       cancelPendingApprovals(sid)
+      const remaining = pageSessionContexts.list(sid)
+      const fallback = remaining[remaining.length - 1]
+      if (fallback !== undefined) {
+        const summary = { tabId: fallback.id, windowId: fallback.windowId,
+          title: fallback.title ?? '', url: fallback.url ?? '' }
+        tabAffinity.rebindControlled(summary, sid)
+        resetTabSnapshot(summary.tabId)
+      }
     }
     persistTabAffinity()
     broadcastTabAffinity()
   })
+})
+
+chrome.webNavigation.onCreatedNavigationTarget?.addListener((details) => {
+  associatePageOpenedTab(details.sourceTabId, details.tabId)
 })
 
 // A committed navigation replaces a document; a same-document history or

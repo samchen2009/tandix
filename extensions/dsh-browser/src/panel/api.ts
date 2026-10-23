@@ -93,6 +93,7 @@ interface SelectionMessage {
 interface SessionResumeHintMessage {
   type: 'session.resume-hint'
   sessionId: string | null
+  shared?: boolean
 }
 
 interface RecordingStateMessage {
@@ -146,11 +147,11 @@ export interface PanelApi {
   onApprovalResolved(callback: (id: string) => void): () => void
   onTabAffinity(callback: (state: TabAffinityState) => void): () => void
   onSelection(callback: (selection: PageSelection | null) => void): () => void
-  onSessionResumeHint(callback: (sessionId: string | null) => void): () => void
+  onSessionResumeHint(callback: (sessionId: string | null, shared?: boolean) => void): () => void
   onRecordingState(callback: (state: TeachState) => void): () => void
   onRecordingEvent(callback: (recordingId: string, event: RecordingEventInput) => void): () => void
   respondToApproval(id: string, decision: ApprovalDecision): Promise<void>
-  resolveTabAffinity(revision: number, decision: TabAffinityDecision, sessionId: string | null): Promise<void>
+  resolveTabAffinity(revision: number, decision: TabAffinityDecision, sessionId: string | null, tabId?: number): Promise<void>
   rebindTabAffinity(sessionId?: string): Promise<void>
   /** Clear all selection state, or only the exact selection supplied. */
   clearSelection(selection?: PageSelection): Promise<void>
@@ -191,7 +192,7 @@ export function connectPanel(): PanelApi {
   const approvalResolvedListeners = new Set<(id: string) => void>()
   const tabAffinityListeners = new Set<(state: TabAffinityState) => void>()
   const selectionListeners = new Set<(selection: PageSelection | null) => void>()
-  const sessionResumeHintListeners = new Set<(sessionId: string | null) => void>()
+  const sessionResumeHintListeners = new Set<(sessionId: string | null, shared?: boolean) => void>()
   const recordingStateListeners = new Set<(state: TeachState) => void>()
   const recordingEventListeners = new Set<(recordingId: string, event: RecordingEventInput) => void>()
 
@@ -269,7 +270,10 @@ export function connectPanel(): PanelApi {
         break
       }
       case 'session.resume-hint':
-        for (const listener of sessionResumeHintListeners) listener(msg.sessionId)
+        for (const listener of sessionResumeHintListeners) {
+          if (msg.shared === undefined) listener(msg.sessionId)
+          else listener(msg.sessionId, msg.shared)
+        }
         break
       case 'recording.state':
         for (const listener of recordingStateListeners) listener(msg.state)
@@ -475,8 +479,9 @@ export function connectPanel(): PanelApi {
     respondToApproval(id, decision) {
       return send({ type: 'approval.response', id, decision })
     },
-    resolveTabAffinity(revision, decision, sessionId) {
-      return send({ type: 'tab-affinity.response', revision, decision, sessionId })
+    resolveTabAffinity(revision, decision, sessionId, tabId) {
+      return send({ type: 'tab-affinity.response', revision, decision, sessionId,
+        ...(tabId === undefined ? {} : { tabId }) })
     },
     rebindTabAffinity(sessionId) {
       const id = crypto.randomUUID()

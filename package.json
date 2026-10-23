@@ -1,6 +1,6 @@
 {
   "name": "dsh-browser",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Tandix — ask about and act on the current webpage, then turn reviewed workflows into reusable skills.",
   "author": "Yuxiang Lin",
   "license": "MIT",

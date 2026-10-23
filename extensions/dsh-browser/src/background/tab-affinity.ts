@@ -24,12 +24,12 @@ export interface AffinityTab {
 }
 
 export type TabAffinityStatus = 'unbound' | 'following' | 'handoff' | 'background' | 'lost'
-export type TabAffinityDecision = 'keep' | 'follow' | 'keep-always' | 'ask-again' | 'show-controlled'
+export type TabAffinityDecision = 'keep' | 'follow' | 'keep-always' | 'ask-again' | 'show-controlled' | 'show-tab'
 
 /** Narrow an untrusted panel message field to a decision. */
 export function isTabAffinityDecision(value: unknown): value is TabAffinityDecision {
   return value === 'keep' || value === 'follow'
-    || value === 'keep-always' || value === 'ask-again' || value === 'show-controlled'
+    || value === 'keep-always' || value === 'ask-again' || value === 'show-controlled' || value === 'show-tab'
 }
 
 /** Serializable state sent from the service worker to every side panel. */
@@ -40,6 +40,10 @@ export interface TabAffinityState {
   active: AffinityTab | null
   /** True once the user chose `keep-always`; tab switches stop prompting. */
   pinned: boolean
+  /** Pages associated with the conversation displayed in this panel. */
+  tabs?: AffinityTab[]
+  /** Actually visible browser page, independent of a panel's owning tab. */
+  visibleTabId?: number
 }
 
 export type TabTargetResolution =
@@ -357,7 +361,7 @@ export class TabAffinityController {
     // Showing the controlled tab is a browser-window action handled by the
     // background service. It must never fall through to the `follow` branch,
     // which would instead move control to the user's current tab.
-    if (decision === 'show-controlled') return false
+    if (decision === 'show-controlled' || decision === 'show-tab') return false
     const currentStatus = this.status()
     if (decision === 'ask-again') {
       // Undo a pin in place. Dropping keptActiveTabId re-raises the prompt for

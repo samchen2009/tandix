@@ -13,6 +13,7 @@ import { BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from '@yuxian
 import type { BridgeCaps } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeState } from '../background/bridge.ts'
+import { SessionTabs } from './SessionTabs.tsx'
 import type { AffinityTab, TabAffinityDecision, TabAffinityState } from '../background/tab-affinity.ts'
 import { connectPanel, PanelRpcError, type PanelApi, type PanelSettings } from './api.ts'
 import { MessageMarkdown } from './MessageMarkdown.tsx'
@@ -819,7 +820,7 @@ export function App(): React.JSX.Element {
   const [goalIterationPolicy, setGoalIterationPolicy] = useState('')
   const [goalBlockedStop, setGoalBlockedStop] = useState('')
   const [goalBudgetLimit, setGoalBudgetLimit] = useState('')
-  const [resumeHint, setResumeHint] = useState<{ ready: boolean; sessionId: string | null }>({ ready: false, sessionId: null })
+  const [resumeHint, setResumeHint] = useState<{ ready: boolean; sessionId: string | null; shared?: boolean }>({ ready: false, sessionId: null })
   const [questions, setQuestions] = useState<PendingQuestion[]>([])
   const [questionSubmissions, setQuestionSubmissions] = useState<ResolvedQuestion[]>([])
   const approvalQueueRef = useRef<ApprovalRequest[]>([])
@@ -1071,8 +1072,8 @@ export function App(): React.JSX.Element {
     void Promise.resolve(chrome.windows.getCurrent())
       .then((window) => { if (window.id !== undefined) return api.registerWindow(window.id) })
       .catch(() => {})
-    const offResumeHint = api.onSessionResumeHint((sessionId) => {
-      setResumeHint({ ready: true, sessionId })
+    const offResumeHint = api.onSessionResumeHint((sessionId, shared) => {
+      setResumeHint({ ready: true, sessionId, shared })
     })
     void api.requestStatus().catch((cause: unknown) => {
       setError(cause instanceof Error ? cause.message : String(cause))
@@ -1741,7 +1742,7 @@ export function App(): React.JSX.Element {
     sessionInitializationRef.current = true
     const transition = beginSessionTransition()
     try {
-      const hinted = settings?.autoResumeSession === true ? resumeHint.sessionId : null
+      const hinted = settings?.autoResumeSession === true || resumeHint.shared === true ? resumeHint.sessionId : null
       if (hinted !== null && hinted.trim() !== '') {
         try {
           const { items, archived } = await loadSessionCatalog()
@@ -2545,10 +2546,10 @@ export function App(): React.JSX.Element {
     finally { setAgentApprovalBusy(false) }
   }
 
-  async function decideTabAffinity(decision: TabAffinityDecision): Promise<void> {
+  async function decideTabAffinity(decision: TabAffinityDecision, tabId?: number): Promise<void> {
     if (tabAffinity === null) return
     try {
-      await api.resolveTabAffinity(tabAffinity.revision, decision, sessionRef.current)
+      await api.resolveTabAffinity(tabAffinity.revision, decision, sessionRef.current, tabId)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     }
@@ -3146,12 +3147,8 @@ export function App(): React.JSX.Element {
       <footer className="composer">
         <div className="composer-box">
           <div className="composer-context">
-            <button type="button" className="page-context-chip" disabled={tabAffinity?.controlled == null}
-              onClick={() => decideTabAffinity('show-controlled')} title={tabAffinity?.controlled?.url ?? ''}>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18Z"/></svg>
-              <span>{tabAffinity?.controlled ? tabLabel(tabAffinity.controlled, '') : (locale === 'zh' ? '当前网页' : 'Current page')}</span>
-              {tabAffinity?.pinned && <small>{locale === 'zh' ? '固定' : 'Pinned'}</small>}
-            </button>
+            <SessionTabs state={tabAffinity} locale={locale}
+              onSelect={tabId => { void decideTabAffinity('show-tab', tabId) }} />
             <SkillCaptureButton recording={recordingState} processing={skillExtracting}
               disabled={!sessionReady || busy || working || configurationBusy || sessionChanging} locale={locale}
               onExtract={() => { void extractSkillFromRecentActions() }} />

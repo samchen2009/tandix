@@ -141,7 +141,7 @@ export class CodexBridge {
     this.proc.on('exit', () => this.failAll(new Error('Codex app-server exited')))
     createInterface({ input: this.proc.stdout }).on('line', line => this.receiveCodex(line))
     await this.call('initialize', {
-      clientInfo: { name: 'tandix', title: 'Tandix', version: '0.2.5' },
+      clientInfo: { name: 'tandix', title: 'Tandix', version: '0.2.6' },
     }, 8_000)
     this.writeCodex({ method: 'initialized', params: {} })
     const auth = await this.call('account/read', { refreshToken: false }, 8_000)

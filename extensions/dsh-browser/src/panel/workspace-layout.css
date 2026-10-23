@@ -164,7 +164,17 @@
 
 /* Visible recording → extraction entry, anchored in the composer's top right. */
 .composer-context { justify-content: space-between; }
-.page-context-chip { max-width: calc(100% - 63px); }
+.session-tabs { display: flex; flex: 1; min-width: 0; gap: 4px; overflow-x: auto; padding: 2px; scrollbar-width: thin; }
+.session-tabs .page-context-chip { flex: 1 1 0; box-sizing: border-box; min-width: 40px; max-width: 200px; gap: 5px; padding: 6px 7px; overflow: hidden; container: session-page / inline-size; }
+.session-tabs .page-context-chip > span { flex: 1; min-width: 0; text-align: left; }
+.session-tabs .page-context-chip:hover { background: var(--accent-wash); }
+.session-tabs .page-context-chip.active { color: var(--accent-ink); background: var(--accent-soft); border-color: var(--accent); }
+.session-tabs .page-context-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.page-context-placeholder { color: var(--muted); padding: 6px 9px; font-size: calc(11px * var(--ui-scale)); }
+@container session-page (max-width: 40px) {
+  .page-context-chip > span { display: none; }
+  .page-context-chip > svg { margin-inline: auto; }
+}
 .skill-capture-trigger {
   position: relative;
   display: grid;

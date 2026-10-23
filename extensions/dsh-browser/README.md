@@ -28,6 +28,8 @@ The **browser-operation end** of dsh: the model reads and operates the browser p
 
 ## Architecture
 
+A conversation can span multiple browser tabs. Following a page link into a new tab, manually or through Tandix, keeps that page in the source conversation, including background tabs. Independently opened browser tabs start new conversations; an identical URL or opener metadata alone does not merge them. The strip above the composer lists the conversation's pages, highlights the visible browser tab, and lets you switch pages while keeping the same chat history and agent context. Opening Tandix on an associated page restores that conversation.
+
 ```
 side panel (React) ◄─port─► background SW/event page ◄─WS─► dsh bridge plugin
                                  │

@@ -45,7 +45,7 @@ describe('PageSessionContextTracker', () => {
     expect(tracker.candidate(webTab(7, 'https://example.com/orders', 3))).toBeNull()
   })
 
-  it('rebinds a session to one current tab and overwrites a tab restore target', async () => {
+  it('retains every associated tab while overwriting only a tab restore target', async () => {
     const write = vi.fn(async () => {})
     const tracker = new PageSessionContextTracker({ read: async () => undefined, write }, () => 42)
     await tracker.ready
@@ -54,19 +54,20 @@ describe('PageSessionContextTracker', () => {
     tracker.bind('session-new', webTab(1, 'https://example.com/new'))
     tracker.bind('session-new', webTab(2, 'https://example.com/new'))
 
-    expect(tracker.candidate(webTab(1, 'https://example.com/new'))).toBeNull()
+    expect(tracker.candidate(webTab(1, 'https://example.com/new'))).toBe('session-new')
     expect(tracker.candidate(webTab(2, 'https://example.com/new'))).toBe('session-new')
     await vi.waitFor(() => {
       expect(write).toHaveBeenLastCalledWith({
         version: 1,
         tabs: {
+          1: { sessionId: 'session-new', windowId: 1, urlKey: 'https://example.com/new', updatedAt: 42 },
           2: { sessionId: 'session-new', windowId: 1, urlKey: 'https://example.com/new', updatedAt: 42 },
         },
       })
     })
   })
 
-  it('keeps only the newest restored tab when storage contains a duplicate session', async () => {
+  it('restores multiple tabs sharing the same session', async () => {
     const tracker = new PageSessionContextTracker({
       read: async () => ({
         version: 1,
@@ -79,8 +80,20 @@ describe('PageSessionContextTracker', () => {
     })
     await tracker.ready
 
-    expect(tracker.candidate(webTab(1, 'https://example.com/old'))).toBeNull()
+    expect(tracker.candidate(webTab(1, 'https://example.com/old'))).toBe('session')
     expect(tracker.candidate(webTab(2, 'https://example.com/new'))).toBe('session')
+  })
+
+  it('keeps association order when revisiting a tab and prunes only closed pages', async () => {
+    const tracker = new PageSessionContextTracker({ read: async () => undefined, write: async () => {} })
+    await tracker.ready
+    tracker.bind('session', { ...webTab(1, 'https://example.com/list'), title: 'List' })
+    tracker.bind('session', webTab(2, 'https://example.com/detail'))
+    tracker.bind('session', webTab(1, 'https://example.com/list'))
+    expect(tracker.list('session').map(tab => tab.id)).toEqual([1, 2])
+    tracker.reconcile([{ ...webTab(1, 'https://example.com/updated', 3), title: 'Updated' }])
+    expect(tracker.list('session')).toEqual([{ id: 1, windowId: 3, url: 'https://example.com/updated', title: 'Updated' }])
+    expect(tracker.candidate(webTab(1, 'https://example.com/updated', 3))).toBe('session')
   })
 
   it('keeps the tab binding across unsupported pages without allowing page control', async () => {

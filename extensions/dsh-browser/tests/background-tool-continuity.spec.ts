@@ -86,8 +86,13 @@ afterEach(() => {
 describe('tool-driven session checkpoints', () => {
   it('updates only after a successful navigation candidate', async () => {
     let currentTab = browserTab('https://example.com/start')
+    let childTab: chrome.tabs.Tab | undefined
+    let manualTab: chrome.tabs.Tab | undefined
     let action: (name: string) => Promise<unknown> = async () => ({ ok: true, result: { text: 'snapshot' } })
     const onConnect = chromeEvent<[chrome.runtime.Port]>()
+    const onCreated = chromeEvent<[chrome.tabs.Tab]>()
+    const onActivated = chromeEvent<[{ tabId: number; windowId: number }]>()
+    const onCreatedNavigationTarget = chromeEvent<[{ sourceTabId: number; tabId: number; sourceFrameId: number }]>()
     const sessionData: Record<string, unknown> = {}
     const sendMessage = vi.fn(async (_tabId: number, message: unknown) => {
       const name = (message as { action?: string }).action
@@ -125,16 +130,19 @@ describe('tool-driven session checkpoints', () => {
         },
       },
       tabs: {
-        get: vi.fn(async () => currentTab),
-        query: vi.fn(async () => [currentTab]),
+        get: vi.fn(async (id: number) => id === childTab?.id ? childTab : id === manualTab?.id ? manualTab : currentTab),
+        query: vi.fn(async (query: chrome.tabs.QueryInfo) => [currentTab, childTab, manualTab]
+          .filter((tab): tab is chrome.tabs.Tab => tab !== undefined && (query.active !== true || tab.active))),
         sendMessage,
-        onActivated: chromeEvent<[{ tabId: number; windowId: number }]>(),
+        onCreated,
+        onActivated,
         onUpdated: chromeEvent<[number, chrome.tabs.TabChangeInfo, chrome.tabs.Tab]>(),
         onReplaced: chromeEvent<[number, number]>(),
         onRemoved: chromeEvent<[number]>(),
       },
       scripting: { executeScript: vi.fn(async () => []) },
       webNavigation: {
+        onCreatedNavigationTarget,
         getAllFrames: vi.fn(async () => [{
           tabId: 1,
           frameId: 0,
@@ -193,10 +201,13 @@ describe('tool-driven session checkpoints', () => {
 
     action = async () => {
       currentTab = browserTab('https://example.com/non-navigation')
+      manualTab = { ...browserTab('https://example.com/non-navigation'), id: 3, openerTabId: 1, active: false }
+      onCreated.emit(manualTab)
       return { ok: true, result: { text: 'snapshot' } }
     }
     await call('snapshot', 'browser_snapshot')
     expect(storedUrlKey(sessionData)).toBe('https://example.com/start')
+    expect(sessionData[PAGE_SESSION_CONTEXT_STORAGE_KEY]).not.toHaveProperty('tabs.3')
 
     let finishCommitted!: () => void
     action = async () => await new Promise((resolve) => {
@@ -225,5 +236,38 @@ describe('tool-driven session checkpoints', () => {
     }
     await call('success', 'browser_navigate')
     await vi.waitFor(() => { expect(storedUrlKey(sessionData)).toBe('https://example.com/success') })
+
+    // A click opens a linked page while its source action is still completing.
+    action = async (name) => {
+      if (name === 'browser_click' && childTab === undefined) {
+        childTab = { ...browserTab('https://example.com/details'), id: 2, openerTabId: 1 }
+        currentTab.active = false
+        onCreated.emit(childTab)
+        onCreatedNavigationTarget.emit({ sourceTabId: 1, tabId: 2, sourceFrameId: 0 })
+        onActivated.emit({ tabId: 2, windowId: 1 })
+        await new Promise(resolve => setTimeout(resolve, 0))
+      }
+      return { ok: true, result: { text: 'page snapshot' } }
+    }
+    await call('popup', 'browser_click')
+    await vi.waitFor(() => {
+      expect(sessionData.dshTabAffinity).toMatchObject({ sessionTabs: { 'session-live': { tabId: 2 } } })
+    })
+    const refresh = (socket.sent as Array<{ t: string; id: string; method?: string }>).filter(frame =>
+      frame.t === 'rpc' && frame.method === 'bridge.injectBrowserSnapshot').at(-1)!
+    expect(refresh).toBeDefined()
+    // This action was generated before the new page snapshot reached the agent.
+    socket.receive({ t: 'tool.call', id: 'stale-click', name: 'browser_click', args: { index: 1 },
+      expiresAt: Date.now() + 10_000, sessionId: 'session-live' })
+    const delivered = sendMessage.mock.calls.length
+    socket.receive({ t: 'rpc.result', id: refresh.id, ok: true, result: {} })
+    await vi.waitFor(() => expect(socket.sent).toContainEqual(expect.objectContaining({
+      t: 'tool.result', id: 'stale-click', ok: false,
+      error: expect.objectContaining({ message: expect.stringContaining('No action was performed') }),
+    })))
+    expect(sendMessage.mock.calls).toHaveLength(delivered)
+    expect(sessionData[PAGE_SESSION_CONTEXT_STORAGE_KEY]).toMatchObject({
+      tabs: { 1: { sessionId: 'session-live' }, 2: { sessionId: 'session-live' } },
+    })
   })
 })

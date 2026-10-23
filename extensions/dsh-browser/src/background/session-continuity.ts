@@ -23,6 +23,7 @@ export interface PageContextTab {
   id?: number
   windowId: number
   url?: string
+  title?: string
 }
 
 /** Normalize the page identity used for automatic conversation restoration. */
@@ -40,6 +41,7 @@ export function pageUrlKey(value: unknown): string | undefined {
 /** Browser-lifetime mapping from a live tab to its conversation. */
 export class PageSessionContextTracker {
   private tabs = new Map<number, PageSessionContext>()
+  private liveTabs = new Map<number, PageContextTab>()
   private revision = 0
   private persistence = Promise.resolve()
   readonly ready: Promise<void>
@@ -51,7 +53,7 @@ export class PageSessionContextTracker {
     this.ready = this.restore()
   }
 
-  /** Bind a session to one tab, replacing either prior owner. */
+  /** Add a tab to a session, replacing only that tab's prior owner. */
   bind(sessionValue: unknown, tab: PageContextTab): boolean {
     const sessionId = normalizeSessionId(sessionValue)
     const tabId = normalizeId(tab.id)
@@ -61,17 +63,42 @@ export class PageSessionContextTracker {
     // URL is retained as metadata, not as identity: navigation inside the same
     // tab must not silently start a different agent conversation.
     const urlKey = pageUrlKey(tab.url) ?? this.tabs.get(tabId)?.urlKey ?? ''
-    let changed = false
-    for (const [candidateTabId, context] of this.tabs) {
-      if (candidateTabId === tabId || context.sessionId === sessionId) {
-        this.tabs.delete(candidateTabId)
-        changed = true
-      }
-    }
     this.tabs.set(tabId, { sessionId, windowId, urlKey, updatedAt: this.now() })
-    changed = true
-    if (changed) this.persist()
-    return changed
+    this.liveTabs.set(tabId, { ...tab })
+    this.persist()
+    return true
+  }
+
+  /** All pages belonging to one conversation, in their association order. */
+  list(sessionId: string): Array<PageContextTab & { id: number }> {
+    return [...this.tabs.entries()]
+      .filter(([, context]) => context.sessionId === sessionId)
+      .map(([id, context]) => ({
+        id, windowId: context.windowId, url: context.urlKey,
+        ...this.liveTabs.get(id),
+      }))
+  }
+
+  /** Refresh page metadata without changing its conversation. */
+  observeTab(tab: PageContextTab): boolean {
+    if (tab.id === undefined || !this.tabs.has(tab.id)) return false
+    const context = this.tabs.get(tab.id)!
+    this.liveTabs.set(tab.id, { ...tab })
+    if (context.windowId !== tab.windowId) {
+      context.windowId = tab.windowId
+      this.persist()
+    }
+    return true
+  }
+
+  /** Hydrate live metadata and prune tabs closed while the worker was asleep. */
+  reconcile(tabs: PageContextTab[]): void {
+    const live = new Map(tabs.map(tab => [tab.id, tab]))
+    for (const id of this.tabs.keys()) {
+      const tab = live.get(id)
+      if (tab === undefined) this.removeTab(id)
+      else this.observeTab(tab)
+    }
   }
 
   /** Return a session only for the exact live tab and window. */
@@ -88,6 +115,7 @@ export class PageSessionContextTracker {
   removeTab(tabValue: unknown): boolean {
     const tabId = normalizeId(tabValue)
     if (tabId === undefined || !this.tabs.delete(tabId)) return false
+    this.liveTabs.delete(tabId)
     this.persist()
     return true
   }
@@ -100,6 +128,9 @@ export class PageSessionContextTracker {
     const context = this.tabs.get(removedTabId)
     if (context === undefined) return false
     this.tabs.delete(removedTabId)
+    const live = this.liveTabs.get(removedTabId)
+    this.liveTabs.delete(removedTabId)
+    if (live !== undefined) this.liveTabs.set(addedTabId, { ...live, id: addedTabId })
     this.tabs.delete(addedTabId)
     this.tabs.set(addedTabId, context)
     this.persist()
@@ -146,11 +177,6 @@ function parseStoredContexts(value: unknown): Map<number, PageSessionContext> {
       ? context.updatedAt
       : undefined
     if (sessionId === undefined || windowId === undefined || urlKey === undefined || updatedAt === undefined) continue
-    const duplicate = [...restored.entries()].find(([, candidate]) => candidate.sessionId === sessionId)
-    if (duplicate !== undefined) {
-      if (duplicate[1].updatedAt > updatedAt) continue
-      restored.delete(duplicate[0])
-    }
     restored.set(tabId, { sessionId, windowId, urlKey, updatedAt })
   }
   return restored

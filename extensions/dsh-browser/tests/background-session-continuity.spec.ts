@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PAGE_SESSION_CONTEXT_STORAGE_KEY } from '../src/background/session-continuity.ts'
+import type { TabAffinityState } from '../src/background/tab-affinity.ts'
 
 function chromeEvent<T extends unknown[]>() {
   const listeners = new Set<(...args: T) => void>()
@@ -44,6 +45,19 @@ function mockChrome(initialTabs: chrome.tabs.Tab[], storedContext?: unknown) {
   const onConnect = chromeEvent<[chrome.runtime.Port]>()
   const onRemoved = chromeEvent<[number]>()
   const onReplaced = chromeEvent<[number, number]>()
+  const onCreated = chromeEvent<[chrome.tabs.Tab]>()
+  const onActivated = chromeEvent<[{ tabId: number; windowId: number }]>()
+  const onUpdated = chromeEvent<[number, chrome.tabs.TabChangeInfo, chrome.tabs.Tab]>()
+  const onCreatedNavigationTarget = chromeEvent<[{ sourceTabId: number; tabId: number }]>()
+  const update = vi.fn(async (tabId: number, properties: chrome.tabs.UpdateProperties) => {
+    const current = tabs.get(tabId)!
+    if (properties.active) {
+      for (const entry of tabs.values()) if (entry.windowId === current.windowId) entry.active = false
+    }
+    Object.assign(current, properties)
+    if (properties.active) onActivated.emit({ tabId, windowId: current.windowId })
+    return current
+  })
   const setPanelOptions = vi.fn(async () => {})
   const sessionData: Record<string, unknown> = storedContext === undefined
     ? {}
@@ -76,6 +90,7 @@ function mockChrome(initialTabs: chrome.tabs.Tab[], storedContext?: unknown) {
       },
     },
     tabs: {
+      update,
       get: vi.fn(async (tabId: number) => {
         const entry = tabs.get(tabId)
         if (entry === undefined) throw new Error('No tab')
@@ -84,19 +99,22 @@ function mockChrome(initialTabs: chrome.tabs.Tab[], storedContext?: unknown) {
       query,
       sendMessage: vi.fn(async (_tabId: number, message: { type?: string }) =>
         message.type === 'DSH_ACTION' ? { ok: true, result: { text: 'Page snapshot' } } : undefined),
-      onActivated: chromeEvent<[{ tabId: number; windowId: number }]>(),
-      onUpdated: chromeEvent<[number, chrome.tabs.TabChangeInfo, chrome.tabs.Tab]>(),
+      onCreated,
+      onActivated,
+      onUpdated,
       onReplaced,
       onRemoved,
     },
-    webNavigation: { onCommitted: chromeEvent<[{ tabId: number; frameId: number }]>() },
+    webNavigation: { onCommitted: chromeEvent<[{ tabId: number; frameId: number }]>(), onCreatedNavigationTarget },
     windows: {
+      update: vi.fn(async () => ({})),
       WINDOW_ID_NONE: -1,
       onFocusChanged: chromeEvent<[number]>(),
       onRemoved: chromeEvent<[number]>(),
     },
   } as unknown as typeof chrome)
-  return { onConnect, onRemoved, onReplaced, query, sessionData, sessionSet, setPanelOptions, tabs }
+  return { onConnect, onRemoved, onReplaced, onCreated, onActivated, onUpdated, onCreatedNavigationTarget,
+    update, query, sessionData, sessionSet, setPanelOptions, tabs }
 }
 
 function resumeHints(postMessage: ReturnType<typeof vi.fn>): Array<string | null> {
@@ -104,6 +122,11 @@ function resumeHints(postMessage: ReturnType<typeof vi.fn>): Array<string | null
     .map(([message]) => message as { type?: string; sessionId?: string | null })
     .filter((message) => message.type === 'session.resume-hint')
     .map((message) => message.sessionId ?? null)
+}
+
+function latestAffinity(panel: ReturnType<typeof panelPort>): TabAffinityState | undefined {
+  return panel.postMessage.mock.calls.map(([message]) => message)
+    .filter(message => message.type === 'tab-affinity').at(-1)?.state
 }
 
 async function loadBackground(chromeMock: ReturnType<typeof mockChrome>) {
@@ -118,6 +141,140 @@ afterEach(() => {
 })
 
 describe('background contextual session continuity', () => {
+  it('shares a conversation across linked pages and switches the browser from either panel', async () => {
+    const chromeMock = mockChrome([tab(1, 'https://example.com/list'),
+      { ...tab(2, 'https://example.com/detail'), active: false },
+      { ...tab(9, 'https://unrelated.example/'), active: false }], {
+      version: 1, tabs: {
+        1: { sessionId: 'shared-session', windowId: 1, urlKey: 'https://example.com/list', updatedAt: 1 },
+        2: { sessionId: 'shared-session', windowId: 1, urlKey: 'https://example.com/detail', updatedAt: 2 },
+      },
+    })
+    await loadBackground(chromeMock)
+    const first = panelPort(1)
+    chromeMock.onConnect.emit(first.port)
+    first.onMessage.emit({ type: 'panel.window', windowId: 1 })
+    first.onMessage.emit({ type: 'session.active', sessionId: 'shared-session', isNew: true })
+    await vi.waitFor(() => expect(latestAffinity(first)?.tabs?.map(tab => tab.tabId)).toEqual([1, 2]))
+    expect(latestAffinity(first)?.controlled?.tabId).toBe(1)
+
+    const second = panelPort(2)
+    chromeMock.onConnect.emit(second.port)
+    second.onMessage.emit({ type: 'panel.window', windowId: 1 })
+    await vi.waitFor(() => expect(second.postMessage).toHaveBeenCalledWith({
+      type: 'session.resume-hint', sessionId: 'shared-session', shared: true,
+    }))
+    second.onMessage.emit({ type: 'session.active', sessionId: 'shared-session' })
+    await vi.waitFor(() => expect(latestAffinity(second)?.tabs?.map(tab => tab.tabId)).toEqual([1, 2]))
+
+    first.onMessage.emit({ type: 'tab-affinity.response', decision: 'show-tab',
+      revision: latestAffinity(first)!.revision, sessionId: 'shared-session', tabId: 2 })
+    await vi.waitFor(() => {
+      expect(chromeMock.update).toHaveBeenCalledWith(2, { active: true })
+      expect(latestAffinity(first)?.controlled?.tabId).toBe(2)
+      expect(latestAffinity(second)?.visibleTabId).toBe(2)
+    })
+    expect(chrome.sidePanel.open).toHaveBeenCalledWith({ tabId: 2 })
+
+    // Unrelated browser tabs cannot be activated through this conversation's strip.
+    chromeMock.update.mockClear()
+    first.onMessage.emit({ type: 'tab-affinity.response', decision: 'show-tab',
+      revision: latestAffinity(first)!.revision, sessionId: 'shared-session', tabId: 9 })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(chromeMock.update).not.toHaveBeenCalled()
+
+    // Switching browser tabs does not change either panel's conversation.
+    await chromeMock.update(1, { active: true })
+    await vi.waitFor(() => {
+      expect(latestAffinity(first)?.controlled?.tabId).toBe(1)
+      expect(latestAffinity(second)?.visibleTabId).toBe(1)
+    })
+    expect(latestAffinity(second)?.tabs?.map(tab => tab.tabId)).toEqual([1, 2])
+
+    await chromeMock.update(2, { active: true })
+    await vi.waitFor(() => expect(latestAffinity(first)?.controlled?.tabId).toBe(2))
+    chromeMock.tabs.delete(2)
+    chromeMock.onRemoved.emit(2)
+    await vi.waitFor(() => {
+      expect(latestAffinity(first)?.tabs?.map(tab => tab.tabId)).toEqual([1])
+      expect(latestAffinity(first)?.controlled?.tabId).toBe(1)
+    })
+    expect(chromeMock.sessionData[PAGE_SESSION_CONTEXT_STORAGE_KEY]).toMatchObject({
+      tabs: { 1: { sessionId: 'shared-session' } },
+    })
+  })
+
+  it.each([
+    { label: 'a fresh tab', url: 'https://unrelated.example/', openerTabId: undefined },
+    { label: 'a fresh tab retaining opener metadata', url: 'https://example.com/detail', openerTabId: 1 },
+    { label: 'a duplicate of the same URL', url: 'https://example.com/list', openerTabId: 1 },
+  ])('starts an independent conversation for $label', async ({ url, openerTabId }) => {
+    const chromeMock = mockChrome([tab(1, 'https://example.com/list')])
+    await loadBackground(chromeMock)
+    const panel = panelPort(1)
+    chromeMock.onConnect.emit(panel.port)
+    panel.onMessage.emit({ type: 'session.active', sessionId: 'shared', isNew: true })
+    await vi.waitFor(() => expect(latestAffinity(panel)?.tabs).toHaveLength(1))
+    const child = { ...tab(2, 'about:blank'), active: false, openerTabId }
+    chromeMock.tabs.set(2, child)
+    chromeMock.onCreated.emit(child)
+    const loaded = { ...child, title: 'Manually opened page', url }
+    chromeMock.tabs.set(2, loaded)
+    chromeMock.onUpdated.emit(2, { title: loaded.title, url: loaded.url }, loaded)
+    await chromeMock.update(2, { active: true })
+    const second = panelPort(2)
+    chromeMock.onConnect.emit(second.port)
+    second.onMessage.emit({ type: 'panel.window', windowId: 1 })
+    await vi.waitFor(() => expect(resumeHints(second.postMessage)).toContain(null))
+    second.onMessage.emit({ type: 'session.active', sessionId: 'manual-session', isNew: true })
+    await vi.waitFor(() => {
+      expect(latestAffinity(panel)?.tabs?.map(tab => tab.tabId)).toEqual([1])
+      expect(latestAffinity(second)?.tabs?.map(tab => tab.tabId)).toEqual([2])
+    })
+    expect(resumeHints(second.postMessage)).not.toContain('shared')
+    expect(chromeMock.sessionData[PAGE_SESSION_CONTEXT_STORAGE_KEY]).toMatchObject({
+      tabs: { 1: { sessionId: 'shared' }, 2: { sessionId: 'manual-session' } },
+    })
+    const updated = { ...loaded, title: 'Updated manual page' }
+    chromeMock.tabs.set(2, updated)
+    chromeMock.onUpdated.emit(2, { title: updated.title }, updated)
+    await vi.waitFor(() => expect(latestAffinity(second)?.tabs?.[0]?.title).toBe('Updated manual page'))
+  })
+
+  it.each([
+    { label: 'a foreground link', active: true, openerTabId: 1 },
+    { label: 'a background link', active: false, openerTabId: 1 },
+    { label: 'a link without opener metadata', active: true, openerTabId: undefined },
+  ])('records $label in its source conversation without a running Tandix action', async ({ active, openerTabId }) => {
+    const chromeMock = mockChrome([tab(1, 'https://example.com/list')])
+    await loadBackground(chromeMock)
+    const source = panelPort(1)
+    chromeMock.onConnect.emit(source.port)
+    source.onMessage.emit({ type: 'session.active', sessionId: 'source-session', isNew: true })
+    await vi.waitFor(() => expect(latestAffinity(source)?.tabs).toHaveLength(1))
+
+    const child = { ...tab(2, 'https://example.com/detail'), active, openerTabId }
+    chromeMock.tabs.set(2, child)
+    chromeMock.onCreated.emit(child)
+    if (active) await chromeMock.update(2, { active: true })
+    chromeMock.onCreatedNavigationTarget.emit({ sourceTabId: 1, tabId: 2 })
+    // A destination panel may connect before the async membership update finishes.
+    const destination = panelPort(2)
+    chromeMock.onConnect.emit(destination.port)
+    destination.onMessage.emit({ type: 'panel.window', windowId: 1 })
+    await vi.waitFor(() => {
+      expect(latestAffinity(source)?.tabs?.map(tab => tab.tabId)).toEqual([1, 2])
+      expect(destination.postMessage).toHaveBeenCalledWith({
+        type: 'session.resume-hint', sessionId: 'source-session', shared: true,
+      })
+    })
+    destination.onMessage.emit({ type: 'session.active', sessionId: 'source-session' })
+    await vi.waitFor(() => expect(latestAffinity(destination)?.tabs?.map(tab => tab.tabId)).toEqual([1, 2]))
+    expect(chromeMock.sessionData[PAGE_SESSION_CONTEXT_STORAGE_KEY]).toMatchObject({
+      tabs: { 1: { sessionId: 'source-session' }, 2: { sessionId: 'source-session' } },
+    })
+  })
+
   it('disables the global Chrome panel and configures a panel instance per tab', async () => {
     const chromeMock = mockChrome([tab(1, 'https://example.com/one'), tab(2, 'https://example.com/two')])
     await loadBackground(chromeMock)
@@ -223,7 +380,7 @@ describe('background contextual session continuity', () => {
     })
   })
 
-  it('moves the recovery binding when the user explicitly rebinds the session', async () => {
+  it('retains the original page when the user associates another tab', async () => {
     const first = tab(1, 'https://example.com/first')
     const chromeMock = mockChrome([first])
     await loadBackground(chromeMock)
@@ -245,7 +402,7 @@ describe('background contextual session continuity', () => {
       })
     })
     expect((chromeMock.sessionData[PAGE_SESSION_CONTEXT_STORAGE_KEY] as { tabs: Record<string, unknown> }).tabs)
-      .not.toHaveProperty('1')
+      .toHaveProperty('1')
   })
 
   it('migrates replacement tabs and removes closed-tab recovery contexts', async () => {
