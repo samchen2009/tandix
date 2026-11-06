@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { checkConnection } from '../runtime/connection-check.mjs'
 import { nativeEnvironment } from '../runtime/native-host.mjs'
 import { stopAgentProcess } from '../runtime/runtime-discovery.mjs'
+import { ACP_AGENTS } from '../runtime/acp-agents.mjs'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const cli = join(root, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js')
@@ -83,6 +84,7 @@ test('real dsh starts on demand through the native protocol and accepts hello pl
   copyFileSync(join(root, 'scripts', 'runtime', 'native-host.mjs'), host)
   copyFileSync(join(root, 'scripts', 'runtime', 'runtime-discovery.mjs'), join(hostDir, 'runtime-discovery.mjs'))
   copyFileSync(join(root, 'scripts', 'runtime', 'skills-store.mjs'), join(hostDir, 'skills-store.mjs'))
+  copyFileSync(join(root, 'scripts', 'runtime', 'acp-agents.mjs'), join(hostDir, 'acp-agents.mjs'))
   const result = await checkConnection({ executable: process.execPath, args: [host], backend: 'dsh',
     runtimePath: realpathSync(cli), extensionId, env, timeoutMs: 90_000 }).catch(error => {
       let detail = ''
@@ -93,7 +95,7 @@ test('real dsh starts on demand through the native protocol and accepts hello pl
   assert.deepEqual(result.checks, ['native-messaging', 'backend-identity', 'websocket-hello', 'session-list'])
 })
 
-for (const backend of ['workbuddy', 'cursor']) test(`${backend} native connection checks reach a real ACP process and verify a session without creating Tandix history`, { timeout: 20_000 }, async t => {
+for (const backend of ['workbuddy', 'cursor', ...Object.keys(ACP_AGENTS)]) test(`${backend} native connection checks reach a real ACP process and verify a session without creating Tandix history`, { timeout: 20_000 }, async t => {
   const temp = mkdtempSync(join(tmpdir(), 'tandix ACP native '))
   t.after(() => rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }))
   const home = join(temp, 'home')
@@ -107,13 +109,16 @@ for (const backend of ['workbuddy', 'cursor']) test(`${backend} native connectio
     writeFileSync(agent, `@echo off\r\n"${process.execPath}" "${fixture}" %*\r\n`)
   }
   writeFileSync(join(hostDir, 'config.json'), JSON.stringify({ cliPath: cli, workspace: root, extensionId,
-    searchPath: process.env.PATH, [backend === 'cursor' ? 'cursorAgentPath' : 'workbuddyAgentPath']: agent }))
+    searchPath: process.env.PATH, ...(Object.hasOwn(ACP_AGENTS, backend) ? { acpAgentPaths: { [backend]: agent } }
+      : { [backend === 'cursor' ? 'cursorAgentPath' : 'workbuddyAgentPath']: agent }) }))
   const host = join(hostDir, 'host.mjs')
   copyFileSync(join(root, 'scripts', 'runtime', 'native-host.mjs'), host)
   copyFileSync(join(root, 'scripts', 'runtime', 'runtime-discovery.mjs'), join(hostDir, 'runtime-discovery.mjs'))
   copyFileSync(join(root, 'scripts', 'runtime', 'skills-store.mjs'), join(hostDir, 'skills-store.mjs'))
+  copyFileSync(join(root, 'scripts', 'runtime', 'acp-agents.mjs'), join(hostDir, 'acp-agents.mjs'))
   const result = await checkConnection({ executable: process.execPath, args: [host], backend,
-    runtimePath: realpathSync(cli), extensionId, env: { ...process.env, HOME: home, USERPROFILE: home }, timeoutMs: 15_000 })
+    runtimePath: realpathSync(cli), extensionId, env: { ...process.env, HOME: home, USERPROFILE: home,
+      TANDIX_TEST_ACP_BACKEND: Object.hasOwn(ACP_AGENTS, backend) ? backend : '' }, timeoutMs: 15_000 })
   assert.equal(result.status, 'ready')
   assert.ok(result.checks.includes('acp-session-authentication'))
   const { existsSync } = await import('node:fs')

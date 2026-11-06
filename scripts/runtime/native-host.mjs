@@ -14,6 +14,7 @@ import { delimiter, dirname, isAbsolute, join, parse, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { findCodex, nativeHostWrapper, stopAgentProcess } from './runtime-discovery.mjs'
 import { handleSkillsRequest } from './skills-store.mjs'
+import { ACP_AGENTS, acpAgentPaths, findAcpAgent, isAdditionalAcpAgent } from './acp-agents.mjs'
 
 const HOST_NAME = 'io.traceforge.bridge'
 const HOST_DIR = join(homedir(), '.dsh', 'traceforge-native-host')
@@ -158,8 +159,10 @@ async function installCodex() {
   mkdirSync(HOST_DIR, { recursive: true, mode: 0o700 })
   copyFileSync(SOURCE_PATH, HOST_PATH)
   copyFileSync(DISCOVERY_SOURCE_PATH, join(HOST_DIR, 'runtime-discovery.mjs'))
+  copyFileSync(join(dirname(SOURCE_PATH), 'acp-agents.mjs'), join(HOST_DIR, 'acp-agents.mjs'))
   copyFileSync(join(dirname(SOURCE_PATH), 'skills-store.mjs'), join(HOST_DIR, 'skills-store.mjs'))
   writeFileSync(CONFIG_PATH, JSON.stringify({ mode: 'codex-only', runtimePath, workspace,
+    acpAgentPaths: acpAgentPaths(),
     codexHome: process.env.CODEX_HOME ?? null,
     searchPath: process.env.PATH ?? '', dshHome: process.env.DSH_HOME ?? null,
     codexPath: findCodex(),
@@ -228,8 +231,10 @@ function install() {
   mkdirSync(HOST_DIR, { recursive: true, mode: 0o700 })
   copyFileSync(SOURCE_PATH, HOST_PATH)
   copyFileSync(DISCOVERY_SOURCE_PATH, join(HOST_DIR, 'runtime-discovery.mjs'))
+  copyFileSync(join(dirname(SOURCE_PATH), 'acp-agents.mjs'), join(HOST_DIR, 'acp-agents.mjs'))
   copyFileSync(join(dirname(SOURCE_PATH), 'skills-store.mjs'), join(HOST_DIR, 'skills-store.mjs'))
   writeFileSync(CONFIG_PATH, JSON.stringify({ cliPath, workspace,
+    acpAgentPaths: acpAgentPaths(),
     reuseExternalDsh: false,
     codexHome: process.env.CODEX_HOME ?? null,
     searchPath: process.env.PATH ?? '', dshHome: process.env.DSH_HOME ?? null,
@@ -246,6 +251,7 @@ let ownedChildSandboxDirectory = ''
 let codexBridge = null
 let workbuddyBridge = null
 let cursorBridge = null
+let extraAcpBridge = null
 let automaticBridge = null
 let stopping = false
 let ensureQueue = Promise.resolve()
@@ -283,6 +289,7 @@ function shutdown(code = 0) {
   codexBridge?.close()
   workbuddyBridge?.close()
   cursorBridge?.close()
+  extraAcpBridge?.close()
   process.exit(code)
 }
 
@@ -309,7 +316,7 @@ function send(message) {
   process.stdout.write(Buffer.concat([header, payload]))
 }
 
-export const AUTO_AGENT_PRIORITY = ['codex', 'cursor', 'workbuddy', 'dsh']
+export const AUTO_AGENT_PRIORITY = ['codex', 'cursor', 'workbuddy', ...Object.keys(ACP_AGENTS), 'dsh']
 
 export async function selectAutomaticAgent(connect, reportFailure = () => {}) {
   const failures = []
@@ -331,7 +338,8 @@ async function ensureBridge(preference = 'auto', requestedSandboxDirectory = '')
     const ready = selected?.backend === 'codex' ? codexBridge?.isReady
       : selected?.backend === 'cursor' ? cursorBridge?.isReady
         : selected?.backend === 'workbuddy' ? workbuddyBridge?.isReady
-          : selected?.backend === 'dsh' && ownedChild?.exitCode === null
+          : isAdditionalAcpAgent(selected?.backend) ? extraAcpBridge?.backend === selected.backend && extraAcpBridge?.isReady
+            : selected?.backend === 'dsh' && ownedChild?.exitCode === null
     if (selected?.sandboxDirectory === sandboxDirectory && ready) return selected.url
     automaticBridge = null
     const result = await selectAutomaticAgent(backend => ensureBridge(backend, sandboxDirectory),
@@ -340,6 +348,26 @@ async function ensureBridge(preference = 'auto', requestedSandboxDirectory = '')
     return result.url
   }
   automaticBridge = null
+  if (isAdditionalAcpAgent(preference)) {
+    if (extraAcpBridge?.backend === preference && extraAcpBridge.isReady && extraAcpBridge.sandboxDirectory === sandboxDirectory) return extraAcpBridge.wsUrl
+    extraAcpBridge?.close(); extraAcpBridge = null
+    codexBridge?.close(); codexBridge = null
+    cursorBridge?.close(); cursorBridge = null
+    workbuddyBridge?.close(); workbuddyBridge = null
+    stopOwnedChild()
+    const config = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'))
+    const agent = ACP_AGENTS[preference]
+    const savedPath = config.acpAgentPaths?.[preference]
+    const agentPath = findAcpAgent(preference, { env: { ...process.env,
+      ...(typeof savedPath === 'string' ? { [agent.envKey]: savedPath } : {}) } })
+    if (!agentPath) throw new Error(`${agent.label} CLI was not found. Install it and complete login with "${agent.login}", or set ${agent.envKey} and reinstall the companion.`)
+    const { ExtraAcpBridge } = await import(pathToFileURL(join(config.workspace, 'scripts', 'runtime', 'extra-acp-bridge.mjs')).href)
+    extraAcpBridge = await ExtraAcpBridge.open({ backend: preference, agentPath, nodePath: process.execPath,
+      runtimePath: config.runtimePath ?? config.cliPath, workspace: config.workspace, hostDir: HOST_DIR,
+      extensionId: config.extensionId, sandboxDirectory })
+    return extraAcpBridge.wsUrl
+  }
+  extraAcpBridge?.close(); extraAcpBridge = null
   if (preference === 'cursor' && cursorBridge?.isReady && cursorBridge.sandboxDirectory === sandboxDirectory) return cursorBridge.wsUrl
   if (preference !== 'cursor') { cursorBridge?.close(); cursorBridge = null }
   if (preference === 'cursor') {
@@ -500,7 +528,7 @@ function runHost() {
         })
         continue
       }
-      if (message?.type !== 'ensure' || !['auto', 'codex', 'cursor', 'workbuddy', 'dsh'].includes(message.backend ?? 'auto')) {
+      if (message?.type !== 'ensure' || !['auto', ...AUTO_AGENT_PRIORITY].includes(message.backend ?? 'auto')) {
         send({ type: 'error', message: 'Unsupported native request.' }); continue
       }
       ensureQueue = ensureQueue.then(() => ensureBridge(message.backend ?? 'auto', message.sandboxDirectory)).then(url => {

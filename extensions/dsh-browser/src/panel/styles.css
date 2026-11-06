@@ -1357,6 +1357,36 @@ textarea:focus-visible {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 
+.md .mermaid-diagram {
+  max-width: 100%;
+  margin: 9px 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: #fff;
+  overflow-x: auto;
+}
+
+.md .mermaid-diagram > img {
+  display: block;
+  max-width: none;
+}
+
+.md .mermaid-diagram summary {
+  margin-top: 8px;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: calc(11px * var(--ui-scale));
+}
+
+.mermaid-render-host {
+  position: fixed;
+  left: -100000px;
+  top: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 .ai-progress {
   display: flex;
   min-height: 28px;

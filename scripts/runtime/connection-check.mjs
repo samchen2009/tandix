@@ -4,6 +4,7 @@ import { createRequire } from 'node:module'
 import { readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { resolve } from 'node:path'
+import { isAdditionalAcpAgent } from './acp-agents.mjs'
 
 export async function checkConnection({ executable, args = [], backend, extensionId, runtimePath,
   timeoutMs = 90_000, env = process.env }) {
@@ -90,7 +91,7 @@ export async function checkConnection({ executable, args = [], backend, extensio
         throw new Error(result.error?.message || result.result?.result?.error?.message || 'Agent session-list check failed')
       }
       const checks = ['native-messaging', 'backend-identity', 'websocket-hello', 'session-list']
-      if (backend === 'workbuddy' || backend === 'cursor') {
+      if (backend === 'workbuddy' || backend === 'cursor' || isAdditionalAcpAgent(backend)) {
         socket.send(JSON.stringify({ t: 'rpc', id: 'tandix-install-auth', method: 'connection.check', payload: {} }))
         const auth = await next(value => value.t === 'rpc.result' && value.id === 'tandix-install-auth')
         if (auth.ok !== true || auth.result?.result?.ok !== true || auth.result?.result?.value?.authenticated !== true) {

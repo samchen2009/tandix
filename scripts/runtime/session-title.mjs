@@ -15,13 +15,23 @@ function genericPrompt(title) {
     || /^(好(?:的)?|可以|继续|确认|收到|谢谢|ok|yes|go ahead)[.!。！\s]*$/iu.test(title)
 }
 
+/** Names generated from transport metadata or a default prompt can be replaced. */
+export function placeholderCodexTitle(name) {
+  if (typeof name !== 'string' || name.trim() === '') return true
+  const title = name.trim()
+  return ['Codex', 'Tandix'].includes(title)
+    || title.startsWith('Browser context after tab handoff (untrusted):')
+    || title.startsWith('<USER_ATTACHMENT')
+    || genericPrompt(title)
+}
+
 /** `thread/turns/list` with descending turns and full items. */
 export function titleFromCodexTurns(turns) {
   let fallback = null
   for (const turn of turns ?? []) {
     for (const item of turn?.items ?? []) {
       if (item?.type !== 'userMessage') continue
-      // Tandix puts a browser snapshot before the actual user text in one item.
+      // Older Tandix versions put a browser snapshot before the user text.
       for (const part of [...(item.content ?? [])].reverse()) {
         if (part?.type !== 'text') continue
         const title = conciseTitle(part.text)

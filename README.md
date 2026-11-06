@@ -4,6 +4,9 @@ Let an agent work in the browser you already use, then turn reviewed workflows i
 
 English | [中文](README.zh.md)
 
+
+Additional local ACP agents: **Kimi Code, Qwen Code, OpenCode, and Gemini CLI**. Install and authenticate the chosen CLI, rebuild/reinstall the Tandix companion, reload the extension, and select the agent in the side panel. See [setup, executable overrides, capabilities, and validation limits](docs/local-acp-agents.md). Subscription eligibility depends on the CLI provider and account configuration.
+
 ## Features
 
 - Chat in the Chrome side panel, read pages, fill forms, switch tabs, and work across websites.
@@ -39,7 +42,7 @@ Alternatively, download the [macOS script](scripts/install/macos.sh) or [Windows
 
 On the first install, enable **Developer mode** in `chrome://extensions`, choose **Load unpacked**, and select the printed folder (normally `~/.dsh/browser-extension`). Windows waits for extension loading, registers the native companion and checks native messaging, WebSocket authentication and session listing. WorkBuddy also gets an ACP session authentication check. If sign-in is needed, the wizard opens the CLI for you to complete it. It never supplies your account passwords or model credentials.
 
-Windows prepares Codex, WorkBuddy and dsh, detects an existing Cursor CLI, and selects the first ready agent in this order: **Codex → Cursor → WorkBuddy → dsh**. Install and sign in to Cursor CLI separately. Reload the extension and choose Automatic or a specific agent. Configure a provider/model in Tandix Settings for dsh if needed. **No `pnpm start` terminal is required**. Add `-Agent workbuddy` to require WorkBuddy, or `-Agents dsh` to prepare only dsh. The macOS entry point automatically registers or updates the native companion after building. On first install, load the Chrome extension when prompted and return to Terminal to continue; no separate `native:install` command is needed.
+Windows prepares Codex, WorkBuddy and dsh, detects an existing Cursor CLI, and selects the first ready agent in this order: **Codex → Cursor → WorkBuddy → Kimi Code → Qwen Code → OpenCode → Gemini CLI → dsh**. Install and sign in to Cursor CLI separately. Reload the extension and choose Automatic or a specific agent. Configure a provider/model in Tandix Settings for dsh if needed. **No `pnpm start` terminal is required**. Add `-Agent workbuddy` to require WorkBuddy, or `-Agents dsh` to prepare only dsh. The macOS entry point automatically registers or updates the native companion after building. On first install, load the Chrome extension when prompted and return to Terminal to continue; no separate `native:install` command is needed.
 
 Windows logs and per-agent results are saved to `%LOCALAPPDATA%\Tandix\install.log` and `%LOCALAPPDATA%\Tandix\install-report.json`. A failed selected agent returns a failed installation status. Other agent failures are explicitly reported. If Chrome cannot be installed through the package manager, the wizard opens its official download page and waits for installation.
 
@@ -118,7 +121,7 @@ The installer builds the browser bridge and extension. Then:
 1. Open `chrome://extensions` and enable **Developer mode**.
 2. Choose **Load unpacked** and select the printed directory, normally `~/.dsh/browser-extension`. Press `Cmd+Shift+G` in the picker to paste the path.
 3. Run `pnpm native:install` from the repository directory to register the companion. Reload the extension and accept its native-messaging permission.
-4. Open a regular webpage, click Tandix, and select an agent. Automatic tries Codex, Cursor, WorkBuddy, then dsh. An explicit choice never falls back to another agent.
+4. Open a regular webpage, click Tandix, and select an agent. Automatic tries Codex, Cursor, WorkBuddy, Kimi Code, Qwen Code, OpenCode, Gemini CLI, then dsh. An explicit choice never falls back to another agent.
 
 Alternatively, run `bash ./安装网页助手.command` in the cloned checkout and follow the loading and registration prompts.
 
@@ -134,7 +137,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\install\source-win
 
 Alternatively, extract GitHub's source ZIP and double-click `安装网页助手.cmd`. Both entry points use the complete setup wizard: dependencies, source build, plugin registration, native companion registration and actual connection checks.
 
-Follow the first-time Chrome extension-loading and sign-in prompts, then reload the extension. No separate `pnpm native:install` command or persistent `pnpm start` terminal is required. The wizard selects the first ready agent in Codex, Cursor, WorkBuddy, dsh order. Configure your own model credentials in Tandix Settings for dsh. WorkBuddy uses a compatible ACP CLI, with separate sign-in from the desktop app; see [setup](docs/workbuddy-agent.md).
+Follow the first-time Chrome extension-loading and sign-in prompts, then reload the extension. No separate `pnpm native:install` command or persistent `pnpm start` terminal is required. The wizard selects the first ready agent in Codex, Cursor, WorkBuddy, Kimi Code, Qwen Code, OpenCode, Gemini CLI, dsh order. Configure your own model credentials in Tandix Settings for dsh. WorkBuddy uses a compatible ACP CLI, with separate sign-in from the desktop app; see [setup](docs/workbuddy-agent.md).
 
 To require a working WorkBuddy connection:
 

@@ -43,7 +43,7 @@ import { BRIDGE_CONFIG_PATH, BRIDGE_PATH } from '@yuxianglin/dsh-bridge-browser/
 import { BridgeClient, type BridgeState } from './bridge.ts'
 import { ensureNativeBridge, nativeBridgeError, nativePanelOpened, nativePanelsClosed } from './native-host.ts'
 import { createRpc } from './rpc.ts'
-import { agentBackend, agentPreference, type AgentBackend, type AgentPreference } from '../agent-backend.ts'
+import { agentBackend, agentLabel, agentPreference, type AgentBackend, type AgentPreference } from '../agent-backend.ts'
 import {
   dispatchOpenTab,
   dispatchToolCall,
@@ -1761,7 +1761,7 @@ async function startBridge(): Promise<string | undefined> {
   broadcastStatus()
   try {
     let url = settings.bridgeUrl
-    const explicitLocalAgent = settings.agentBackend === 'codex' || settings.agentBackend === 'cursor' || settings.agentBackend === 'workbuddy'
+    const explicitLocalAgent = settings.agentBackend !== 'auto' && settings.agentBackend !== 'dsh'
     let autoLocal = url === '' || explicitLocalAgent
     if (!autoLocal) {
       try { autoLocal = new URL(url).hostname === '127.0.0.1' } catch { /* Preserve invalid manual URL for the existing error path. */ }
@@ -1780,10 +1780,10 @@ async function startBridge(): Promise<string | undefined> {
     if (url === '') {
       bridge = null
       rpc = null
-      if (settings.agentBackend === 'codex' || settings.agentBackend === 'cursor' || settings.agentBackend === 'workbuddy') activeBackend = settings.agentBackend
+      if (settings.agentBackend !== 'auto') activeBackend = settings.agentBackend
       broadcastStatus()
       if (settings.agentBackend !== 'auto') {
-        const label = settings.agentBackend === 'cursor' ? 'Cursor' : settings.agentBackend === 'workbuddy' ? 'WorkBuddy' : settings.agentBackend === 'codex' ? 'Codex' : 'dsh'
+        const label = agentLabel(settings.agentBackend, getUiLocale())
         const detail = nativeBridgeError() ?? 'The native companion is unavailable.'
         return connectionFailed(getUiLocale() === 'zh'
           ? `${label} 连接失败。请重新运行 Tandix 安装向导完成依赖安装和本机连接检查，再重新加载扩展。详细原因：${detail}`

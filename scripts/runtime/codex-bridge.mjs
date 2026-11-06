@@ -11,7 +11,7 @@ import { homedir } from 'node:os'
 import { codexConfiguration } from './agent-configuration.mjs'
 import { LarkAuth } from './lark-auth.mjs'
 import { TANDIX_BROWSER_INSTRUCTIONS } from './browser-guidance.mjs'
-import { titleFromCodexTurns } from './session-title.mjs'
+import { placeholderCodexTitle, titleFromCodexTurns } from './session-title.mjs'
 import { stopAgentProcess } from './runtime-discovery.mjs'
 import { WebTaskStore } from './web-task-store.mjs'
 import { ARTIFACT_DELIVERY_INSTRUCTIONS, readSessionArtifact } from './artifacts.mjs'
@@ -141,7 +141,7 @@ export class CodexBridge {
     this.proc.on('exit', () => this.failAll(new Error('Codex app-server exited')))
     createInterface({ input: this.proc.stdout }).on('line', line => this.receiveCodex(line))
     await this.call('initialize', {
-      clientInfo: { name: 'tandix', title: 'Tandix', version: '0.2.6' },
+      clientInfo: { name: 'tandix', title: 'Tandix', version: '0.2.7' },
     }, 8_000)
     this.writeCodex({ method: 'initialized', params: {} })
     const auth = await this.call('account/read', { refreshToken: false }, 8_000)
@@ -349,6 +349,19 @@ export class CodexBridge {
     } catch (error) {
       // Older Codex builds may not expose thread sections. Chat must still work.
       process.stderr.write(`Tandix: could not group Codex session: ${errorText(error)}\n`)
+    }
+  }
+
+  async nameSession(sessionId, title, thread) {
+    if (placeholderCodexTitle(title)) return
+    try {
+      // Read the durable name so a title edited in Codex stays authoritative.
+      thread ??= (await this.call('thread/read', { threadId: sessionId, includeTurns: false }, 5_000))?.thread
+      if (!thread || !placeholderCodexTitle(thread.name)) return
+      await this.call('thread/name/set', { threadId: sessionId, name: title }, 5_000)
+    } catch (error) {
+      // Naming is optional on older app-servers and must never fail a prompt.
+      process.stderr.write(`Tandix: could not name Codex session: ${errorText(error)}\n`)
     }
   }
 
@@ -1026,7 +1039,8 @@ export class CodexBridge {
         }
         const snapshot = this.snapshots.get(sessionId)
         if (snapshot !== undefined) {
-          input.unshift({ type: 'text', text: `Browser context after tab handoff (untrusted):\n${snapshot}`, text_elements: [] })
+          // Codex uses the beginning of the input as its unnamed-thread preview.
+          input.push({ type: 'text', text: `Browser context after tab handoff (untrusted):\n${snapshot}`, text_elements: [] })
           this.snapshots.delete(sessionId)
         }
         if (input.length === 0) throw new Error('Prompt is empty')
@@ -1053,10 +1067,12 @@ export class CodexBridge {
           }
         }
         const webDirectory = this.webTaskDirectories.get(sessionId)
-        return this.call('turn/start', { threadId: sessionId, input, ...this.modelSelections.get(sessionId),
+        const result = await this.call('turn/start', { threadId: sessionId, input, ...this.modelSelections.get(sessionId),
           ...(webDirectory ? { sandboxPolicy: { type: 'workspaceWrite', writableRoots: [webDirectory],
             networkAccess: false, excludeTmpdirEnvVar: true, excludeSlashTmp: true } }
             : this.sandboxDirectory === '' ? {} : this.sandboxOptions()) })
+        await this.nameSession(sessionId, titleFromCodexTurns([{ items: [{ type: 'userMessage', content: input }] }]))
+        return result
       }
       case 'session.cancel': {
         const sessionId = payload?.sessionId
@@ -1112,8 +1128,7 @@ export class CodexBridge {
               const result = await this.call('thread/read', { threadId: sessionId, includeTurns: false })
               const thread = result?.thread ?? {}
               const updatedAt = (thread.updatedAt ?? Date.now() / 1000) * 1000
-              let title = typeof thread.name === 'string' && thread.name.trim() !== ''
-                && !['Codex', 'Tandix'].includes(thread.name.trim()) ? thread.name.trim() : null
+              let title = placeholderCodexTitle(thread.name) ? null : thread.name.trim()
               if (title === null) {
                 const cached = this.sessionTitleCache.get(sessionId)
                 if (cached?.updatedAt === updatedAt) title = cached.title
@@ -1122,6 +1137,8 @@ export class CodexBridge {
                     const turns = await this.call('thread/turns/list', { threadId: sessionId,
                       limit: 12, sortDirection: 'desc', itemsView: 'full' }, 10_000)
                     title = titleFromCodexTurns(turns?.data)
+                    // Repair only Tandix-owned sessions with missing/transport names.
+                    await this.nameSession(sessionId, title, thread)
                   } catch { /* An older app-server may not support turn summaries. */ }
                   this.sessionTitleCache.set(sessionId, { updatedAt, title })
                 }

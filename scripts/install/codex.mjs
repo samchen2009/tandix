@@ -19,6 +19,8 @@ const SCRIPTS = [
   'runtime/codex-bridge.mjs', 'runtime/codex-mcp.mjs',
   'runtime/workbuddy-bridge.mjs',
   'runtime/acp-bridge.mjs',
+  'runtime/acp-agents.mjs',
+  'runtime/extra-acp-bridge.mjs',
   'runtime/artifacts.mjs',
   'runtime/agent-configuration.mjs',
   'runtime/cursor-bridge.mjs',

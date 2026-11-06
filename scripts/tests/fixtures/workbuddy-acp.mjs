@@ -2,8 +2,11 @@
 // ACP test double: no model, credentials, or external services.
 import { createInterface } from 'node:readline'
 import { createRequire } from 'node:module'
-const cursor = process.argv[2] === 'acp'
-if (!cursor && process.argv[2] !== '--acp') throw new Error('Incorrect ACP launch arguments')
+import { ACP_AGENTS } from '../../runtime/acp-agents.mjs'
+const additional = ACP_AGENTS[process.env.TANDIX_TEST_ACP_BACKEND]
+const cursor = !additional && process.argv[2] === 'acp'
+if (additional ? JSON.stringify(process.argv.slice(2)) !== JSON.stringify(additional.args)
+  : !cursor && process.argv[2] !== '--acp') throw new Error('Incorrect ACP launch arguments')
 let authenticated = !cursor
 const sessions = new Map()
 const send = value => process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', ...value })}\n`)

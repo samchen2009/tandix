@@ -20,8 +20,8 @@ const errorText = error => error instanceof Error ? error.message : String(error
 
 
 export class AcpBridge {
-  constructor({ agentPath, nodePath = process.execPath, runtimePath, workspace, hostDir, extensionId, sandboxDirectory = '', backend, label, agentArgs, authMethod = null }) {
-    Object.assign(this, { agentPath, nodePath, runtimePath, workspace, hostDir, extensionId, sandboxDirectory, backend, label, agentArgs, authMethod })
+  constructor({ agentPath, nodePath = process.execPath, runtimePath, workspace, hostDir, extensionId, sandboxDirectory = '', backend, label, agentArgs, authMethod = null, sessionWorkspaces = false }) {
+    Object.assign(this, { agentPath, nodePath, runtimePath, workspace, hostDir, extensionId, sandboxDirectory, backend, label, agentArgs, authMethod, sessionWorkspaces })
     this.pending = new Map(); this.permissions = new Map(); this.toolPending = new Map()
     this.sessions = new Map(); this.routes = new Map(); this.loaded = new Set()
     this.configurationChanges = new Set(); this.turns = new Set(); this.snapshots = new Map(); this.streams = new Map(); this.loading = new Set()
@@ -58,7 +58,7 @@ export class AcpBridge {
     this.proc.stdin.on('error', error => this.fail(error))
     createInterface({ input: this.proc.stdout }).on('line', line => this.receive(line))
     const initialized = await this.call('initialize', { protocolVersion: 1,
-      clientInfo: { name: 'tandix', version: '0.2.6' },
+      clientInfo: { name: 'tandix', version: '0.2.7' },
       clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false } }, 15_000)
     if (initialized?.protocolVersion !== 1) throw new Error(`${this.label} agent does not support ACP protocol version 1.`)
     this.agentCapabilities = initialized.agentCapabilities ?? {}
@@ -108,6 +108,12 @@ export class AcpBridge {
     writeFileSync(this.sessionFile, JSON.stringify([...this.sessions.values()].map(session => ({ ...session, running: false }))), { mode: 0o600 })
   }
   session(id) { const session = this.sessions.get(id); if (!session) throw new Error(`Unknown Tandix ${this.label} session`); return session }
+  sessionCwd(session = {}) {
+    const base = this.sandboxDirectory || join(this.workspace, 'workspace')
+    if (!session.workspaceId) return base
+    if (!/^[a-f0-9-]{36}$/u.test(session.workspaceId)) throw new Error('Invalid ACP session workspace')
+    return join(base, `${this.backend}-tasks`, session.workspaceId)
+  }
   send(message) { if (this.browser?.readyState === 1) this.browser.send(JSON.stringify(message)) }
   event(id, type, data) {
     const session = this.session(id)
@@ -197,7 +203,7 @@ export class AcpBridge {
     for (const [token, sessionId] of this.routes) if (sessionId === id) this.routes.delete(token)
     const token = randomBytes(16).toString('hex'); this.routes.set(token, id); this.loading.add(id)
     try {
-      const result = await this.call('session/load', { sessionId: id, cwd: this.sandboxDirectory || join(this.workspace, 'workspace'), mcpServers: this.mcpConfig(token) })
+      const result = await this.call('session/load', { sessionId: id, cwd: this.sessionCwd(this.session(id)), mcpServers: this.mcpConfig(token) })
       this.session(id).configuration = acpConfiguration(this.backend, id, result)
       this.session(id).controls = acpControls(this.backend, result)
       this.loaded.add(id)
@@ -209,7 +215,7 @@ export class AcpBridge {
     switch (method) {
       case 'session.artifact': {
         const session = this.session(payload?.sessionId)
-        const cwd = this.sandboxDirectory || join(this.workspace, 'workspace')
+        const cwd = this.sessionCwd(session)
         return readSessionArtifact({ path: payload.path, events: session.events, cwd })
       }
       case 'agent.models': {
@@ -232,7 +238,8 @@ export class AcpBridge {
         let changed = false
         try {
           const result = await this.call(control.method, control.method === 'session/set_mode'
-            ? { sessionId: id, modeId: model.id } : { sessionId: id, configId: control.id, value: model.id })
+            ? { sessionId: id, modeId: model.id } : control.method === 'session/set_model'
+              ? { sessionId: id, modelId: model.id } : { sessionId: id, configId: control.id, value: model.id })
           changed = true
           if (Array.isArray(result?.configOptions)) {
             session.configuration = acpConfiguration(this.backend, id, result)
@@ -277,10 +284,15 @@ export class AcpBridge {
       }
       case 'session.create': {
         const token = randomBytes(16).toString('hex')
-        const result = await this.call('session/new', { cwd: this.sandboxDirectory || join(this.workspace, 'workspace'), mcpServers: this.mcpConfig(token) })
+        // OpenCode scopes client MCP servers to a directory. Separate task
+        // directories prevent one chat from replacing another chat's tool route.
+        const location = this.sessionWorkspaces ? { workspaceId: randomUUID() } : {}
+        const cwd = this.sessionCwd(location)
+        mkdirSync(cwd, { recursive: true })
+        const result = await this.call('session/new', { cwd, mcpServers: this.mcpConfig(token) })
         if (typeof result?.sessionId !== 'string') throw new Error(`${this.label} did not return an ACP session ID`)
         const id = result.sessionId
-        this.sessions.set(id, { id, events: [], title: null, updatedAt: Date.now(), configuration: acpConfiguration(this.backend, id, result), controls: acpControls(this.backend, result) }); this.routes.set(token, id); this.loaded.add(id); this.persist()
+        this.sessions.set(id, { id, ...location, events: [], title: null, updatedAt: Date.now(), configuration: acpConfiguration(this.backend, id, result), controls: acpControls(this.backend, result) }); this.routes.set(token, id); this.loaded.add(id); this.persist()
         return { sessionId: id }
       }
       case 'session.prompt': {

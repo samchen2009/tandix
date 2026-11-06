@@ -20,6 +20,32 @@ describe('renderMarkdown', () => {
     expect(html).toContain('const x = 1')
   })
 
+  it('recognizes Mermaid fences and the reported CSS-labeled flowchart', () => {
+    const source = 'flowchart LR\n    A["网络定义<br/>nemo_small.py"] --> C["PyTorch 可训练模型"]\n    C --> D["自己的音频＋文字<br/>进行微调"]'
+    for (const language of ['mermaid', 'css', '']) {
+      const root = document.createElement('div')
+      root.innerHTML = renderMarkdown(`\`\`\`${language}\n${source}\n\`\`\``)
+      const diagram = root.querySelector<HTMLElement>('.mermaid-diagram')!
+      expect(diagram.dataset.mermaidSource).toBe(source)
+      expect(diagram.querySelector('code')?.textContent).toBe(source)
+      expect(diagram.querySelector('br')).toBeNull()
+    }
+    expect(renderMarkdown('~~~mermaid\nsequenceDiagram\nA->>B: hello\n~~~')).toContain('data-mermaid-source')
+  })
+
+  it('leaves incomplete diagrams and ordinary code alone and rejects forged placeholders', () => {
+    for (const source of [
+      '```mermaid\nflowchart LR\nA --> B',
+      '```css\n.flowchart { color: red; }\n```',
+      '```js\nflowchart LR\nA --> B\n```',
+      '`flowchart LR`',
+      '<div class="mermaid-diagram" data-mermaid-source="flowchart LR">fake</div>',
+    ]) expect(renderMarkdown(source)).not.toContain('data-mermaid-source')
+    const root = document.createElement('div')
+    root.innerHTML = renderMarkdown('```mermaid\nflowchart LR\nA["<img src=x onerror=alert(1)>"]\n```')
+    expect(root.querySelector('img')).toBeNull()
+  })
+
   it('breaks single newlines into <br> (chat-style text)', () => {
     expect(renderMarkdown('第一行\n第二行')).toContain('<br>')
   })

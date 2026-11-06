@@ -10,6 +10,7 @@
 import { getUiLocale, type UiLocale } from '../i18n.ts'
 import { imageRefsFromBlocks, type ImageAttachmentRef } from './attachments.ts'
 import { PANEL_COPY } from './strings.ts'
+import { AGENT_CHOICES, type AgentBackend } from '../agent-backend.ts'
 
 /** One rendered conversation row. */
 export interface Row {
@@ -82,7 +83,7 @@ export interface ResolvedQuestion {
 export interface AgentApproval {
   rpcId: string
   sessionId: string
-  backend: 'dsh' | 'codex' | 'cursor' | 'workbuddy'
+  backend: AgentBackend
   kind: 'command' | 'file-change' | 'permissions'
   toolName: string
   reason: string
@@ -94,8 +95,8 @@ export interface AgentApproval {
 export function agentApprovalFromFrame(frame: EventFrameView): AgentApproval | null {
   if (frame.method !== 'agent-approval/requested' || !isRecord(frame.payload)
     || typeof frame.rpcId !== 'string' || typeof frame.payload.sessionId !== 'string'
-    || (frame.payload.backend !== 'dsh' && frame.payload.backend !== 'codex' && frame.payload.backend !== 'workbuddy' && frame.payload.backend !== 'cursor')) return null
-  const payload = frame.payload as Record<string, unknown> & { sessionId: string; backend: 'dsh' | 'codex' | 'cursor' | 'workbuddy' }
+    || frame.payload.backend === 'auto' || !AGENT_CHOICES.includes(frame.payload.backend as AgentBackend)) return null
+  const payload = frame.payload as Record<string, unknown> & { sessionId: string; backend: AgentBackend }
   return {
     rpcId: frame.rpcId, sessionId: payload.sessionId, backend: payload.backend,
     kind: payload.kind === 'file-change' || payload.kind === 'permissions' ? payload.kind : 'command',

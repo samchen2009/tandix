@@ -7,10 +7,15 @@ import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { findWorkBuddyAgent, WorkBuddyBridge } from '../runtime/workbuddy-bridge.mjs'
 import { CursorBridge, findCursorAgent } from '../runtime/cursor-bridge.mjs'
+import { ACP_AGENTS, findAcpAgent } from '../runtime/acp-agents.mjs'
+import { ExtraAcpBridge } from '../runtime/extra-acp-bridge.mjs'
 
 for (const [backend, Bridge, findAgent, envKey, executable] of [
   ['workbuddy', WorkBuddyBridge, findWorkBuddyAgent, 'WORKBUDDY_AGENT_PATH', 'codebuddy'],
   ['cursor', CursorBridge, findCursorAgent, 'CURSOR_AGENT_PATH', 'cursor-agent'],
+  ...Object.entries(ACP_AGENTS).map(([backend, agent]) => [backend,
+    class extends ExtraAcpBridge { constructor(options) { super({ ...options, backend }) } },
+    options => findAcpAgent(backend, options), agent.envKey, agent.command]),
 ]) describe(backend, () => {
 
 function bridge() {
@@ -150,7 +155,12 @@ test('local ACP process reaches the browser through the real MCP transport and r
   let b; let socket
   try {
     await chmod(fixture, 0o700)
-    b = await Bridge.open({ agentPath: fixture, workspace, runtimePath, hostDir: root, extensionId: 'a'.repeat(32) })
+    let agentPath = fixture
+    if (Object.hasOwn(ACP_AGENTS, backend)) {
+      agentPath = join(root, 'agent.mjs')
+      await writeFile(agentPath, `process.env.TANDIX_TEST_ACP_BACKEND = ${JSON.stringify(backend)}; await import(${JSON.stringify(new URL('./fixtures/workbuddy-acp.mjs', import.meta.url).href)});`)
+    }
+    b = await Bridge.open({ agentPath, workspace, runtimePath, hostDir: root, extensionId: 'a'.repeat(32) })
     const config = await fetch(`http://127.0.0.1:${b.port}/ext/bridge-config`).then(response => response.json())
     assert.equal(config.backend, backend)
     assert.equal((await fetch(`http://127.0.0.1:${b.port}/tool/${'0'.repeat(32)}`, { method: 'POST' })).status, 403)

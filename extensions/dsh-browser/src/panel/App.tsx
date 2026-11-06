@@ -8,7 +8,7 @@
  */
 
 import { memo, useEffect, useRef, useState } from 'react'
-import { AGENT_CHOICES, agentLabel, agentPreference, type AgentBackend } from '../agent-backend.ts'
+import { AGENT_CHOICES, agentLabel, agentPreference, extraAgentSetup, supportsTaskGoals, type AgentBackend } from '../agent-backend.ts'
 import { BRIDGE_SESSION_PURGE_METHOD, DEFAULT_SNAPSHOT_MAX_CHARS } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { BridgeCaps } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
 import type { ServerFrame } from '@yuxianglin/dsh-bridge-browser/src/protocol.ts'
@@ -2751,6 +2751,10 @@ export function App(): React.JSX.Element {
           <p>{locale === 'zh'
             ? 'WorkBuddy 通过本机 ACP Agent 连接。请配置兼容的 Agent 运行时并完成其登录；此连接不会自动复用 WorkBuddy 桌面端账号。'
             : 'WorkBuddy connects through a local ACP agent. Configure and sign in to a compatible runtime; this connection does not automatically reuse the WorkBuddy desktop login.'}</p>
+        </section> : extraAgentSetup(backend) ? <section className="relay-config" aria-label={agentLabel(backend, locale)}>
+          <p>{locale === 'zh'
+            ? `${agentLabel(backend, locale)} 通过已安装的本机 CLI 连接。请先在终端运行 ${extraAgentSetup(backend)!.login} 完成登录或模型配置，再重新连接。CLI 需支持 ${extraAgentSetup(backend)!.launch}。`
+            : `${agentLabel(backend, locale)} connects through its installed local CLI. Run ${extraAgentSetup(backend)!.login} in a terminal to complete login or model setup, then reconnect. The CLI must support ${extraAgentSetup(backend)!.launch}.`}</p>
         </section> : <section className="relay-config" aria-labelledby="relay-title">
           <div className="relay-heading">
             <span id="relay-title">
@@ -2917,7 +2921,7 @@ export function App(): React.JSX.Element {
             <div className="utility-menu" role="menu" onKeyDown={event => { if (event.key === 'Escape') setShowMore(false) }}>
               <button type="button" role="menuitem" className="settings-trigger" onClick={() => { setShowMore(false); setShowSettings(true) }}><SettingsIcon />{copy.app.settings}</button>
               <button type="button" role="menuitem" className="text-size-trigger" onClick={() => { setShowMore(false); setShowTextSize(value => !value) }}><TextSizeIcon />{copy.textSize.open}</button>
-              {backend !== 'cursor' && backend !== 'workbuddy' && <button type="button" role="menuitem" onClick={() => { setShowMore(false); setWorkspaceMode('chat'); setGoalFormOpen(value => !value) }}>{locale === 'zh' ? '设定任务目标' : 'Set task goal'}</button>}
+              {supportsTaskGoals(backend) && <button type="button" role="menuitem" onClick={() => { setShowMore(false); setWorkspaceMode('chat'); setGoalFormOpen(value => !value) }}>{locale === 'zh' ? '设定任务目标' : 'Set task goal'}</button>}
               <button type="button" role="menuitem" className="skill-extract-button" disabled={!sessionReady || busy || working || skillExtracting}
                 onClick={() => { setShowMore(false); void extractSkillFromRecentActions() }}>{skillExtracting ? (locale === 'zh' ? '生成中…' : 'Creating…') : (locale === 'zh' ? '从操作生成技能' : 'Create skill from actions')}</button>
             </div></>}
@@ -2932,7 +2936,7 @@ export function App(): React.JSX.Element {
       )}
       {workspaceMode === 'chat' && <>
       <TabAffinityBanner state={tabAffinity} copy={copy} onDecision={decideTabAffinity} />
-      {backend !== 'workbuddy' && backend !== 'cursor' && (goal !== null || goalFormOpen) && <section className="task-goal" aria-label={locale === 'zh' ? '任务目标' : 'Task goal'}>
+      {supportsTaskGoals(backend) && (goal !== null || goalFormOpen) && <section className="task-goal" aria-label={locale === 'zh' ? '任务目标' : 'Task goal'}>
         {goal === null ? <>
           <div className="task-goal-heading">
             <div><strong>{locale === 'zh' ? '让 Agent 持续完成目标' : 'Give the agent a goal'}</strong>
@@ -3243,7 +3247,7 @@ export function App(): React.JSX.Element {
                       || (backend === 'dsh' && draftImages.length >= imageLimits.maxImagesPerMessage)}
                       title={imageLimits === null ? copy.app.imageUnavailable : copy.app.addImages}
                       onClick={() => { setShowAttachments(false); fileInputRef.current?.click() }}><AttachmentIcon />{copy.app.addImages}</button>
-                    {backend !== 'cursor' && backend !== 'workbuddy' && <button type="button" role="menuitem" onClick={() => { setShowAttachments(false); setGoalFormOpen(true) }}>{locale === 'zh' ? '设定任务目标' : 'Set task goal'}</button>}
+                    {supportsTaskGoals(backend) && <button type="button" role="menuitem" onClick={() => { setShowAttachments(false); setGoalFormOpen(true) }}>{locale === 'zh' ? '设定任务目标' : 'Set task goal'}</button>}
                     <button type="button" role="menuitem" className="skill-extract-button" disabled={!sessionReady || busy || working || skillExtracting}
                       onClick={() => { setShowAttachments(false); void extractSkillFromRecentActions() }}>{locale === 'zh' ? '从操作生成技能' : 'Create skill from actions'}</button>
                   </div></>}

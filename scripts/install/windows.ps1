@@ -3,8 +3,8 @@ param(
   [switch]$Help,
   [string]$SourceRoot,
   [string]$InstallHome,
-  [ValidateSet('codex', 'cursor', 'workbuddy', 'dsh')][string[]]$Agents = @('codex', 'cursor', 'workbuddy', 'dsh'),
-  [ValidateSet('auto', 'codex', 'cursor', 'workbuddy', 'dsh')][string]$Agent = 'auto',
+  [ValidateSet('codex', 'cursor', 'workbuddy', 'kimi', 'qwen', 'opencode', 'gemini', 'dsh')][string[]]$Agents = @('codex', 'cursor', 'workbuddy', 'dsh'),
+  [ValidateSet('auto', 'codex', 'cursor', 'workbuddy', 'kimi', 'qwen', 'opencode', 'gemini', 'dsh')][string]$Agent = 'auto',
   [string]$ExtensionId,
   [switch]$NonInteractive,
   [switch]$FunctionsOnly
@@ -223,7 +223,7 @@ function Invoke-TandixSetup {
     }
     Install-Source $root $node $temporaryDirectory
     $root = $script:ReadySourceRoot
-    $priority = @('codex', 'cursor', 'workbuddy', 'dsh')
+    $priority = @('codex', 'cursor', 'workbuddy', 'kimi', 'qwen', 'opencode', 'gemini', 'dsh')
     $requested = @($priority | Where-Object { $Agents -contains $_ -or $Agent -eq $_ })
     $installFailures = @{}
     if ($requested -contains 'workbuddy') {
@@ -252,6 +252,21 @@ function Invoke-TandixSetup {
         $env:CURSOR_AGENT_PATH = $cursor
       } catch { $installFailures['cursor'] = $_.Exception.Message; Write-Host "ATTENTION: Cursor discovery failed: $_" }
     }
+    $extraLaunchers = @{}
+    foreach ($backend in @('kimi', 'qwen', 'opencode', 'gemini')) {
+      try {
+        $discovery = Join-Path $root 'scripts\runtime\acp-agents.mjs'
+        $agentPath = & $node --input-type=module -e "import {pathToFileURL} from 'node:url';const m=await import(pathToFileURL(process.argv[1]));process.stdout.write(m.findAcpAgent(process.argv[2])||'');" $discovery $backend
+        if ($LASTEXITCODE -ne 0 -or -not $agentPath) {
+          if ($requested -contains $backend) { throw "$backend CLI was not found. Install and sign in to its official CLI, then rerun setup." }
+          continue
+        }
+        if ($Agent -eq 'auto' -and $requested -notcontains $backend) { $requested += $backend }
+        $extraLaunchers[$backend] = $agentPath
+        [Environment]::SetEnvironmentVariable(($backend.ToUpperInvariant() + '_AGENT_PATH'), $agentPath, 'Process')
+      } catch { $installFailures[$backend] = $_.Exception.Message; Write-Host "ATTENTION: $backend discovery failed: $_" }
+    }
+    $requested = @($priority | Where-Object { $requested -contains $_ })
     Register-Companion $root $node
     Write-Host '[6/7] Checking the actual native messaging and WebSocket connections...'
     $selectedAgent = if ($Agent -eq 'auto') { $null } else { $Agent }
@@ -262,10 +277,10 @@ function Invoke-TandixSetup {
       } else { $result = Test-AgentConnection $backend $root $node $backendReport }
       if ($result.status -ne 'ready' -and $backend -ne 'dsh' -and -not $NonInteractive -and -not $installFailures.ContainsKey($backend) -and
           ($Agent -ne 'auto' -or -not $selectedAgent)) {
-          $launcher = if ($backend -eq 'workbuddy') { $env:WORKBUDDY_AGENT_PATH } elseif ($backend -eq 'cursor') { $env:CURSOR_AGENT_PATH } else { $env:CODEX_CLI_PATH }
+          $launcher = if ($extraLaunchers.ContainsKey($backend)) { $extraLaunchers[$backend] } elseif ($backend -eq 'workbuddy') { $env:WORKBUDDY_AGENT_PATH } elseif ($backend -eq 'cursor') { $env:CURSOR_AGENT_PATH } else { $env:CODEX_CLI_PATH }
           Write-Host 'Complete sign-in in the CLI, then type /exit to return to setup.'
           $previous = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-          try { if ($launcher -match '\.(mjs|cjs|js)$') { & $node $launcher } else { & $launcher } } finally { $ErrorActionPreference = $previous }
+          try { if ($backend -eq 'opencode') { & $launcher auth login } elseif ($launcher -match '\.(mjs|cjs|js)$') { & $node $launcher } else { & $launcher } } finally { $ErrorActionPreference = $previous }
           $result = Test-AgentConnection $backend $root $node $backendReport
       }
       $results += $result
@@ -300,8 +315,8 @@ function Invoke-TandixSetup {
 
 if ($FunctionsOnly) { return }
 if ($Help) {
-  Write-Host 'Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install/windows.ps1 [-Agent auto|codex|cursor|workbuddy|dsh]'
-  Write-Host 'Default priority: Codex > Cursor > WorkBuddy > dsh. Cursor CLI must already be installed.'
+  Write-Host 'Usage: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install/windows.ps1 [-Agent auto|codex|cursor|workbuddy|kimi|qwen|opencode|gemini|dsh]'
+  Write-Host 'Default priority: Codex > Cursor > WorkBuddy > Kimi > Qwen > OpenCode > Gemini > dsh. Cursor and additional ACP CLIs must already be installed.'
   Write-Host 'Automatically prepares Node, private pnpm, Chrome, source, all three agent runtimes and the native companion.'
   Write-Host 'Chrome first-time extension loading and account sign-in require your interaction.'
   Write-Host 'Use -NonInteractive -ExtensionId <id> -Agents dsh for an unattended dsh transport check.'

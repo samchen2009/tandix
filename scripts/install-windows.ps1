@@ -3,8 +3,8 @@ param(
   [switch]$Help,
   [string]$SourceRoot,
   [string]$InstallHome,
-  [ValidateSet('codex', 'cursor', 'workbuddy', 'dsh')][string[]]$Agents = @('codex', 'cursor', 'workbuddy', 'dsh'),
-  [ValidateSet('auto', 'codex', 'cursor', 'workbuddy', 'dsh')][string]$Agent = 'auto',
+  [ValidateSet('codex', 'cursor', 'workbuddy', 'kimi', 'qwen', 'opencode', 'gemini', 'dsh')][string[]]$Agents = @('codex', 'cursor', 'workbuddy', 'dsh'),
+  [ValidateSet('auto', 'codex', 'cursor', 'workbuddy', 'kimi', 'qwen', 'opencode', 'gemini', 'dsh')][string]$Agent = 'auto',
   [string]$ExtensionId,
   [switch]$NonInteractive,
   [switch]$FunctionsOnly

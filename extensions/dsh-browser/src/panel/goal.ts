@@ -18,7 +18,7 @@ export interface GoalDraft {
   budgetLimit: number
 }
 
-export type GoalBackend = 'codex' | 'cursor' | 'dsh' | 'workbuddy'
+export type GoalBackend = import('../agent-backend.ts').AgentBackend
 
 export function buildGoalDraftPrompt(task: string, backend: GoalBackend): string {
   const budget = backend === 'codex'

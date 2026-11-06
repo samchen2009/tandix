@@ -34,9 +34,34 @@ const MARKDOWN_SANITIZE_OPTIONS = {
  * @returns sanitized HTML fragment
  */
 export function renderMarkdown(source: string, { artifactLinks = false } = {}): string {
-  const mathNodes = new Map<string, HTMLElement>()
+  const generatedNodes = new Map<string, HTMLElement>()
   const nonce = crypto.randomUUID()
+  const placeholder = (node: HTMLElement): string => {
+    const key = `${nonce}:${generatedNodes.size}`
+    generatedNodes.set(key, node)
+    return `<code>${key}</code>`
+  }
   const marked = new Marked({ gfm: true, breaks: true })
+  marked.use({ renderer: {
+    code({ text, lang, raw }) {
+      const language = lang?.trim().split(/\s/)[0].toLowerCase() ?? ''
+      // Models sometimes label flowcharts as CSS. Only infer diagrams from
+      // unmistakable headers in unlabeled/CSS fences; leave real code alone.
+      const flowchart = /^(?:\s*%%[^\n]*\n)*\s*(?:flowchart|graph)\s+(?:TB|TD|BT|RL|LR)\b/.test(text)
+      if (language !== 'mermaid' && !((language === '' || language === 'css') && flowchart)) return false
+      const fence = /^\s*(`{3,}|~{3,})/.exec(raw)?.[1]
+      if (!fence || !new RegExp(`\\n[ \\t]*${fence[0]}{${fence.length},}[ \\t]*$`).test(raw.trimEnd())) return false
+      const node = document.createElement('div')
+      node.className = 'mermaid-diagram'
+      node.dataset.mermaidSource = text
+      const pre = document.createElement('pre')
+      const code = document.createElement('code')
+      code.textContent = text
+      pre.append(code)
+      node.append(pre)
+      return placeholder(node)
+    },
+  } })
   if (artifactLinks) marked.use({ renderer: {
     link({ href, tokens }) {
       if (!isLocalArtifactLink(href)) return false
@@ -44,9 +69,7 @@ export function renderMarkdown(source: string, { artifactLinks = false } = {}): 
       node.href = '#'
       node.dataset.artifactPath = href
       node.innerHTML = DOMPurify.sanitize(this.parser.parseInline(tokens), MARKDOWN_SANITIZE_OPTIONS)
-      const key = `${nonce}:${mathNodes.size}`
-      mathNodes.set(key, node)
-      return `<code>${key}</code>`
+      return placeholder(node)
     },
   } })
   marked.use({ extensions: mathExtensions((text, displayMode) => {
@@ -69,18 +92,16 @@ export function renderMarkdown(source: string, { artifactLinks = false } = {}): 
       node.classList.add('math-fallback')
       node.textContent = text
     }
-    const key = `${nonce}:${mathNodes.size}`
-    mathNodes.set(key, node)
     // Keep the Markdown allowlist strict. Only locally generated, unguessable
     // placeholders are replaced with separately sanitized KaTeX markup.
-    return `<code>${key}</code>`
+    return placeholder(node)
   }) })
   const html = marked.parse(source ?? '', { async: false }) as string
   const template = document.createElement('template')
   template.innerHTML = DOMPurify.sanitize(html, MARKDOWN_SANITIZE_OPTIONS)
   for (const code of template.content.querySelectorAll('code')) {
-    const math = mathNodes.get(code.textContent ?? '')
-    if (math) code.replaceWith(math)
+    const generated = generatedNodes.get(code.textContent ?? '')
+    if (generated) code.replaceWith(generated)
   }
   for (const link of template.content.querySelectorAll('a[href]')) {
     const href = link.getAttribute('href') ?? ''

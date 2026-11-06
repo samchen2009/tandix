@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import type { PanelApi } from './api.ts'
 import { renderMarkdown } from './markdown.ts'
 import { saveArtifact } from './artifacts.ts'
+import { renderMermaidDiagrams } from './mermaid.ts'
 
 export const MessageMarkdown = memo(function MessageMarkdown({ text, assistant, api, sessionId, zh }: {
   text: string
@@ -14,14 +15,23 @@ export const MessageMarkdown = memo(function MessageMarkdown({ text, assistant, 
   const [error, setError] = useState('')
   const pending = useRef(false)
   const generation = useRef(0)
+  const markdownRoot = useRef<HTMLDivElement>(null)
   const html = useMemo(() => renderMarkdown(text, { artifactLinks: assistant }), [text, assistant])
+  useEffect(() => {
+    let current = true
+    // Coalesce streamed updates and avoid rendering every incoming token.
+    const timer = window.setTimeout(() => {
+      if (markdownRoot.current) void renderMermaidDiagrams(markdownRoot.current, () => current, zh)
+    }, 180)
+    return () => { current = false; window.clearTimeout(timer) }
+  }, [html, sessionId, zh])
   useEffect(() => {
     pending.current = false
     setStatus(''); setError('')
     return () => { generation.current++ }
   }, [sessionId])
   return <>
-    <div className="md" dangerouslySetInnerHTML={{ __html: html }}
+    <div className="md" ref={markdownRoot} dangerouslySetInnerHTML={{ __html: html }}
       onClick={event => {
         const link = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>('a[data-artifact-path]') : null
         if (!assistant || !link || !event.currentTarget.contains(link)) return
